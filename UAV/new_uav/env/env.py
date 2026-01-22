@@ -8,6 +8,8 @@ import random
 
 import torch
 
+from config import EnvConfig
+
 seed = 2025
 deterministic = True
 
@@ -36,9 +38,8 @@ class Env:
     Scenario 2 전용 Env 클래스
     RSU, UAV, MBS 로 전체 시스템이 구성되며 다음과 같은 기능으로 동작을 수행
     """
-    def __init__(self):
+    def __init__(self, config: EnvConfig):
+        self.config = config
+        
         self.uav_battery_queue = []
         self.num_rsu = 10
-        self.num_user = 
-
-    def 
