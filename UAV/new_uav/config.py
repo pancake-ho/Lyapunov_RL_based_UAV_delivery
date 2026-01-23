@@ -15,6 +15,8 @@ class EnvConfig:
     num_user: int = 10
     num_rsu: int = 10
     num_uav: int = 10
+    uav_user_cap: int = 2 # UAV 1대당 동시 서비스 가능 사용자 수
+    slow_T: int = 5
     N0: int = 3
 
     # 비디오 및 캐싱
@@ -39,3 +41,8 @@ class EnvConfig:
     rsu_channel: ChannelConfig = field(default_factory=lambda: ChannelConfig(distance=0.6))
     uav_channel: ChannelConfig = field(default_factory=lambda: ChannelConfig(distance=0.4))
     
+    # 배터리 모델
+    E_max: float = 100.0
+    E_min: float = 1.0
+    e_charge: float = 1.0 # 충전
+    e_utility: float = 1.0 # 소모
