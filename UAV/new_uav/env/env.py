@@ -48,7 +48,6 @@ class Env:
         self.num_rsu = self.cfg.num_rsu
         self.num_user = self.cfg.num_user
         self.num_uav = self.cfg.num_uav
-        self.uav_user_cap = self.cfg.uav_user_cap
         self.slow_T = self.cfg.slow_T
         self.N0 = self.cfg.N0
 
@@ -58,9 +57,6 @@ class Env:
         self.layer = self.cfg.layer
         self.chunk = self.cfg.chunk
         self.rsu_capacity = self.cfg.rsu_capacity
-        self.mbs_capacity = self.cfg.mbs_capacity
-        self.mbs_delay = self.cfg.mbs_delay
-        self.zipf_alpha = self.cfg.zipf_alpha
 
         # 사용자 이동 패턴 설정
         self.spawn_base = self.cfg.spawn_base
@@ -77,7 +73,7 @@ class Env:
         # 배터리 모델 
         self.E_max = self.cfg.E_max
         self.E_min = self.cfg.E_min
-        self.e_utility = self.cfg.e_utility
+        self.e_consume = self.cfg.e_utility
         self.e_charge = self.cfg.e_charge
         self.V = 1.0
 
@@ -117,6 +113,7 @@ class Env:
             "mu": self.mu.copy(),
         }
     
+    
     def step(self, action: Dict[str, np.ndarray]):
         """
         환경의 1 time step 진행 함수 (Fast Timescale 기준)
@@ -136,3 +133,18 @@ class Env:
         
         # Fast Timescale
         # 매 time-step 마다, l_n (chunk) 및 k_n (layer) 를 전송함
+        l_n = action.get('chunk', np.zeros(self.num_user))
+        k_n = action.get('layer', np.ones(self.num_user))
+
+        # 배터리 Queue
+        # E(t+1) = max(E_t - e_u, 0) + e_c
+        e_u = self.mu * self.e_consume
+        e_c = (1 - self.mu) * self.e_consume
+
+        self.E = np.clip(self.E - e_u + e_c, 0, self.E_max)
+
+        # 배터리 Virtual Queue
+        # Y(t+1) = min(Y(t) + e_u, E_max) - e_c
+        # E_max 를 초과해서는 안되고, 0 보다 작아질 수는 없음
+        prev_Y = self.Y.copy()
+        self.Y = np.maximum(np.minimum(self.Y + e_u, self.E_max) - e_c, 0)
