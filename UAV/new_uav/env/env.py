@@ -11,6 +11,7 @@ import torch
 
 from config import EnvConfig
 from channel import ChannelModel
+from battery import UAVBattery
 
 seed = 2025
 deterministic = True
@@ -70,14 +71,48 @@ class Env:
         self.rsu_channel = self.cfg.rsu_channel
         self.uav_channel = self.cfg.uav_channel
 
-        # 배터리 모델 
+        # 배터리 모델
         self.E_max = self.cfg.E_max
         self.E_min = self.cfg.E_min
-        self.e_consume = self.cfg.e_utility
-        self.e_charge = self.cfg.e_charge
-        self.V = 1.0
+        self.E = np.full(self.num_uav, self.E_max, dtype=np.float32)
+        self.Y = np.zeros(self.num_uav, dtype=np.float32)
 
+        # 라운드 단위 관리
+        self.round_slot = 0
+        self.round_start_E = self.E.copy()
+
+        # UAV 상태
+        self.mu = np.zeros(self.num_uav, dtype=np.int32)
+        self.outage = np.zeros(self.num_uav, dtype=np.int32)
+
+        # charging/power 관련 상태
+        self.charging_state = np.zeros(self.num_uav, dtype=np.int32)
+        self.tx_power = np.zeros(self.num_uav, dtype=np.float32)
+        self.charge_counters = np.zeros(self.num_uav, dtype=np.int32)
+
+        # 충전소
+        self.charge_rate = self.cfg.e_charge
+
+        # 스케줄링 상태
+        self.scheduled_users = np.zeros((self.num_uav, self.num_user), dtype=np.int32)
+
+        self.t = 0
         self.reset()
+    
+    @property
+    def E(self):
+        return np.array([b.soc for b in self.batteries], dtype=np.float32)
+    
+    @property
+    def Y(self):
+        return np.array([b.virtual_q for b in self.batteries], dtype=np.float32)
+    
+    def _start_new_round(self):
+        self.round_idx = self.t // self.slow_T
+        self.round_slot = 0
+        self.round_start_soc = np.array([b.soc for b in self.batteries], dtype=np.float32)
+        for b in self.batteries:
+            b.start_round(round_horizon=self.slow_T)
         
     def reset(self):
         """
@@ -96,9 +131,21 @@ class Env:
         self.E = np.full(self.num_uav, self.E_max, dtype=np.float32)
         self.Y = np.zeros(self.num_uav, dtype=np.float32)
 
+        # 충전 상태 초기화
+        # 아무 uav 도 충전 안하고 있다고 가정
+        self.charge_counters = np.zeros(self.cfg.num_uav, dtype=np.int32)
+
         # UAV 고용 상태 초기화
         # 초기 상태이므로, 미고용 상태를 가정함
         self.mu = np.zeros(self.num_uav, dtype=np.int32)
+
+        # 라운드 초기화
+        self.round_slot = 0
+        self.round_start_E = self.E.copy()
+        self.outage = np.zeros(self.num_uav, dtype=np.int32)
+        self.charge_state = np.zeros(self.num_uav, dtype=np.int32)
+        self.tx_power = np.zeros(self.num_uav, dtype=np.int32)
+        self.scheduled_users = np.zeros((self.num_uav, self.num_user), dtype=np.int32)
 
         return self._get_state()
 
@@ -111,8 +158,9 @@ class Env:
             "Y": self.Y.copy(),
             "E": self.E.copy(),
             "mu": self.mu.copy(),
+            "round_slot": np.array([self.round_slot], dtype=np.int32),
+            "outage": self.outage.copy(),
         }
-    
     
     def step(self, action: Dict[str, np.ndarray]):
         """
@@ -123,28 +171,47 @@ class Env:
         """
         # Slow Timescale
         # 매 T 주기마다, UAV 고용 여부를 갱신함
+        # 또한, User scheduling을 갱신함
         if self.t % self.slow_T == 0:
-            new_mu = action.get("hiring", np.zeros(self.num_uav))
+            new_mu = action.get("hiring", np.zeros(self.num_uav, dtype=np.int32))
+            scheduled_users = action.get("scheduled_users", np.zeros((self.num_uav, self.num_user), dtype=np.int32))
+        else:
+            new_mu = self.mu.copy()
+            scheduled_users = self.scheduled_users.copy()
 
-            # 배터리 큐 관련 제약
-            # 현 배터리가 최소로 지정한 배터리보다 작은 경우, mu = 0 을 강제함
-            available_hiring_mask = (self.E >= self.E_min).astype(np.int32)
-            self.mu = new_mu.astype(np.int32) * available_hiring_mask
-        
         # Fast Timescale
         # 매 time-step 마다, l_n (chunk) 및 k_n (layer) 를 전송함
-        l_n = action.get('chunk', np.zeros(self.num_user))
-        k_n = action.get('layer', np.ones(self.num_user))
+        # 또한, 전송 전력및 충전, served user 수도 선택함
+        served_users = action.get("served_users", np.zeros((self.num_uav, self.num_user), dtype=np.int32))
+        l_n = action.get("chunk", np.zeros(self.num_user, dtype=np.int32))
+        k_n = action.get("layer", np.ones(self.num_user, dtype=np.int32))
+        tx_power = action.get("tx_power", np.zeros(self.num_uav, dtype=np.float32))
+        charge = action.get("charge", np.zeros(self.num_uav, dtype=np.int32))
 
         # 배터리 Queue
         # E(t+1) = max(E_t - e_u, 0) + e_c
-        e_u = self.mu * self.e_consume
-        e_c = (1 - self.mu) * self.e_consume
-
-        self.E = np.clip(self.E - e_u + e_c, 0, self.E_max)
-
-        # 배터리 Virtual Queue
-        # Y(t+1) = min(Y(t) + e_u, E_max) - e_c
-        # E_max 를 초과해서는 안되고, 0 보다 작아질 수는 없음
+        prev_E = self.E.copy()
         prev_Y = self.Y.copy()
-        self.Y = np.maximum(np.minimum(self.Y + e_u, self.E_max) - e_c, 0)
+
+        for u in range(self.num_uav):
+            serving_flag = int(served_users[u].sum() > 0)
+
+            # UAV u가 실제로 전송한 총 chunk 수
+            delivery_chunks_u = float(np.sum(served_users[u] * l_n))
+
+            # hovering energy
+            hover_e = self.hover_e if serving_flag == 1 else 0.0
+
+            # communication energy
+            comm_e = tx_power if serving_flag == 1 else 0.0
+            total_consume = hover_e + comm_e
+
+            # charging energy
+            charge_e = self.charge_rate if charge[u] == 1 else 0.0
+
+            # actual battery queue update
+            self.E[u] = np.clip(self.E[u] - total_consume + charge_e, 0.0, self.E_max)
+
+            # round-based virtual queue update
+            allowed_use = max(self.round_start_E[u] - self.E_min, 0.0) / min(1, self.slow_T)
+            self.Y[u] = max(0.0, self.Y[u] + total_consume - charge_e - allowed_use)

@@ -10,6 +10,26 @@ class ChannelConfig:
     mu_db: int = 0
 
 @dataclass
+class BatteryConfig:
+    # SoC 기준: [0, e_max]
+    e_max: int = 100
+    e_init: int = 100
+    e_min: float = 1.0 # 하한
+
+    # hovering 에너지 모델
+    p_0: float = 100 # blade profile power
+    p_i: float = 100 # induced power
+
+    # 충전 모델
+    charging_rate: float = 4.0
+    eta_c: float = 1.0
+    allow_charge: bool = False
+
+    # time slot
+    slot_duration: float = 1.0
+
+
+@dataclass
 class EnvConfig:
     # 시스템 설정
     num_user: int = 10
@@ -40,9 +60,7 @@ class EnvConfig:
     # 채널
     rsu_channel: ChannelConfig = field(default_factory=lambda: ChannelConfig(distance=0.6))
     uav_channel: ChannelConfig = field(default_factory=lambda: ChannelConfig(distance=0.4))
-    
-    # 배터리 모델
-    E_max: float = 100.0
-    E_min: float = 1.0
-    e_charge: float = 1.0 # 충전
-    e_utility: float = 1.0 # 소모
+
+    # indicator
+    sch_indicator: float = 0.0
+    hir_indicator: float = 0.0
