@@ -4,11 +4,15 @@ from typing import List, Dict
 
 class RolloutBuffer:
     """
+    Trajectory 저장소 클래스
     """
     def __init__(self):
         self.reset()
     
     def reset(self) -> None:
+        """
+        PPO는 on-policy라 현재 policy로 모은 rollout만 저장하고, 업데이트 후 버퍼를 비움
+        """
         self.obs: List[np.ndarray] = []
         self.actions: List[np.ndarray] = []
         self.rewards: List[float] = []
@@ -27,6 +31,15 @@ class RolloutBuffer:
         value: float,
         log_prob: float,
     ) -> None:
+        """
+        매 step마다 저장하는 값은 다음과 같음
+        - obs: 상태
+        - action: 실제 실행할 action
+        - reward: 보상
+        - done: episode 종료 여부
+        - value: critic 가치 함수
+        - log_prob: old policy에서의 log prob
+        """
         self.obs.append(np.asarray(obs, dtype=np.float32))
         self.actions.append(np.asarray(action, dtype=np.float32))
         self.rewards.append(float(reward))
@@ -41,6 +54,9 @@ class RolloutBuffer:
         gamma: float,
         gae_lambda: float,
     ) -> None:
+        """
+        trajectory 끝에서부터 거꾸로 가며 advantage 및 return을 계산하는 함수
+        """
         rewards = np.asarray(self.rewards, dtype=np.float32)
         dones = np.asarray(self.dones, dtype=np.float32)
         values = np.asarray(self.values + [last_value], dtype=np.float32)
@@ -60,6 +76,9 @@ class RolloutBuffer:
         self.returns = returns
     
     def get_tensors(self, device: torch.device) -> Dict[str, torch.Tensor]:
+        """
+        advantage normalization을 수행하는 함수 (안정적인 policy gradient를 위함)
+        """
         assert self.advantages is not None and self.returns is not None
         adv = self.advantages
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
