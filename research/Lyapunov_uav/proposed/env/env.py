@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 
-from battery import UAVBattery
 from channel import ChannelModel
 from config import EnvConfig
 
 class Env:
     """
-    전체 환경 클래스
+    Modified Joint Lyapunov Optimization Scenario용 전체 환경 클래스
+
+    Slow-timescale (round level):
+        1) RSU scheduling y_mn(r)
+        2) UAV hiring mu_m(r)
+        3) UAV scheduling phi_un(r)
+
+    Fast-timescale (slot level):
+        1) RSU/UAV chunk, layer delivery
+        2) UAV power allocation p_un(t)
+        3) UAV charging/service mode I_u(t)
     """
     def __init__(self, config: EnvConfig):
         self.cfg = config
@@ -23,7 +32,6 @@ class Env:
         self.num_user = self.cfg.num_user
         self.num_uav = self.cfg.num_uav
         self.slow_T = self.cfg.slow_T
-        self.N0 = self.cfg.N0
 
         # 비디오 및 캐싱 시스템 설정
         self.num_video = self.cfg.num_video
