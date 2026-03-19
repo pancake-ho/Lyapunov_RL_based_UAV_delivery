@@ -1,7 +1,19 @@
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, List, Optional
 
 from config import BatteryConfig
+
+@dataclass
+class CommLinkInput:
+    """
+    user n에 대한 UAV 통신 입력 클래스로
+    "통신 시 UAV 배터리 소모량" 모델링을 위해 선언
+    """
+    scheduled: bool # phi_un(t)
+    delivered_chunks: int # l_un(t)
+    chunk_size_bits: float # S(k_un(t))
+    channel_gain: float # g_un(t)
+    noise_power: float # sigma_un(t)^2
 
 @dataclass
 class BatteryStepInfo:
@@ -21,8 +33,10 @@ class UAVBattery:
     """
     UAV 1대의 배터리 관련 클래스. 모든 UAV는 같은 배터리 종류를 공유한다고 가정.
     """
-    def __init__(self, config: BatteryConfig):
+    def __init__(self, config: BatteryConfig, bandwidth: float):
         self.config = config
+        self.bandwidth = float(bandwidth)
+
         self.soc = float(config.e_init) # actual queue
         self.virtual_q = 0.0 # battery usage virtual queue 
         self.round_start_soc = self.soc
@@ -49,23 +63,61 @@ class UAVBattery:
         """
         return (self.config.p_0 + self.config.p_i) * self.config.slot_duration
     
-    def comm_energy(self, tx_power: float, is_serving: bool) -> float:
+    def comm_energy(self, links: List[CommLinkInput]) -> float:
         """
         UAV가 user에게 video delivery 작업을 수행할 때 소모하는 에너지 수식을 구현하는 함수
         """
-        # delivery를 수행하고 있지 않으면 comm energy를 소비하지 않음
-        if not is_serving:
-            return 0.0
-        return self.config.tx_energy_coeff * max(0.0, tx_power) * self.config.slot_duration
+        delta_t = float(self.config.slot_duration)
+        bw = float(self.bandwidth)
+        eta_u = float(self.config.eta_u)
+
+        total = 0.0
+
+        for link in links:
+            if not link.scheduled:
+                print("UAV와 scheduling된 user가 없습니다.")
+                continue
+            if link.delivered_chunks <= 0:
+                print("UAV에게 chunk를 전송받는 user가 없습니다.")
+                continue
+            if link.chunk_size_bits <= 0:
+                print("UAV에게 받는 chunk size가 0 이하입니다.")
+                continue
+            if link.channel_gain <= 0:
+                print("UAV와 user 사이의 channel gain이 0 이하입니다.")
+                continue
+
+            exponent = (
+                float(link.delivered_chunks) * float(link.chunk_size_bits)
+            ) / (bw * delta_t)
+
+            required_power = (
+                float(link.noise_power) / float(link.channel_gain)
+            ) * (2.0 ** exponent - 1.0)
+
+            communication_energy = required_power * delta_t / eta_u
+            total += communication_energy
+
+        return total
     
-    def total_consumption(self, tx_power: float, delivered_chunks: int, is_serving: bool) -> Dict[str, float]:
+    def total_consumption(self, mu_active: bool, links: List[CommLinkInput]) -> Dict[str, float]:
         """
         UAV가 소모하는 총 에너지 수식을 구현하는 함수로
         hovering 에너지와 comm 에너지의 합으로 정의됨
         """
-        hover_e = self.hover_energy() if is_serving else 0.0
-        comm_e = self.comm_energy(tx_power=tx_power, is_serving=is_serving)
-        total_e = hover_e + comm_e
+        # UAV 미고용 상태면 에너지 관련 term 무효화
+        if not mu_active:
+            return {
+                "hover_energy": 0.0,
+                "comm_energy": 0.0,
+                "total_energy": 0.0,
+            }
+        
+        has_service = any(link.scheduled for link in links)
+
+        hover_e = self.hover_energy() if has_service else 0.0
+        comm_e = self.comm_energy(links=links)
+        total_e = self.config.eta_c * (hover_e + comm_e)
 
         return {
             "hover_energy": hover_e,
@@ -73,14 +125,22 @@ class UAVBattery:
             "total_energy": total_e,
         }
     
-    def charge_energy(self, do_charge: bool) -> float:
+    def charge_energy(self, mu_active: bool, do_charge: bool) -> float:
         """
         UAV가 충전할 때 증가하는 에너지 수식을 구현하는 함수로
         각 충전소들은 일정한 에너지 공급량을 가지고 있고, 충전량은 시간에 비례함
         """
-        if not do_charge or not self.config.enable_charging:
+        if not self.config.enable_charging:
+            print("UAV는 현재 충전이 불가합니다.")
             return 0.0
-        return self.config.eta_c * self.config.charging_rate * self.config.slot_duration
+        if not mu_active:
+            print("UAV는 고용되지 않은 상태입니다.")
+            return 0.0
+        if not do_charge:
+            print("UAV는 현재 충전을 진행하고 있지 않습니다.")
+            return 0.0
+
+        return self.config.charging_rate * self.config.slot_duration
     
     def start_round(self, round_horizon: int, reset_virtual_queue: bool = True) -> None:
         """
@@ -91,35 +151,35 @@ class UAVBattery:
         if reset_virtual_queue:
             self.virtual_q = 0.0
     
-    def step(self, tx_power: float, delivered_chunks: int, is_serving: bool, do_charge: bool) -> BatteryStepInfo:
+    def step(self, mu_active: bool, links: List[CommLinkInput], do_charge: bool) -> BatteryStepInfo:
         """
         매 time-step마다 UAV의 배터리 변화를 추적하는 함수
         """
-        del delivered_chunks
-
         soc_before = self.soc
         virtual_q_before = self.virtual_q
+
+        is_serving = any(link.scheduled for link in links)
 
         # 예외처리
         if is_serving and do_charge and not self.config.allow_charge:
             raise ValueError("UAV는 service와 charge를 동시에 수행할 수 없습니다.")
         
         # 충전 및 소모 동작
-        use_info = self.total_consumption(tx_power=tx_power, is_serving=is_serving)
+        use_info = self.total_consumption(mu_active=mu_active, links=links)
         consume_e = use_info["total_energy"]
-        charge_e = self.charge_energy(do_charge)
+        charge_e = self.charge_energy(mu_active=mu_active, do_charge=do_charge)
 
         # SoC로 변환
         consume_soc = self.energy_to_soc(consume_e)
         charge_soc = self.energy_to_soc(charge_e)
 
         # SoC queue 업데이트
-        next_soc = self.soc - consume_soc + charge_soc
-        next_soc = max(0.0, min(self.config.e_max, next_soc))
+        next_soc = max(0.0, self.soc - consume_soc) + charge_soc
+        next_soc = min(next_soc, self.config.e_max)
 
         # virtual queue 업데이트
-        allowed_use = max(self.round_start_soc - self.config.e_min, 0.0) / self.round_horizon
-        next_virtual_q = max(0.0, self.virtual_q + consume_soc - charge_soc - allowed_use)
+        next_virtual_q = min(self.virtual_q + consume_soc, self.config.e_max) - charge_soc
+        next_virtual_q = max(0.0, next_virtual_q)
 
         self.soc = next_soc
         self.virtual_q = next_virtual_q

@@ -111,12 +111,15 @@ class PPOAgent:
                 returns_batch = batch["returns"][batch_idx]
                 adv_batch = batch["advantages"][batch_idx]
 
+                # 새 정책 평가
                 new_log_prob, entropy, value = self.evaluate_actions(obs_batch, act_batch)
                 ratio = torch.exp(new_log_prob - old_log_prob_batch)
+
                 unclipped = ratio * adv_batch
-                clipped = torch.clamp(ratio, 1.0 - self.cfg.clip_ratio, 1.0 + self.cfg.clip_ratio)
-                
+                clipped = torch.clamp(ratio, 1.0 - self.cfg.clip_ratio, 1.0 + self.cfg.clip_ratio)                
                 policy_loss = -torch.mean(torch.min(unclipped, clipped))
+
+                # critic loss
                 value_loss = F.mse_loss(value, returns_batch)
                 entropy_loss = -entropy.mean()
 

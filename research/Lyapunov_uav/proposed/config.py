@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Tuple, Optional
 
 @dataclass
 class ChannelConfig:
     distance: float = 20.0
     bandwidth: float = 1e6
-    gamma_db: float = 30.0
+    gamma_db: float = 25.0
     sigma_db: float = 4.0
     beta: float = 2.0
     mu_db: float = 0.0
@@ -13,14 +13,15 @@ class ChannelConfig:
 
 @dataclass
 class BatteryConfig:
-    # SoC 기준: [0, e_max]
+    # SoC queue
     e_max: int = 100
     e_init: int = 100
     e_min: float = 10.0 # 하한
 
     # hovering 에너지 모델
-    p_0: float = 100 # blade profile power [W]
-    p_i: float = 100 # induced power [W]
+    # e_hover(t) = (p_0 + p_i) * slot_duration
+    p_0: float = 80.0 # blade profile power [W]
+    p_i: float = 70.0 # induced power [W]
 
     tx_energy_coeff: float = 1.0
 
