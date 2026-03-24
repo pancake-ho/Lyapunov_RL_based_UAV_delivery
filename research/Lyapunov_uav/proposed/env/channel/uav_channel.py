@@ -32,9 +32,22 @@ class UAVChannelModel(BaseChannelModel):
             return 0.0
         
         gain = self.compute_gain(distance=distance, rng=rng)
-        reference_snr = self.db_to_linear(self.gamma_db)
-        return max(0.0, float(tx_power)) * reference_snr * gain
+        return self.compute_snr_from_gain(tx_power, gain)
     
+    def compute_snr_from_gain(
+        self,
+        tx_power: float,
+        gain: float,
+    ) -> float:
+        """
+        이미 샘플링된 channel gain을 이용하여 SNR을 계산하는 함수
+        """
+        if tx_power <= 0.0:
+            return 0.0
+        
+        reference_snr = self.db_to_linear(self.gamma_db)
+        return max(0.0, float(tx_power)) * reference_snr * max(0.0, float(gain))
+
     def capacity(
         self,
         tx_power: float,

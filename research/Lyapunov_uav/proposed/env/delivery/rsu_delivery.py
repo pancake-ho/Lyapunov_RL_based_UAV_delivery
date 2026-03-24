@@ -47,7 +47,7 @@ def _quality_weight(cfg: EnvConfig, layer_idx: int) -> float:
 
 def _chunk_size_bits(cfg: EnvConfig, layer_idx: int) -> float:
     """
-    chunk size를 bit 단위로 계산하는 함수
+    layer 수에 따른 chunk size를 bit 단위로 계산하는 함수
     """
     layer = int(layer_idx)
     if layer <= 0:
