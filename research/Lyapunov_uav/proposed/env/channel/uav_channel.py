@@ -56,3 +56,14 @@ class UAVChannelModel(BaseChannelModel):
     ) -> float:
         snr = self.compute_snr(tx_power=tx_power, distance=distance, rng=rng)
         return self.bandwidth * math.log2(1.0 + snr)
+    
+    def capacity_from_gain(
+        self,
+        tx_power: float,
+        gain: float,
+    ) -> float:
+        """
+        이미 샘플링된 gain을 이용하여 capacity를 계산하는 함수
+        """
+        snr = self.compute_snr_from_gain(tx_power=tx_power, gain=gain)
+        return self.bandwidth * math.log2(1.0 + snr)
