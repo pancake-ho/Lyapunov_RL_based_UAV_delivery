@@ -31,6 +31,9 @@ class ParsedAction:
     rsu_user_distance: np.ndarray   # shape: (M, N)
     uav_user_distance: np.ndarray   # shape: (U, N)
 
+    # residual users
+    residual_users: np.ndarray
+
 
 @dataclass
 class StepResult:

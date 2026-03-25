@@ -1,7 +1,7 @@
 from typing import Dict, List
 
 from config import BatteryConfig
-from .types import CommLinkInput
+from .battery_types import CommLinkInput
 
 
 def compute_hover_energy(
@@ -120,10 +120,10 @@ def compute_energy_summary(
             "total_energy": 0.0,
         }
     
-    is_serving = any(link.scheduled for link in links)
+    is_serving = any(link.scheduled and link.delivered_chunks > 0 for link in links)
 
     if hover_only_when_serving:
-        is_hovering = is_hovering
+        is_hovering = is_serving if hover_only_when_serving else (mu_active and not do_charge)
     else:
         is_hovering = True
 

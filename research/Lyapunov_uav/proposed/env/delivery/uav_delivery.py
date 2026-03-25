@@ -7,9 +7,10 @@ import numpy as np
 import math
 
 from config import EnvConfig
-from battery import CommLinkInput
+from battery import CommLinkInput, BatteryState
 from channel import UAVChannelModel
 from ..types import ParsedAction
+from util import _ensure_shape, _safe_get_attr
 
 @dataclass
 class UAVDeliveryResult:
@@ -147,13 +148,139 @@ def _select_uav_for_user(
 def compute_uav_delivery(
     cfg: EnvConfig,
     parsed: ParsedAction,
+    battery_parsed: BatteryState,
     uav_channel: UAVChannelModel,
     rng: Optional[np.random.Generator] = None,
 ) -> UAVDeliveryResult:
     """
     UAV-User 간 delivery 동작 구현 함수
     """
+    generator = rng if rng is not None else np.random.default_rng()
+
     num_uav = int(cfg.num_uav)
     num_user = int(cfg.num_user)
     slot_duration = float(cfg.battery.slot_duration)    
     user_cap = max(0, int(cfg.uav_user_cap))
+
+    # slow timescale
+    # 고용 여부와 스케줄링 여부를 결정
+    hire_mask = _ensure_shape(
+        _safe_get_attr(parsed, ["uav_hiring"], None),
+        (num_uav,),
+        bool,
+        fill_value=False,
+    )
+
+    sched_mask = _ensure_shape(
+        _safe_get_attr(parsed, ["uav_scheduling"], None),
+        (num_uav, num_user),
+        bool,
+        fill_value=False,
+    )
+
+    # residual user set
+    # True 이면, UAV로 처리되지 못해 UAV의 후보에 포함된 것
+    residual_mask = _ensure_shape(
+        _safe_get_attr(parsed, ["residual_users"], None),
+        (num_user,),
+        bool,
+        fill_value=True,
+    )
+
+    # fast timescale
+    # 청크 수 및 레이어 수, 송신 전력 제어를 결정
+    req_chunks = _ensure_shape(
+        _safe_get_attr(parsed, ["uav_chunks"], None),
+        (num_uav, num_user),
+        np.int32,
+        fill_value=0,
+    )
+
+    req_layers = _ensure_shape(
+        _safe_get_attr(parsed, ["uav_layers"], None),
+        (num_uav, num_user),
+        np.int32,
+        fill_value=0,
+    )
+
+    tx_power = _ensure_shape(
+        _safe_get_attr(parsed, ["uav_power"], None),
+        (num_uav, num_user),
+        np.float32,
+        fill_value=0.0,
+    )
+    tx_power = np.clip(tx_power, 0.0, float(cfg.battery.max_tx_power))
+
+    # 충전 여부 및 state
+    charge_mask = _ensure_shape(
+        _safe_get_attr(parsed, ["uav_charge"], None),
+        (num_uav,),
+        bool,
+        fill_value=False,
+    )
+
+    battery_soc = _ensure_shape(
+        _safe_get_attr(battery_parsed, ["soc"], None),
+        (num_uav,),
+        np.int32,
+        fill_value=0,
+    )
+
+    # content/cache 관련
+    cached_content = _ensure_shape(
+        _safe_get_attr(parsed, ["uav_cached_content"], None),
+        (num_uav,),
+        np.int32,
+        fill_value=-1,
+    )
+
+    
+    requested_mask = np.zeros((num_uav, num_user), dtype=bool)
+    capped_mask = np.zeros((num_uav, num_user), dtype=bool)
+    active_mask = np.zeros((num_uav, num_user), dtype=bool)
+
+    delivered_chunks = np.zeros((num_uav, num_user), dtype=np.int32)
+    delivered_bits = np.zeros((num_uav, num_user), dtype=np.float32)
+    delivered_quality = np.zeros((num_uav, num_user), dtype=np.float32)
+
+    raw_channel_gain = np.zeros((num_uav, num_user), dtype=np.float32)
+    link_capacity_bps = np.zeros((num_uav, num_user), dtype=np.float32)
+
+    links_uav: list[list[CommLinkInput]] = [[] for _ in range(num_uav)]
+
+
+    # requested link 생성
+    for u in range(num_uav):
+        # 고용되지 않은 UAV는 서비스 불가
+        if not bool(hire_mask[u]):
+            print("고용되지 않은 UAV는 서비스 불가합니다.")
+            continue
+
+        # charging mode이면 서비스 불가
+        if bool(charge_mask[u]):
+            print("충전 중인 UAV는 서비스 불가합니다.")
+            continue
+
+        # 배터리 하한 미만이면 서비스 불가
+        if float(battery_soc[u]) < float(cfg.battery.e_min):
+            print("UAV의 배터리가 서비스 가능한 범위보다 작으므로 서비스 불가합니다.")
+            continue
+
+        for n in range(num_user):
+            # scheduling 안 되어있으면 서비스 불가
+            if not bool(sched_mask[u, n]):
+                print("스케줄링되지 않은 UAV는 서비스 불가합니다.")
+            
+            # 요청 chunk/layer/power가 0 이하이면 서비스 불가
+            if int(req_chunks[u, n]) <= 0:
+                print("UAV에게 요청하는 chunk 개수가 0 이하이므로 서비스 불가합니다.")
+                continue
+            if int(req_layers[u, n]) <= 0:
+                print("UAV에게 요청하는 layer 개수가 0 이하이므로 서비스 불가합니다.")
+                continue
+            if float(tx_power[u, n]) <= 0.0:
+                print("UAV의 tx power가 0 이하이므로 서비스 불가합니다.")
+                continue
+            
+            # content cache 정보가 있다면, 일치 여부 확인
+            cache_known = (int(cached_content[u]) >= 0) and (int(requst))
