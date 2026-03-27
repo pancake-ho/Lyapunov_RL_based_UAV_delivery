@@ -69,3 +69,9 @@ def can_serve(
     UAV의 Serving 여부를 검증하는 함수
     """
     return float(soc) > float(config.e_min)
+
+
+def is_outage(
+    soc: float,
+) -> bool:
+    return float(soc) <= 0.0
