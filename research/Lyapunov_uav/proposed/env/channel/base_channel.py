@@ -63,7 +63,7 @@ class BaseChannelModel:
         """
         generator = self._rng(rng)
 
-        # Rayleigh Fading에서, amplitude는 mean 1의 exponential power gain으로 정의됨
+        # Rayleigh fading power gain |h|^2 follows Exponential(mean=1)
         return float(generator.exponential(scale=1.0))
     
     def compute_pathloss(self, distance: Optional[float] = None) -> float:
