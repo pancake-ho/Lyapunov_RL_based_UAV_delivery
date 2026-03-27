@@ -1,7 +1,7 @@
 from typing import Dict, List
 
 from config import BatteryConfig
-from .battery_types import CommLinkInput
+from .battery_types import CommLinkInput, UAVBatteryMode
 
 
 def compute_hover_energy(
@@ -21,52 +21,29 @@ def compute_hover_energy(
 
 def compute_comm_energy(
     config: BatteryConfig,
-    bandwidth: float,
-    links: List[CommLinkInput]
+    links: List[CommLinkInput],
 ) -> float:
     """
     UAV가 user에게 video delivery 작업을 수행할 때 소모하는 에너지 산식을 구현하는 함수
     """
-    delta_t = float(config.slot_duration)
-    bw = max(float(bandwidth), 1e-12)
-
     total = 0.0
     for link in links:
         if not bool(link.scheduled):
-            print("UAV와 scheduling된 user가 없습니다.")
             continue
         if int(link.delivered_chunks) <= 0:
-            print("UAV에게 chunk를 전송받는 user가 없습니다.")
             continue
-        if float(link.chunk_size_bits) <= 0.0:
-            print("UAV에게 받는 chunk size가 0 이하입니다.")
-            continue
-        if float(link.channel_gain) <= 0.0:
-            print("UAV와 user 사이의 channel gain이 0 이하입니다.")
-            continue
-        if float(link.noise_power) <= 0.0:
-            print("UAV와 user 사이의 noise power가 0 이하입니다.")
+        if float(link.payload_bits) <= 0.0: 
             continue
 
-        exponent = (
-            float(link.delivered_chunks) * float(link.chunk_size_bits)
-        ) / (bw * delta_t)
-        exponent = min(exponent, 60.0)
+        tx_power = max(0.0, float(link.tx_power))
+        tx_time = max(0.0, float(link.tx_time))
 
-        required_power = (
-            float(link.noise_power) / max(float(link.channel_gain), 1e-12)
-        ) * (2.0 ** exponent - 1.0)
-
-        required_power = min(required_power, float(config.max_tx_power))
-
-        communication_energy = required_power * delta_t * float(config.tx_energy_coeff)
-        total += communication_energy
+        total += tx_power * tx_time * float(config.tx_energy_coeff)
 
     return float(total)
 
 
 def compute_total_energy(
-    mu_active: bool,
     hover_energy: float,
     comm_energy: float,
 ) -> float:
@@ -74,30 +51,23 @@ def compute_total_energy(
     UAV가 소모하는 총 에너지 수식을 구현하는 함수로
     hovering 에너지와 comm 에너지의 합으로 정의됨
     """
-    if not mu_active:
-        print("UAV를 현재 고용하고 있지 않습니다.")
-        return 0.0
-    
     return float(hover_energy + comm_energy)
 
 
 def compute_charge_energy(
     config: BatteryConfig,
     mu_active: bool,
-    do_charge: bool,
+    mode: UAVBatteryMode,
 ) -> float:
     """
     UAV가 충전할 때 증가하는 에너지 수식을 구현하는 함수로
     각 충전소들은 일정한 에너지 공급량을 가지고 있고, 충전량은 시간에 비례함
     """
     if not config.enable_charging:
-        print("UAV는 현재 충전이 불가합니다.")
         return 0.0
     if not mu_active:
-        print("UAV를 현재 고용하고 있지 않습니다.")
         return 0.0
-    if not do_charge:
-        print("UAV는 현재 충전을 진행하고 있지 않습니다.")
+    if mode != UAVBatteryMode.CHARGE:
         return 0.0
 
     return float(config.charging_rate) * float(config.slot_duration)
@@ -105,44 +75,45 @@ def compute_charge_energy(
 
 def compute_energy_summary(
     config: BatteryConfig,
-    bandwidth: float,
+    mode: UAVBatteryMode,
     mu_active: bool,
     links: List[CommLinkInput],
-    hover_only_when_serving: bool = True
+    hover_only_when_serving: bool = False,
 ) -> Dict[str, float]:
     """
-    energy summary 구조 확립 함수
+    energy summary 구조 반환 함수로,
+    hover, comm, charge, total energy로 구성됨.
     """
-    if not bool(mu_active):
-        print("UAV를 현재 고용하고 있지 않습니다.")
+    if not mu_active:
         return {
             "hover_energy": 0.0,
             "comm_energy": 0.0,
             "total_energy": 0.0,
+            "charge_energy": 0.0,
         }
     
-    is_serving = any(bool(link.scheduled) and int(link.delivered_chunks) > 0 for link in links)
-
-    if hover_only_when_serving:
-        is_hovering = is_serving
-    else:
+    if mode == UAVBatteryMode.SERVE:
         is_hovering = True
-
-    hover_e = compute_hover_energy(config=config, is_hovering=is_hovering)
-    comm_e = compute_comm_energy(
-        config=config,
-        bandwidth=bandwidth,
-        links=links,
-    )
-    total_e = compute_total_energy(
-        config=config,
-        mu_active=mu_active,
-        hover_energy=hover_e,
-        comm_energy=comm_e,
-    )
+        hover_e = compute_hover_energy(config, is_hovering=is_hovering)
+        comm_e = compute_comm_energy(config, links=links)
+        total_e = compute_total_energy(hover_e, comm_e)
+        charge_e = 0.0
+    
+    elif mode == UAVBatteryMode.CHARGE:
+        hover_e = 0.0
+        comm_e = 0.0
+        total_e = 0.0
+        charge_e = compute_charge_energy(config, mu_active=mu_active, mode=mode)
+    
+    else:
+        hover_e = compute_hover_energy(config, is_hovering=not hover_only_when_serving)
+        comm_e = 0.0
+        total_e = compute_total_energy(hover_e, comm_e)
+        charge_e = 0.0
 
     return {
         "hover_energy": float(hover_e),
         "comm_energy": float(comm_e),
         "total_energy": float(total_e),
+        "charge_energy": float(charge_e),
     }
