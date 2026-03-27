@@ -52,7 +52,7 @@ class RSUChannelModel(BaseChannelModel):
         """
         Shannon Capacity[bps] 또는 config.bandwidth 단위에 따라 일관된 rate를 계산하는 함수
         """
-        gain = self.compute_snr(distance=distance, rng=rng)
+        gain = self.compute_gain(distance=distance, rng=rng)
         return self.capacity_from_gain(gain)
     
     def capacity_from_gain(
