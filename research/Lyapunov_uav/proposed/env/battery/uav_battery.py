@@ -1,7 +1,7 @@
 from typing import List
 
 from config import BatteryConfig
-from .types import (
+from .battery_types import (
     BatteryAction,
     BatteryState,
     BatteryStepInfo,
@@ -35,7 +35,7 @@ class UAVBattery:
     ):
         self.config = config
         self.bandwidth = bandwidth
-        self.hover_only_when_seving = bool(hover_only_when_serving)
+        self.hover_only_when_serving = bool(hover_only_when_serving)
 
         self.soc = float(config.e_init)
         self.virtual_q = 0.0
@@ -83,7 +83,10 @@ class UAVBattery:
         virtual_before = float(self.virtual_q)
 
         links = validate_links(links)
-        is_serving = any(link.scheduled for link in links)
+        is_serving = any(
+            bool(link.scheduled) and int(link.delivered_chunks) > 0
+            for link in links
+        )
 
         validate_service_charge(
             config=self.config,

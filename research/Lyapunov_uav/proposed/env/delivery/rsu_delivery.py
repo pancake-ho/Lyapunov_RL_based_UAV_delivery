@@ -7,7 +7,7 @@ import numpy as np
 import math
 from config import EnvConfig
 from channel import RSUChannelModel
-from ..types import ParsedAction
+from ..action_types import ParsedAction
 
 @dataclass
 class RSUDeliveryResult:

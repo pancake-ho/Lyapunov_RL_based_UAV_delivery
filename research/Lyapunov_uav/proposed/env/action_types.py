@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
-
+from typing import Any, Dict, Optional
+ 
 import numpy as np
 
 EnvAction = Dict[str, Any]
@@ -32,7 +32,12 @@ class ParsedAction:
     uav_user_distance: np.ndarray   # shape: (U, N)
 
     # residual users
-    residual_users: np.ndarray
+    residual_users: np.ndarray      # (N,)
+
+    # 보조 정보
+    user_virtual_queue: Optional[np.ndarray] = None 
+    requested_content: Optional[np.ndarray] = None
+    uav_cached_content: Optional[np.ndarray] = None
 
 
 @dataclass

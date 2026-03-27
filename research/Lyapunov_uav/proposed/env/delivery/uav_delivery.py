@@ -9,7 +9,7 @@ import math
 from config import EnvConfig
 from battery import CommLinkInput, BatteryState
 from channel import UAVChannelModel
-from ..types import ParsedAction
+from ..action_types import ParsedAction
 from util import _ensure_shape, _safe_get_attr
 
 @dataclass

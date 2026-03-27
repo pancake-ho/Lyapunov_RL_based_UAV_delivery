@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Any
 
 import numpy as np
 
@@ -19,6 +18,7 @@ def _ensure_shape(
     shape: tuple[int, ...],
     dtype,
     fill_value: float = 0.0,
+    strict: bool = False,
 ) -> np.ndarray:
     """
     입력값을 np.ndarray 타입으로 변환하고 shape을 맞춰주는 함수
@@ -26,10 +26,13 @@ def _ensure_shape(
     if value is None:
         return np.full(shape, fill_value, dtype=dtype)
     
-    arr = np.asanyarray(value, dtype=dtype)
+    arr = np.asarray(value, dtype=dtype)
 
     if arr.shape == shape:
         return arr
+    
+    if strict:
+        raise ValueError(f"Expected shape {shape}, but got {arr.shape}.")
     
     # scalah type이면 전체 broadcast
     if arr.ndim == 0:

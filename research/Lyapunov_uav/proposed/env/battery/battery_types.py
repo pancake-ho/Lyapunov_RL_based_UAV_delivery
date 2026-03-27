@@ -1,5 +1,18 @@
 from dataclasses import dataclass, field
 from typing import List
+from enum import Enum
+
+import numpy as np
+
+class UAVBatteryMode(str, Enum):
+    """
+    UAV의 상태 클래스로, IDLE, SERVE, CHARGE, OUTAGE로 구성
+    """
+    IDLE = "idle"
+    SERVE = "serve"
+    CHARGE = "charge"
+    OUTAGE = "outage"
+
 
 @dataclass
 class CommLinkInput:
@@ -14,18 +27,25 @@ class CommLinkInput:
     - noise_power: sigma_un(t)^2
     """
     scheduled: bool
+    delivered_layers: int
     delivered_chunks: int
-    chunk_size_bits: float
+    payload_bits: float
     channel_gain: float
     noise_power: float
+    tx_power: float
+    user_idx: int
+    layer: int
+    link_capacity_bps: float    
+    tx_time: int
 
 @dataclass
 class BatteryAction:
     """
-    fast-timescale(slot) 에서 battery 모듈이 받는 UAV 동작 입력 클래스
+    UAV 하나당 Battery Action 클래스 하나
     """
+    uav_idx: int
     mu_active: bool # hiring
-    do_charge: bool
+    mode: UAVBatteryMode
     links: List[CommLinkInput] = field(default_factory=list)
 
 @dataclass
@@ -36,7 +56,8 @@ class BatteryState:
     soc: float # actual q
     virtual_q: float # virtual q
     round_start_soc: float
-    round_horizon: int
+    round_total_slots: int
+    round_remaining_slots: int
 
 @dataclass
 class BatteryStepInfo:

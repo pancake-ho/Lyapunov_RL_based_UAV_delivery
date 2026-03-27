@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 import numpy as np
 
-from .types import EnvAction, ParsedAction
+from .action_types import EnvAction, ParsedAction
 from ..config import EnvConfig
 
 
@@ -12,7 +12,7 @@ def _as_binary_matrix(value: np.ndarray, shape: Tuple[int, int], name: str) -> n
     binary 타입 matrix shape 검증 함수
     """
     arr = np.asarray(value, dtype=np.int32)
-    if arr.shape != shape:
+    if arr.shape != shape: 
         raise ValueError(f"{name} must have shape {shape}, got {arr.shape}.")
     return (arr > 0).astype(np.int32)
 
@@ -56,7 +56,7 @@ def _as_nonneg_float_matrix(
     arr = np.maximum(arr, min_value)
     if max_value is not None:
         arr = np.minimum(arr, max_value)
-    return arr
+    return arr.astype(np.float32)
 
 
 def _as_nonneg_float_vector(
@@ -72,7 +72,18 @@ def _as_nonneg_float_vector(
     arr = np.maximum(arr, min_value)
     if max_value is not None:
         arr = np.minimum(arr, max_value)
-    return arr
+    return arr.astype(np.float32)
+
+
+def _as_int_vector(
+    value: np.ndarray,
+    size: int,
+    name: str,
+    fill_value: int = -1,
+) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.int32)
+    if arr.shape != (size,):
+        raise ValueError(f"{name} must have shape ({size},), got {arr.shape}.")
 
 
 def _default_distance_matrix(
@@ -92,20 +103,22 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
     n = cfg.num_user
     u = cfg.num_uav
 
-    rsu_schedule = _as_binary_matrix(
-        action.get("rsu_schedule", np.zeros((m, n), dtype=np.int32)),
+    rsu_scheduling = _as_binary_matrix(
+        action.get("rsu_scheduling", action.get("rsu_schedule", np.zeros((m, n), dtype=np.int32))),
         (m, n),
-        "rsu_schedule",
+        "rsu_scheduling",
     )
+
     uav_hiring = _as_binary_vector(
         action.get("uav_hiring", np.zeros(u, dtype=np.int32)),
         u,
         "uav_hiring",
     )
-    uav_schedule = _as_binary_matrix(
-        action.get("uav_schedule", np.zeros((u, n), dtype=np.int32)),
+
+    uav_scheduling = _as_binary_matrix(
+        action.get("uav_schedule", action.get("uav_schedule", np.zeros((u, n), dtype=np.int32))),
         (u, n),
-        "uav_schedule",
+        "uav_scheduling",
     )
 
     rsu_chunks = _as_nonneg_int_matrix(
@@ -115,11 +128,12 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         min_value=0,
         max_value=cfg.chunk,
     )
+
     rsu_layers = _as_nonneg_int_matrix(
         action.get("rsu_layers", np.ones((m, n), dtype=np.int32)),
         (m, n),
         "rsu_layers",
-        min_value=1,
+        min_value=0,
         max_value=cfg.layer,
     )
 
@@ -130,13 +144,15 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         min_value=0,
         max_value=cfg.chunk,
     )
+
     uav_layers = _as_nonneg_int_matrix(
         action.get("uav_layers", np.ones((u, n), dtype=np.int32)),
         (u, n),
         "uav_layers",
-        min_value=1,
+        min_value=0,
         max_value=cfg.layer,
     )
+
     uav_power = _as_nonneg_float_matrix(
         action.get("uav_power", np.zeros((u, n), dtype=np.float32)),
         (u, n),
@@ -144,6 +160,7 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         min_value=0.0,
         max_value=cfg.battery.max_tx_power,
     )
+
     uav_charge = _as_binary_vector(
         action.get("uav_charge", np.zeros(u, dtype=np.int32)),
         u,
@@ -171,6 +188,7 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         "rsu_user_distance",
         min_value=cfg.rsu_channel.min_distance,
     )
+    
     uav_user_distance = _as_nonneg_float_matrix(
         action.get(
             "uav_user_distance",
@@ -186,10 +204,77 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         min_value=cfg.uav_channel.min_distance,
     )
 
+    residual_users = _as_binary_vector(
+        action.get(
+            "residual_users",
+            (rsu_scheduling.sum(axis=0) == 0).astype(np.int32),
+        ),
+        n,
+        "residual_users",
+    )
+
+    user_virtual_queue = _as_nonneg_float_vector(
+        action.get(
+            "user_virtual_queue",
+            np.zeros(n, dtype=np.float32),
+        ),
+        n,
+        "user_virtual_queue",
+        min_value=0.0,
+    )
+
+    requested_content = _as_int_vector(
+        action.get(
+            "requested_content",
+            -np.ones(n, dtype=np.int32),
+        ),
+        n,
+        "requested_content",
+    )
+
+    uav_cached_content = _as_int_vector(
+        action.get(
+            "uav_cached_content",
+            -np.ones(u, dtype=np.int32),
+        ),
+        u,
+        "uav_cached_content",
+    )
+
+    # 비활성 링크는 action을 0으로 정리
+    rsu_chunks = rsu_chunks * rsu_scheduling
+    rsu_layers = rsu_layers * rsu_scheduling
+
+    uav_chunks = uav_chunks * uav_scheduling
+    uav_layers = uav_layers * uav_scheduling
+    uav_power = uav_power * uav_scheduling.astype(np.float32)
+
+    # charging UAV는 이번 slot 서비스 action 제거
+    for uavs in range(u):
+        if uav_charge[uavs] == 1:
+            uav_chunks[uavs, :] = 0
+            uav_layers[uavs, :] = 0
+            uav_power[uavs, :] = 0.0
+
+    # 비활성 링크는 action을 0으로 정리
+    rsu_chunks = rsu_chunks * rsu_scheduling
+    rsu_layers = rsu_layers * rsu_scheduling
+
+    uav_chunks = uav_chunks * uav_scheduling
+    uav_layers = uav_layers * uav_scheduling
+    uav_power = uav_power * uav_scheduling.astype(np.float32)
+
+    # charging UAV는 이번 slot 서비스 action 제거
+    for uu in range(u):
+        if uav_charge[uu] == 1:
+            uav_chunks[uu, :] = 0
+            uav_layers[uu, :] = 0
+            uav_power[uu, :] = 0.0
+
     return ParsedAction(
-        rsu_schedule=rsu_schedule,
+        rsu_scheduling=rsu_scheduling,
         uav_hiring=uav_hiring,
-        uav_schedule=uav_schedule,
+        uav_scheduling=uav_scheduling,
         rsu_chunks=rsu_chunks,
         rsu_layers=rsu_layers,
         uav_chunks=uav_chunks,
@@ -199,4 +284,8 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         playback=playback,
         rsu_user_distance=rsu_user_distance,
         uav_user_distance=uav_user_distance,
+        residual_users=residual_users,
+        user_virtual_queue=user_virtual_queue,
+        requested_content=requested_content,
+        uav_cached_content=uav_cached_content,
     )

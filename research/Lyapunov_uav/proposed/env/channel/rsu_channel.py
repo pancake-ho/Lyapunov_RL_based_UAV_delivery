@@ -5,6 +5,7 @@ import numpy as np
 from config import ChannelConfig
 from .base_channel import BaseChannelModel
 
+
 class RSUChannelModel(BaseChannelModel):
     """
     RSU에 대한 무선 채널 (Rayleigh Fading) 시뮬레이션 클래스
@@ -31,7 +32,7 @@ class RSUChannelModel(BaseChannelModel):
         """
         gain = self.compute_gain(distance=distance, rng=rng)
         reference_snr = self.db_to_linear(self.gamma_db)
-        return max(0.0, self.tx_power) * reference_snr * gain
+        return max(0.0, self.tx_power) * reference_snr * max(0.0, gain)
     
     def capacity(
         self,
@@ -40,3 +41,10 @@ class RSUChannelModel(BaseChannelModel):
     ) -> float:
         snr = self.compute_snr(distance=distance, rng=rng)
         return self.bandwidth * math.log2(1.0 + snr)
+    
+    def capacity_from_gain(
+        self,
+        gain: float,
+    ) -> float:
+        reference_snr = self.db_to_linear(self.gamma_db)
+        snr = max(0.0, self.tx_power) * 

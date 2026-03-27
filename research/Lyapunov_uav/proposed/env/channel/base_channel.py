@@ -1,8 +1,8 @@
-import math
 from typing import Optional
 
 import numpy as np
 from config import ChannelConfig
+
 
 class BaseChannelModel:
     """
@@ -13,9 +13,11 @@ class BaseChannelModel:
         self.distance = float(config.distance)
         self.bandwidth = float(config.bandwidth)
         self.gamma_db = float(config.gamma_db)
-        self.sigma_db = float(config.sigma_db)
+
+        self.shadowing_sigma_db = float(config.sigma_db)
+        self.shadowing_mu_db = float(config.mu_db)
+
         self.beta = float(config.beta)
-        self.mu_db = float(config.mu_db)
         self.min_distance = float(config.min_distance)
 
     @staticmethod
@@ -23,7 +25,7 @@ class BaseChannelModel:
         """
         단위를 db(데시벨)에서 linear로 변경해 주는 함수
         """
-        return 10.0 ** (db_value / 10.0)
+        return 10.0 ** (float(db_value) / 10.0)
     
     def _rng(self, rng: Optional[np.random.Generator]) -> np.random.Generator:
         """
@@ -33,7 +35,10 @@ class BaseChannelModel:
     
     def sample_shadowing_linear(self, rng: Optional[np.random.Generator] = None) -> float:
         generator = self._rng(rng)
-        shadow_db = generator.normal(loc=self.mu_db, scale=self.sigma_db)
+        shadow_db = generator.normal(
+            loc=self.shadowing_mu_db, 
+            scale=self.shadowing_sigma_db,
+        )
         return self.db_to_linear(float(shadow_db))
     
     def sample_small_scale_fading(self, rng: Optional[np.random.Generator] = None) -> float:
@@ -47,4 +52,4 @@ class BaseChannelModel:
         shadowing = self.sample_shadowing_linear(rng=rng)
         fading = self.sample_small_scale_fading(rng=rng)
         pathloss = d ** self.beta
-        return (shadowing * fading) / pathloss
+        return float((shadowing * fading) / pathloss)

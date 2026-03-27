@@ -1,7 +1,7 @@
 from typing import List
 
 from config import BatteryConfig
-from .types import CommLinkInput
+from .battery_types import CommLinkInput
 
 
 def validate_service_charge(
@@ -12,8 +12,8 @@ def validate_service_charge(
     """
     UAV가 service가 charging을 동시 수행하고 있는 지 검증하는 함수
     """
-    if is_serving and do_charge and not config.allow_charge:
-        raise ValueError("UAV는 service와 charging을 동시 수행할 수 없습니다.")
+    if is_serving and do_charge:
+        raise ValueError("UAV는 동일 slot에서 service와 charging을 동시 수행할 수 없습니다.")
 
 
 def validate_links(
@@ -22,7 +22,7 @@ def validate_links(
     """
     step 전에, 이상한 값의 입력을 걸러내는 함수
     """
-    validated = []
+    validated: List[CommLinkInput] = []
     for link in links:
         validated.append(
             CommLinkInput(
@@ -40,4 +40,7 @@ def can_serve(
     config: BatteryConfig,
     soc: float,
 ) -> bool:
+    """
+    UAV의 Serving 여부를 검증하는 함수
+    """
     return float(soc) > float(config.e_min)

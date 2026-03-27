@@ -1,4 +1,4 @@
-from .types import (
+from .battery_types import (
     CommLinkInput,
     BatteryAction,
     BatteryState,

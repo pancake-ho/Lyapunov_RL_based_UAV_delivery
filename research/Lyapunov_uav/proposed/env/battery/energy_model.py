@@ -28,32 +28,33 @@ def compute_comm_energy(
     UAV가 user에게 video delivery 작업을 수행할 때 소모하는 에너지 산식을 구현하는 함수
     """
     delta_t = float(config.slot_duration)
-    bw = float(bandwidth)
+    bw = max(float(bandwidth), 1e-12)
 
     total = 0.0
     for link in links:
-        if not link.scheduled:
+        if not bool(link.scheduled):
             print("UAV와 scheduling된 user가 없습니다.")
             continue
-        if link.delivered_chunks <= 0:
+        if int(link.delivered_chunks) <= 0:
             print("UAV에게 chunk를 전송받는 user가 없습니다.")
             continue
-        if link.chunk_size_bits <= 0.0:
+        if float(link.chunk_size_bits) <= 0.0:
             print("UAV에게 받는 chunk size가 0 이하입니다.")
             continue
-        if link.channel_gain <= 0.0:
+        if float(link.channel_gain) <= 0.0:
             print("UAV와 user 사이의 channel gain이 0 이하입니다.")
             continue
-        if link.noise_power <= 0.0:
+        if float(link.noise_power) <= 0.0:
             print("UAV와 user 사이의 noise power가 0 이하입니다.")
             continue
 
         exponent = (
             float(link.delivered_chunks) * float(link.chunk_size_bits)
         ) / (bw * delta_t)
+        exponent = min(exponent, 60.0)
 
         required_power = (
-            float(link.noise_power) / float(link.channel_gain)
+            float(link.noise_power) / max(float(link.channel_gain), 1e-12)
         ) * (2.0 ** exponent - 1.0)
 
         required_power = min(required_power, float(config.max_tx_power))
@@ -61,7 +62,7 @@ def compute_comm_energy(
         communication_energy = required_power * delta_t * float(config.tx_energy_coeff)
         total += communication_energy
 
-    return total
+    return float(total)
 
 
 def compute_total_energy(
@@ -112,7 +113,7 @@ def compute_energy_summary(
     """
     energy summary 구조 확립 함수
     """
-    if not mu_active:
+    if not bool(mu_active):
         print("UAV를 현재 고용하고 있지 않습니다.")
         return {
             "hover_energy": 0.0,
@@ -120,10 +121,10 @@ def compute_energy_summary(
             "total_energy": 0.0,
         }
     
-    is_serving = any(link.scheduled and link.delivered_chunks > 0 for link in links)
+    is_serving = any(bool(link.scheduled) and int(link.delivered_chunks) > 0 for link in links)
 
     if hover_only_when_serving:
-        is_hovering = is_serving if hover_only_when_serving else (mu_active and not do_charge)
+        is_hovering = is_serving
     else:
         is_hovering = True
 
@@ -141,7 +142,7 @@ def compute_energy_summary(
     )
 
     return {
-        "hover_energy": hover_e,
-        "comm_energy": comm_e,
-        "total_energy": total_e,
+        "hover_energy": float(hover_e),
+        "comm_energy": float(comm_e),
+        "total_energy": float(total_e),
     }

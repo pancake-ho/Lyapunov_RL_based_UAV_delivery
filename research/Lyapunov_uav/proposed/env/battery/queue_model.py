@@ -24,12 +24,12 @@ def update_soc(
     consumed_soc, charged_soc, next_soc를 반환
     """
     consumed_soc = energy_to_soc(config=config, energy=consumed_energy)
-    charged_soc = energy_to_soc(config=config, enrgy=charged_energy)
+    charged_soc = energy_to_soc(config=config, energy=charged_energy)
     
     next_soc = max(0.0, float(soc) - consumed_soc) + charged_soc
     next_soc = min(next_soc, float(config.e_max))
 
-    return consumed_soc, charged_soc, next_soc
+    return float(consumed_soc), float(charged_soc), float(next_soc)
 
 
 def update_virtual_queue(
