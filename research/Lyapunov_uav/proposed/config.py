@@ -10,6 +10,7 @@ class ChannelConfig:
     beta: float = 2.0
     mu_db: float = 0.0
     min_distance: float = 1.0
+    seed: int = 42
 
 @dataclass
 class BatteryConfig:
