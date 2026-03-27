@@ -6,11 +6,12 @@ from .battery_types import (
     BatteryState,
     BatteryStepInfo,
     CommLinkInput,
+    UAVBatteryMode,
 )
 from .constraints import (
     can_serve,
     validate_links,
-    validate_service_charge,
+    validate_action_mode,
 )
 from .energy_model import (
     compute_charge_energy,
@@ -18,8 +19,8 @@ from .energy_model import (
 )
 from .queue_model import (
     check_outage,
-    update_soc,
-    update_virtual_queue,
+    soc_to_virtual_q,
+    update_soc_virtual_q,
 )
 
 
@@ -38,70 +39,71 @@ class UAVBattery:
         self.hover_only_when_serving = bool(hover_only_when_serving)
 
         self.soc = float(config.e_init)
-        self.virtual_q = 0.0
+        self.virtual_q = soc_to_virtual_q(config=self.config, soc=self.soc)
         self.round_start_soc = float(self.soc)
-        self.round_horizon = max(1, int(config.target_service_slots_per_round))
-        
+        self.round_total_slots = max(1, int(config.target_service_slots_per_round))
+        self.round_remaining_slots = self.round_total_slots
+
     def reset_episode(self) -> None:
         self.soc = float(self.config.e_init)
-        self.virtual_q = 0.0
+        self.virtual_q = soc_to_virtual_q(config=self.config, soc=self.soc)
         self.round_start_soc = float(self.soc)
-        self.round_horizon = max(
-            1,
-            int(self.config.target_service_slots_per_round),
-        )
+        self.round_horizon = max(1, int(self.config.target_service_slots_per_round))
+        self.round_remaining_slots = self.round_total_slots
 
     def start_round(
         self,
         round_horizon: int,
-        reset_virtual_queue: bool = True,
     ) -> None:
         """
-        round 시작 시점 battery budget 기준점 저장 함수
+        round 시작 시점 battery 기준점 저장 함수
         """
         self.round_start_soc = float(self.soc)
-        self.round_horizon = max(1, int(round_horizon))
-
-        if reset_virtual_queue:
-            self.virtual_q = 0.0
+        self.round_total_slots = max(1, int(round_horizon))
+        self.round_remaining_slots = self.round_total_slots
 
     def get_state(self) -> BatteryState:
         return BatteryState(
             soc=float(self.soc),
             virtual_q=float(self.virtual_q),
             round_start_soc=float(self.round_start_soc),
-            round_horizon=int(self.round_horizon),
+            round_total_slots=int(self.round_total_slots),
+            round_remaining_slots=int(self.round_remaining_slots),
         )
 
     def step(
         self,
         mu_active: bool,
         links: List[CommLinkInput],
-        do_charge: bool,
+        mode: UAVBatteryMode,
     ) -> BatteryStepInfo:
         soc_before = float(self.soc)
         virtual_before = float(self.virtual_q)
 
         links = validate_links(links)
+
         is_serving = any(
             bool(link.scheduled) and int(link.delivered_chunks) > 0
             for link in links
         )
 
-        validate_service_charge(
-            config=self.config,
-            is_serving=is_serving,
-            do_charge=do_charge,
+        action = BatteryAction(
+            uav_idx=-1,
+            mu_active=bool(mu_active),
+            mode=mode,
+            links=links,
         )
+        validate_action_mode(action)
 
         # battery 하한 이하면 service 강제 차단
         if not can_serve(config=self.config, soc=self.soc):
-            links = []
-            is_serving = False
+            if mode == UAVBatteryMode.SERVE:
+                mode = UAVBatteryMode.OUTAGE
+                links = []
 
         use_info = compute_energy_summary(
             config=self.config,
-            bandwidth=self.bandwidth,
+            mode=mode,
             mu_active=mu_active,
             links=links,
             hover_only_when_serving=self.hover_only_when_serving,
@@ -110,25 +112,19 @@ class UAVBattery:
         charge_e = compute_charge_energy(
             config=self.config,
             mu_active=mu_active,
-            do_charge=do_charge,
+            mode=mode,
         )
 
-        consumed_soc, charged_soc, next_soc = update_soc(
+        consumed_soc, charged_soc, next_soc, next_virtual_q = update_soc_virtual_q(
             config=self.config,
             soc=self.soc,
             consumed_energy=use_info["total_energy"],
             charged_energy=charge_e,
         )
 
-        next_virtual_q = update_virtual_queue(
-            config=self.config,
-            virtual_q=self.virtual_q,
-            consumed_energy=use_info["total_energy"],
-            charged_energy=charge_e,
-        )
-
-        self.soc = next_soc
-        self.virtual_q = next_virtual_q
+        self.soc = float(next_soc)
+        self.virtual_q = float(next_virtual_q)
+        self.round_remaining_slots = max(0, self.round_remaining_slots - 1)
 
         outage = check_outage(config=self.config, soc=self.soc)
 
@@ -153,5 +149,5 @@ class UAVBattery:
         return self.step(
             mu_active=action.mu_active,
             links=action.links,
-            do_charge=action.do_charge,
+            mode=action.mode,
         )
