@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from typing import Dict, List
 
-from config import BatteryConfig
+from proposed.config import BatteryConfig
 from .battery_types import CommLinkInput, UAVBatteryMode
 
 
@@ -13,9 +15,7 @@ def compute_hover_energy(
     e_hover(t) = (p_0 + p_i) * delta_t 와 같이 계산됨.
     """
     if not is_hovering:
-        print("UAV는 hovering 상태가 아닙니다.")
         return 0.0
-    
     return float(config.p_0 + config.p_i) * float(config.slot_duration)
 
 
@@ -27,6 +27,7 @@ def compute_comm_energy(
     UAV가 user에게 video delivery 작업을 수행할 때 소모하는 에너지 산식을 구현하는 함수
     """
     total = 0.0
+
     for link in links:
         if not bool(link.scheduled):
             continue
@@ -35,7 +36,7 @@ def compute_comm_energy(
         if float(link.payload_bits) <= 0.0: 
             continue
 
-        tx_power = max(0.0, float(link.tx_power))
+        tx_power = 0.0 if link.tx_power is None else max(0.0, float(link.tx_power))
         tx_time = max(0.0, float(link.tx_time))
 
         total += tx_power * tx_time * float(config.tx_energy_coeff)
@@ -78,7 +79,7 @@ def compute_energy_summary(
     mode: UAVBatteryMode,
     mu_active: bool,
     links: List[CommLinkInput],
-    hover_only_when_serving: bool = False,
+    consume_hover_when_idle: bool = False,
 ) -> Dict[str, float]:
     """
     energy summary 구조 반환 함수로,
@@ -93,8 +94,7 @@ def compute_energy_summary(
         }
     
     if mode == UAVBatteryMode.SERVE:
-        is_hovering = True
-        hover_e = compute_hover_energy(config, is_hovering=is_hovering)
+        hover_e = compute_hover_energy(config, is_hovering=True)
         comm_e = compute_comm_energy(config, links=links)
         total_e = compute_total_energy(hover_e, comm_e)
         charge_e = 0.0
@@ -104,12 +104,21 @@ def compute_energy_summary(
         comm_e = 0.0
         total_e = 0.0
         charge_e = compute_charge_energy(config, mu_active=mu_active, mode=mode)
-    
-    else:
-        hover_e = compute_hover_energy(config, is_hovering=not hover_only_when_serving)
+
+    elif mode == UAVBatteryMode.IDLE:
+        hover_e = compute_hover_energy(config, is_hovering=consume_hover_when_idle)
         comm_e = 0.0
         total_e = compute_total_energy(hover_e, comm_e)
         charge_e = 0.0
+    
+    elif mode == UAVBatteryMode.OUTAGE:
+        hover_e = 0.0
+        comm_e = 0.0
+        total_e = 0.0
+        charge_e = 0.0
+
+    else:
+        raise ValueError(f"UAVBatteryMode는 {mode} 모드를 지원하지 않습니다.")
 
     return {
         "hover_energy": float(hover_e),
