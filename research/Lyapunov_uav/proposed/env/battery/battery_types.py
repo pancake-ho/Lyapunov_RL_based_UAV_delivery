@@ -6,7 +6,7 @@ import numpy as np
 
 class UAVBatteryMode(str, Enum):
     """
-    UAV의 상태 클래스로, IDLE, SERVE, CHARGE, OUTAGE로 구성
+    한 slot에 대한 UAV의 동작 모드 클래스
     """
     IDLE = "idle"
     SERVE = "serve"
@@ -32,21 +32,24 @@ class CommLinkInput:
     payload_bits: float
     channel_gain: float
     noise_power: float
-    tx_power: float
-    user_idx: int
-    layer: int
-    link_capacity_bps: float    
-    tx_time: int
+
+    tx_power: float | None = None
+    user_idx: int = -1
+    layer_idx: int = -1
+    link_capacity_bps: float = 0.0
+    tx_time: int = 0
+
 
 @dataclass
 class BatteryAction:
     """
-    UAV 하나당 Battery Action 클래스 하나
+    한 slot에 대한 UAV 하나의 Battery Action 클래스
     """
     uav_idx: int
     mu_active: bool # hiring
     mode: UAVBatteryMode
     links: List[CommLinkInput] = field(default_factory=list)
+
 
 @dataclass
 class BatteryState:
@@ -58,6 +61,7 @@ class BatteryState:
     round_start_soc: float
     round_total_slots: int
     round_remaining_slots: int
+
 
 @dataclass
 class BatteryStepInfo:
@@ -74,7 +78,6 @@ class BatteryStepInfo:
 
     soc_before: float
     soc_after: float
-
     virtual_before: float
     virtual_after: float
     

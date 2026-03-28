@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from typing import List
 
-from config import BatteryConfig
+from proposed.config import BatteryConfig
 from .battery_types import BatteryAction, UAVBatteryMode, CommLinkInput
 
 
@@ -25,34 +27,37 @@ def validate_links(links: List[CommLinkInput],) -> List[CommLinkInput]:
     validated: List[CommLinkInput] = []
 
     for link in links:
+        scheduled = bool(link.scheduled)
         delivered_chunks = max(0, int(link.delivered_chunks))
-        delivered_layers = max(0, int(link.delivered_layers))
         payload_bits = max(0.0, float(link.payload_bits))
         channel_gain = max(0.0, float(link.channel_gain))
         noise_power = max(0.0, float(link.noise_power))
-        tx_power = max(0.0, float(link.tx_power))
+
+        tx_power = 0.0 if link.tx_power is None else max(0.0, float(link.tx_power))
         link_capacity_bps = max(0.0, float(link.link_capacity_bps))
         tx_time = max(0.0, float(link.tx_time))
-        layer = max(0, int(link.layer))
-        user_idx = int(link.user_idx)
 
-        if payload_bits > link_capacity_bps * tx_time + 1e-9:
-            raise ValueError(f"user {user_idx}: payload bits가 capacity * time 값을 초과합니다.")
+        user_idx = int(link.user_idx)
+        layer_idx = int(link.layer_idx)
+
+        if (not scheduled) and (payload_bits > 0.0 or delivered_chunks > 0):
+            raise ValueError(f"user {user_idx}: 스케줄링되지 않은 link는 양수 값의 payload/chunks를 가질 수 없습니다.")
         
-        if (not link.scheduled) and (payload_bits > 0 or delivered_chunks > 0):
-            raise ValueError("UAV가 스케줄링되지 않았는데 payload/chunks가 양수입니다.")
+        if payload_bits > 0.0 and link_capacity_bps > 0.0 and tx_time > 0.0:
+            if payload_bits > link_capacity_bps * tx_time + 1e-9:
+                raise ValueError(f"user {user_idx}: payload bits가 link_capacit_bps * tx_time 값을 초과합니다.")
+        
         
         validated.append(
             CommLinkInput(
-                scheduled=bool(link.scheduled),
+                scheduled=scheduled,
                 delivered_chunks=delivered_chunks,
-                delivered_layers=delivered_layers,
                 payload_bits=payload_bits,
                 channel_gain=channel_gain,
                 noise_power=noise_power,
                 tx_power=tx_power,
                 user_idx=user_idx,
-                layer=layer,
+                layer_idx=layer_idx,
                 link_capacity_bps=link_capacity_bps,
                 tx_time=tx_time,
             )
