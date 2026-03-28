@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from .action_types import EnvAction, ParsedAction
-from ..config import EnvConfig
+from proposed.config import EnvConfig
 
 
 def _as_binary_matrix(value: np.ndarray, shape: Tuple[int, int], name: str) -> np.ndarray:
@@ -84,6 +84,7 @@ def _as_int_vector(
     arr = np.asarray(value, dtype=np.int32)
     if arr.shape != (size,):
         raise ValueError(f"{name} must have shape ({size},), got {arr.shape}.")
+    return np.where(np.isfinite(arr), arr, fill_value).astype(np.int32)
 
 
 def _default_distance_matrix(
@@ -249,27 +250,26 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
     uav_layers = uav_layers * uav_scheduling
     uav_power = uav_power * uav_scheduling.astype(np.float32)
 
-    # charging UAV는 이번 slot 서비스 action 제거
+    # hiring, charging UAV는 이번 slot 서비스 불가
     for uavs in range(u):
-        if uav_charge[uavs] == 1:
+        if uav_hiring[uavs] == 1:
+            if uav_charge[uavs] == 1:
+                uav_scheduling[uavs, :] = 0
+                uav_chunks[uavs, :] = 0
+                uav_layers[uavs, :] = 0
+                uav_power[uavs, :] = 0.0
+        else:
+            uav_scheduling[uavs, :] = 0
             uav_chunks[uavs, :] = 0
             uav_layers[uavs, :] = 0
             uav_power[uavs, :] = 0.0
 
-    # 비활성 링크는 action을 0으로 정리
-    rsu_chunks = rsu_chunks * rsu_scheduling
-    rsu_layers = rsu_layers * rsu_scheduling
-
-    uav_chunks = uav_chunks * uav_scheduling
-    uav_layers = uav_layers * uav_scheduling
-    uav_power = uav_power * uav_scheduling.astype(np.float32)
-
-    # charging UAV는 이번 slot 서비스 action 제거
-    for uu in range(u):
-        if uav_charge[uu] == 1:
-            uav_chunks[uu, :] = 0
-            uav_layers[uu, :] = 0
-            uav_power[uu, :] = 0.0
+    # residual user가 아닌 경우 UAV 서비스 제거
+    residual_mask = residual_users.astype(np.int32)[None, :]
+    uav_scheduling = uav_scheduling * residual_mask
+    uav_chunks = uav_chunks * residual_mask
+    uav_layers = uav_layers * residual_mask
+    uav_power = uav_power * residual_mask.astype(np.float32)
 
     return ParsedAction(
         rsu_scheduling=rsu_scheduling,
