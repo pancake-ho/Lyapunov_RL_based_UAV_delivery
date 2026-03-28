@@ -144,7 +144,7 @@ class EnvConfig:
             raise ValueError("num_rsu는 양수 값을 가져야 합니다.")
         if self.num_uav <= 0:
             raise ValueError("num_uav는 양수 값을 가져야 합니다.")
-        if self.uav_user_cap:
+        if self.uav_user_cap <= 0:
             raise ValueError("uav_user_cap은 양수 값을 가져야 합니다.")
         if self.slow_T <= 0:
             raise ValueError("slow_T는 양수 값을 가져야 합니다.")
