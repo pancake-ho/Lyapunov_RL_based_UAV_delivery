@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Tuple
 
 from config import BatteryConfig
@@ -20,7 +22,8 @@ def soc_to_virtual_q(
     """
     Battery(SoC) Queue를 Virtual Queue로 변환하는 함수
     """
-    return min(float(config.e_max), max(0.0, float(config.e_max) - float(soc)))
+    soc_clipped = min(float(config.e_max), max(0.0, float(soc)))
+    return float(config.e_max) - soc_clipped
 
 
 def update_soc(
@@ -33,10 +36,11 @@ def update_soc(
     actual queue E_u(t+1)에 대응하는 함수로,
     consumed_soc, charged_soc, next_soc를 반환
     """
+    soc_now = min(float(config.e_max), max(0.0, float(soc)))
     consumed_soc = energy_to_soc(config=config, energy=consumed_energy)
     charged_soc = energy_to_soc(config=config, energy=charged_energy)
     
-    next_soc = max(0.0, float(soc) - consumed_soc) + charged_soc
+    next_soc = max(0.0, soc_now - consumed_soc) + charged_soc
     next_soc = min(float(config.e_max), next_soc)
 
     return float(consumed_soc), float(charged_soc), float(next_soc)
@@ -61,11 +65,8 @@ def update_soc_virtual_q(
     return consumed_soc, charged_soc, next_soc, next_virtual_q
 
 
-def check_outage(
-    config: BatteryConfig,
-    soc: float
-) -> bool:
+def check_outage(soc: float) -> bool:
     """
     현재 soc queue가 최솟값을 벗어났는 지 확인하는 함수
     """
-    return float(soc) <= float(config.e_min)
+    return float(soc) <= 0.0
