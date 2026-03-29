@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import numpy as np
 
-from channel import ChannelModel
 from config import EnvConfig
+from .action_types import EnvAction, ParsedAction, StepResult
+from .validators import parse_action
+from .channel import RSUChannelModel, UAVChannelModel
+from .delivery.rsu_delivery import compute_rsu_delivery
+from .delivery.uav_delivery import compute_uav_delivery
+from .battery import UAVBattery
+from .battery.battery_types import BatteryStepInfo, UAVBatteryMode
+from .battery.energy_model import compute_energy_summary
+from .battery.queue_model import check_outage, update_soc_virtual_q
+
 
 class Env:
     """
@@ -28,76 +37,216 @@ class Env:
         
         # 시스템 설정
         # user, uav, rsu 수 정의
-        self.num_rsu = self.cfg.num_rsu
-        self.num_user = self.cfg.num_user
-        self.num_uav = self.cfg.num_uav
-        self.slow_T = self.cfg.slow_T
+        self.num_rsu = int(self.cfg.num_rsu)
+        self.num_user = int(self.cfg.num_user)
+        self.num_uav = int(self.cfg.num_uav)
+        self.slow_T = int(self.cfg.slow_T)
 
-        # 비디오 및 캐싱 시스템 설정
-        self.num_video = self.cfg.num_video
-        self.rsu_caching = self.cfg.rsu_caching
-        self.layer = self.cfg.layer
-        self.chunk = self.cfg.chunk
-        self.rsu_capacity = self.cfg.rsu_capacity
+        # 채널 객체
+        self.rsu_channel = RSUChannelModel(self.cfg.rsu_channel)
+        self.uav_channel = UAVChannelModel(self.cfg.uav_channel)
 
-        # 사용자 이동 패턴 설정
-        self.spawn_base = self.cfg.spawn_base
-        self.spawn_amp = self.cfg.spawn_amp
-        self.spawn_period = self.cfg.spawn_period
-        self.depart_base = self.cfg.depart_base
-        self.depart_amp = self.cfg.depart_amp
-        self.depart_period = self.cfg.depart_period
+        # 배터리 객체
+        self.batteries = [
+            UAVBattery(
+                config=self.cfg.battery,
+                bandwidth=float(self.cfg.uav_channel.bandwidth),
+                consume_hover_when_idle=False,
+            )
+            for _ in range(self.num_uav)
+        ]
 
-        # 채널 설정
-        self.rsu_channel = self.cfg.rsu_channel
-        self.uav_channel = self.cfg.uav_channel
-
-        # 배터리 모델
-        self.battery_cfg = self.cfg.battery
-        self.E_max = self.battery_cfg.e_max
-        self.E_min = self.battery_cfg.e_min
-        self.batteries = [UAVBattery(self.battery_cfg) for _ in range(self.num_uav)]
-
-        # runtime 상태 관리
-        self.t = 0 
+        # reward 산식은 확정되지 않았으므로 미선언
+        
+        # runtime state
+        self.t = 0
         self.episode = 0
         self.round_idx = 0
         self.round_slot = 0
+
+        # user video queue
         self.queue = np.zeros(self.num_user, dtype=np.float32)
-        self.mu = np.zeros(self.num_uav, dtype=np.int32)
+
+        # slow-timescale decisions
+        # rsu/uav의 스케줄링 및 uav 고용
+        self.rsu_scheduling = np.zeros((self.num_rsu, self.num_user), dtype=np.int32)
+        self.uav_hiring = np.zeros(self.num_uav, dtype=np.int32)
+        self.uav_scheduling = np.zeros((self.num_uav, self.num_user), dtype=np.int32)
+
+        # user/content 정보
+        self.requested_content = np.zeros(self.num_user, dtype=np.int32)
+        self.uav_cached_content = np.zeros(self.num_uav, dtype=np.int32)
+
+        # UAV 상태
         self.outage = np.zeros(self.num_uav, dtype=np.int32)
         self.charging_state = np.zeros(self.num_uav, dtype=np.int32)
-        self.tx_power = np.zeros(self.num_uav, dtype=np.float32)
         self.charge_counters = np.zeros(self.num_uav, dtype=np.int32)
-        self.scheduled_users = np.zeros((self.num_uav, self.num_user), dtype=np.int32)
-        self.round_start_E = np.zeros(self.num_uav, dtype=np.float32)
 
-        self.reset()
+        # round energy
+        self.round_start_E = np.zeros(self.num_uav, dtype=np.float32)
     
     @property
     def E(self) -> np.ndarray:
         """
-        UAV들의 Actual SoC Queue 반환 함수
+        UAV Actual SoC Queue
         """
         return np.array([b.soc for b in self.batteries], dtype=np.float32)
     
     @property
     def Y(self) -> np.ndarray:
         """
-        UAV들의 Virtual Soc Queue 반환 함수
+        UAV Virtual Soc Queue
         """
         return np.array([b.virtual_q for b in self.batteries], dtype=np.float32)
     
-    def _start_new_round(self):
+    @property
+    def Z(self) -> np.ndarray:
+        """
+        User virtual video queue
+        """
+        return np.clip(
+            float(self.cfg.max_queue) - self.queue,
+            0.0,
+            float(self.cfg.max_queue),
+        ).astype(np.float32)
+    
+    def _sample_requested_content(self) -> np.ndarray:
+        """
+        사용자가 요청하는 content 샘플링하는 함수로,
+        Zipf 기반으로 [0, num_video-1] 중 하나를 선택함.
+        """
+        video_ids = np.arange(1, self.cfg.num_video+1, dtype=np.float64)
+        probs = 1.0 / np.power(video_ids, float(self.cfg.zipf_alpha))
+        probs = probs / probs.sum()
+        sampled = self.rng.choice(self.cfg.num_video, size=self.num_user, p=probs)
+        return sampled.astype(np.int32)
+    
+    def _sample_uav_cached_content(self) -> np.ndarray:
+        """
+        UAV cache content 초기화하는 함수로,
+        현재는 각 UAV가 하나의 content만 cache 가능하다고 보고 균등 샘플링 적용
+        """
+        sampled = self.rng.integers(
+            low=0,
+            high=self.cfg.num_video,
+            size=self.num_uav,
+            dtype=np.int32,
+        )
+        return sampled.astype(np.int32)
+    
+    def _start_new_round(self) -> None:
         """
         라운드 초기화 함수
         """
         self.round_idx = self.t // self.slow_T
         self.round_slot = 0
         self.round_start_E = self.E.copy()
-        for b in self.batteries:
-            b.start_round(round_horizon=self.slow_T, reset_virtual_queue=True)
+
+        for battery in self.batteries:
+            battery.start_round(round_horizon=self.slow_T)
+
+    def _build_effective_action(self, parsed: ParsedAction) -> ParsedAction:
+        """
+        slow-timescale decision은 round 경계에서 갱신되고,
+        나머지 slot에서는 이전의 round decision을 유지하도록 하는 effective action을 생성하는 함수
+        """
+        residual_users = (
+            (self.rsu_scheduling.sum(axis=0) == 0).astype(np.int32)
+        )
+
+        return ParsedAction(
+            rsu_scheduling=self.rsu_scheduling.copy(),
+            uav_hiring=self.uav_hiring.copy(),
+            uav_scheduling=(self.uav_scheduling * residual_users[None, :]).copy(),
+            rsu_chunks=parsed.rsu_chunks.copy(),
+            rsu_layers=parsed.rsu_layers.copy(),
+            uav_chunks=(parsed.uav_chunks * residual_users[None, :]).copy(),
+            uav_layers=(parsed.uav_layers * residual_users[None, :]).copy(),
+            uav_power=(parsed.uav_power * residual_users[None, :].astype(np.float32)).copy(),
+            uav_charge=parsed.uav_charge.copy(),
+            playback=parsed.playback.copy(),
+            rsu_user_distance=parsed.rsu_user_distance.copy(),
+            uav_user_distance=parsed.uav_user_distance.copy(),
+            residual_users=residual_users.astype(np.int32),
+            user_virtual_queue=self.Z.copy(),
+            requested_content=self.requested_content.copy(),
+            uav_cached_content=self.uav_cached_content.copy(),
+        )
+    
+    def _apply_battery_transition(
+        self,
+        uav_idx: int,
+        mu_active: bool,
+        mode: UAVBatteryMode,
+        links,
+    ) -> Dict[str, Any]:
+        """
+        energy_model 및 queue_model 기준으로 동일 의미 transition 수행하는 함수
+        """
+        battery = self.batteries[uav_idx]
+
+        soc_before = float(battery.soc)
+        virtual_before = float(battery.virtual_q)
+
+        energy_info = compute_energy_summary(
+            config=self.cfg.battery,
+            mode=mode,
+            mu_active=bool(mu_active),
+            links=links,
+            consume_hover_when_idle=battery.consume_hover_when_idle,
+        )
         
+        consumed_soc, charged_soc, next_soc, next_virtual_q = update_soc_virtual_q(
+            config=self.cfg.battery,
+            soc=battery.soc,
+            consumed_energy=float(energy_info["total_energy"]),
+            charged_energy=float(energy_info["charge_energy"]),
+        )
+
+        battery.soc = float(next_soc)
+        battery_virtual_q = float(next_virtual_q)
+        battery.round_remaining_slots = max(0, int(battery.round_remaining_slots) - 1)
+
+        is_outage = bool(check_outage(battery.soc))
+        self.outage[uav_idx] = int(is_outage)
+
+        step_info = BatteryStepInfo(
+            hover_energy=float(energy_info["hover_energy"]),
+            comm_energy=float(energy_info["comm_energy"]),
+            total_consumed=float(energy_info["total_energy"]),
+            charged_energy=float(energy_info["charge_energy"]),
+            consumed_soc=float(consumed_soc),
+            charged_soc=float(charged_soc),
+            soc_before=float(soc_before),
+            soc_after=float(battery.soc),
+            virtual_before=float(virtual_before),
+            virtual_after=float(battery.virtual_q),
+            outage=bool(is_outage),
+        )
+
+        return asdict(step_info)
+    
+    def _get_state(self) -> Dict[str, np.ndarray]:
+        """
+        현 상태값을 반환하는 함수
+        """
+        return {
+            "Q": self.queue.copy(),
+            "Z": self.Z.copy(),
+            "E": self.E.copy(),
+            "Y": self.Y.copy(),
+            "uav_hiring": self.uav_hiring.copy(),
+            "rsu_scheduling": self.rsu_scheduling.copy(),
+            "uav_scheduling": self.uav_scheduling.copy(),
+            "requested_content": self.requested_content.copy(),
+            "uav_cached_content": self.uav_cached_content.copy(),
+            "outage": self.outage.copy(),
+            "charging_state": self.charging_state.copy(),
+            "round_idx": np.array([self.round_idx], dtype=np.int32),
+            "round_slot": np.array([self.round_slot], dtype=np.int32),
+            "time": np.array([self.t], dtype=np.int32),
+        }
+    
     def reset(self) -> Dict[str, np.ndarray]:
         """
         에피소드 초기화 수행 함수로
@@ -110,283 +259,189 @@ class Env:
         self.round_slot = 0
 
         # 사용자 큐 초기화
-        self.queue = np.full(self.num_user, self.cfg.initial_queue, dtype=np.float32)
+        self.queue = np.full(self.num_user, float(self.cfg.init_queue), dtype=np.float32)
 
-        # 배터리 큐 초기화
-        for b in self.batteries:
-            b.reset_episode()
-            b.start_round(self.slow_T, reset_virtual_queue=True)
+        # slow-timescale decision 초기화
+        self.rsu_scheduling = np.zeros(
+            (self.num_rsu, self.num_user), dtype=np.int32
+        )
+        self.uav_hiring = np.zeros(self.num_uav, dtype=np.int32)
+        self.uav_scheduling = np.zeros(
+            (self.num_uav, self.num_user), dtype=np.int32
+        )
 
-        # UAV 고용 상태 초기화
-        # 초기 상태이므로, 미고용 상태를 가정함
-        self.mu = np.zeros(self.num_uav, dtype=np.int32)
+        # content 초기화
+        self.requested_content = self._sample_requested_content()
+        self.uav_cached_content = self._sample_uav_cached_content()
+
+        # battery 초기화
+        for battery in self.batteries:
+            battery.reset_episode()
+            battery.start_round(round_horizon=self.slow_T)
+
         self.outage = np.zeros(self.num_uav, dtype=np.int32)
         self.charging_state = np.zeros(self.num_uav, dtype=np.int32)
-        self.tx_power = np.zeros(self.num_uav, dtype=np.float32)
+        self.charging_counters = np.zeros(self.num_uav, dtype=np.float32)
 
-        # 충전 상태 초기화
-        # 아무 uav 도 충전 안하고 있다고 가정
-        self.charge_counters = np.zeros(self.num_uav, dtype=np.int32)
-        self.scheduled_users = np.zeros((self.num_uav, self.num_user), dtype=np.int32)
         self.round_start_E = self.E.copy()
 
         return self._get_state()
 
-    def _get_state(self) -> Dict[str, np.ndarray]:
+    def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
         """
-        현 상태값을 반환하는 함수
-        """
-        return {
-            "Q": self.queue.copy(),
-            "Y": self.Y.copy(),
-            "E": self.E.copy(),
-            "mu": self.mu.copy(),
-            "round_slot": np.array([self.round_slot], dtype=np.int32),
-            "outage": self.outage.copy(),
-        }
-    
-# ========================================검증 함수========================================================
-    def _test_binary_matrix(
-        self,
-        value: np.ndarray,
-        shape: Tuple[int, int],
-    ) -> np.ndarray:
-        arr = np.asarray(value, dtype=np.int32)
-        if arr.shape != shape:
-            raise ValueError(f"Expected shape {shape}, but got {arr.shape}.")
-        return (arr > 0).astype(np.int32)
-
-    def _test_binary_vector(self, value: np.ndarray, size: int) -> np.ndarray:
-        arr = np.asarray(value, dtype=np.int32)
-        if arr.shape != (size,):
-            raise ValueError(f"Expected shape ({size},), but got {arr.shape}.")
-        return (arr > 0).astype(np.int32)
-
-    def _test_float_vector(self, value: np.ndarray, size: int, clip_min: float = 0.0) -> np.ndarray:
-        arr = np.asarray(value, dtype=np.float32)
-        if arr.shape != (size,):
-            raise ValueError(f"Expected shape ({size},), but got {arr.shape}.")
-        return np.maximum(arr, clip_min)
-
-# ========================================계산 함수========================================================
-    def _chunk_size_bits(self, layer_idx: int) -> float:
-        clipped_layer = int(np.clip(layer_idx, 1, self.cfg.layer))
-        return self.cfg.base_chunk_size_bits * float(clipped_layer)
-
-    def _quality_weight(self, layer_idx: int) -> float:
-        clipped_layer = int(np.clip(layer_idx, 1, self.cfg.layer))
-        if clipped_layer <= len(self.cfg.quality_weights):
-            return float(self.cfg.quality_weights[clipped_layer - 1])
-        return float(clipped_layer)
-
-    def _effective_distances(self, action: Dict[str, np.ndarray]) -> np.ndarray:
-        distances = action.get(
-            "uav_user_distance",
-            np.full((self.num_uav, self.num_user), self.cfg.uav_channel.distance, dtype=np.float32),
-        )
-        distances = np.asarray(distances, dtype=np.float32)
-        if distances.shape != (self.num_uav, self.num_user):
-            raise ValueError(
-                f"uav_user_distance must have shape {(self.num_uav, self.num_user)}, got {distances.shape}."
-            )
-        return np.maximum(distances, self.cfg.uav_channel.min_distance)
-    
-    def _compute_uav_delivery(
-        self,
-        served_users: np.ndarray,
-        requested_chunks: np.ndarray,
-        layers: np.ndarray,
-        tx_power: np.ndarray,
-        distances: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        UAV Delivery 동작 구현 함수
-        """
-        actual_delivery = np.zeros((self.num_uav, self.num_user), dtype=np.int32)
-        user_rate = np.zeros((self.num_uav, self.num_user), dtype=np.float32)
-        remaining_request = requested_chunks.astype(np.int32).copy()
-
-        for u in range(self.num_uav):
-            active_users = np.where(served_users[u] == 1)[0]
-            if active_users.size == 0:
-                print("UAV에게 청크를 전송받는 user가 없습니다.")
-                continue
-
-            for n in active_users:
-                if remaining_request[n] <= 0:
-                    print("user들의 청크 요청이 마무리되었습니다.")
-                    continue
-
-                cap_bps = self.uav_channel.capacity(
-                    tx_power=float(tx_power[u]),
-                    distance=float(distances[u, n]),
-                    rng=self.rng,
-                )
-                user_rate[u, n] = float(cap_bps)
-
-                per_user_bits = cap_bps * self.battery_cfg.slot_duration / active_users.size
-                chunk_bits = self._chunk_size_bits(int(layers[n]))
-                max_chunks = int(np.floor(per_user_bits / chunk_bits))
-                delivered = int(min(remaining_request[n], max_chunks))
-                actual_delivery[u, n] = max(0, delivered)
-                remaining_request[n] -= actual_delivery[u, n]
-        
-        return actual_delivery, user_rate
-
-    def step(self, action: Dict[str, np.ndarray]):
-        """
-        환경의 1 time step 진행 함수 (Fast Timescale 기준)
+        환경의 1-slot 진행 함수
 
         - Slow Timescale: UAV 고용 및 스케줄링 수행
         - Fast Timescale: 비디오 청크 및 레이어 전송 수행
         """
-        # Slow Timescale
-        # 매 T 주기마다, UAV 고용 여부를 갱신함
-        # 또한, User scheduling을 갱신함
-        new_mu = action.get("hiring", np.zeros(self.num_uav, dtype=np.int32))
-        scheduled_users = action.get(
-            "scheduled_users",
-            np.zeros((self.num_uav, self.num_user), dtype=np.int32)
-        )
-        new_mu = self._test_binary_vector(new_mu, self.num_uav)
-        scheduled_users = self._test_binary_matrix(scheduled_users, (self.num_uav, self.num_user))
+        parsed = parse_action(action, self.cfg)
 
+        # round 경계에서 slow-timescale decision을 갱신함
         if self.t % self.slow_T == 0:
-            self.mu = new_mu.copy()
-            self.scheduled_users = scheduled_users.copy()
+            self.rsu_scheduling = parsed.rsu_scheduling.copy()
+            self.uav_hiring = parsed.uav_hiring.copy()
+            self.uav_scheduling = parsed.uav_scheduling.copy()
             self._start_new_round()
-
-        # Fast Timescale
-        # 매 time-step 마다, l_n (chunk) 및 k_n (layer) 를 전송함
-        # 또한, 전송 전력및 충전, served user 수도 선택함
-        served_users = action.get("served_users", np.zeros((self.num_uav, self.num_user), dtype=np.int32))
-        layers = action.get("layer", np.ones(self.num_user, dtype=np.int32))
-        tx_power = action.get("tx_power", np.zeros(self.num_uav, dtype=np.float32))
-        charge = action.get("charge", np.zeros(self.num_uav, dtype=np.int32))
-        playback = action.get(
-            "playback",
-            np.full(self.num_user, self.cfg.playback_rate, dtype=np.float32),
-        )
-
-        # chunk 테스트
-        served_users = self._test_binary_matrix(served_users, (self.num_uav, self.num_user))
-        requested_chunks = np.asarray(requested_chunks, dtype=np.int32)
-        if requested_chunks.shape != (self.num_user,):
-            raise ValueError(f"chunk must have shape ({self.num_user},), got {requested_chunks.shape}.")
         
-        # layer 테스트
-        layers = np.asarray(layers, dtype=np.int32)
-        if layers.shape != (self.num_user,):
-            raise ValueError(f"layer must have shape ({self.num_user},), got {layers.shape}.")
-        layers = np.clip(layers, 1, self.cfg.layer)
+        effective = self._build_effective_action(parsed)
 
-        # tx_power 및 charge, playback 테스트
-        tx_power = self._test_float_vector(tx_power, self.num_uav, clip_min=0.0)
-        tx_power = np.minimum(tx_power, self.battery_cfg.max_tx_power)
-
-        charge = self._test_binary_vector(charge, self.num_uav)
-        playback = np.asarray(playback, dtype=np.float32)
-        if playback.shape != (self.num_user,):
-            raise ValueError(f"playback mush have shape ({self.num_user},), got {playback.shape}.")
-        playback = np.maximum(playback, 0.0)
-        distances = self._effective_distances(action)
-
-        # 배터리 Queue
-        # E(t+1) = max(E_t - e_u, 0) + e_c
         prev_E = self.E.copy()
         prev_Y = self.Y.copy()
-        queue_before = self.queue.copy()
+        prev_Q = self.queue.copy()
+        prev_Z = self.Z.copy()
 
-        for u in range(self.num_uav):
-            if self.mu[u] == 0:
-                served_users[u, :] = 0
-            
-            if charge[u] == 1 and not self.battery_cfg.enable_charging:
-                charge[u] = 0
-
-            if charge[u] == 1 and not self.battery_cfg.allow_charge:
-                served_users[u, :] = 0
-
-            if self.outage[u] == 1:
-                served_users[u, :] = 0
-
-            served_users[u, :] = served_users[u, :] * self.scheduled_users[u, :]
-            
-            if served_users[u].sum() > self.cfg.uav_user_cap:
-                active_idx = np.where(served_users[u] == 1)[0]
-                served_users[u, :] = 0
-                served_users[u, active_idx[:self.cfg.uav_user_cap]] = 1
-
-        actual_delivery, user_rate = self._compute_uav_delivery(
-            served_users=served_users,
-            requested_chunks=requested_chunks,
-            layers=layers,
-            tx_power=tx_power,
-            distances=distances,
+        # RSU delivery
+        rsu_result = compute_rsu_delivery(
+            cfg=self.cfg,
+            parsed=effective,
+            rsu_channel=self.rsu_channel,
+            rng=self.rng,
         )
 
-        # 배터리 step
-        battery_infos: List[Dict[str, Any]] = []
-        for u in range(self.num_uav):
-            active_users = int(served_users[u].sum())
-            serving_flag = (active_users > 0)
-            delivered_chunks_u = int(actual_delivery[u].sum())
+        # UAV delivery
+        battery_soc_before_uav = self.E.copy()
+        uav_result = compute_uav_delivery(
+            cfg=self.cfg,
+            parsed=effective,
+            battery_parsed=battery_soc_before_uav,
+            uav_channel=self.uav_channel,
+            rng=self.rng,
+        )
 
-            info = self.batteries[u].step(
-                tx_power=float(tx_power[u]),
-                delivered_chunks=delivered_chunks_u,
-                is_serving=serving_flag,
-                do_charge=bool(charge[u]),
+        # Battery transition per UAV
+        battery_step_info: list[Dict[str, Any]] = []
+
+        for u in range(self.num_uav):
+            mu_active = bool(self.uav_hiring[u])
+            charge_flag = bool(effective.uav_charge[u])
+
+            if not mu_active:
+                mode = UAVBatteryMode.IDLE
+                links = []
+            elif charge_flag:
+                mode = UAVBatteryMode.CHARGE
+                links = []
+            elif len(uav_result.links_uav[u]) > 0:
+                mode = UAVBatteryMode.SERVE
+                links = uav_result.links_uav[u]
+            elif self.outage[u] == 1:
+                mode = UAVBatteryMode.OUTAGE
+                links = []
+            else:
+                mode = UAVBatteryMode.IDLE
+                links = []
+            
+            self.charging_state[u] = int(mode == UAVBatteryMode.CHARGE)
+            self.charge_counters[u] += int(mode == UAVBatteryMode.CHARGE)
+
+            battery_info_u = self._apply_battery_transition(
+                uav_idx=u,
+                mu_active=mu_active,
+                mode=mode,
+                links=links,
             )
-            self.outage[u] = int(info.outage)
-            self.charging_state[u] = int(charge[u])
-            self.tx_power[u] = tx_power[u]
-            self.charge_counters[u] += int(charge[u])
-            battery_infos.append(asdict(info))
+            battery_info_u["mode"] = str(mode.value)
+            battery_step_info.append(battery_info_u)
         
-        delivered_per_user = actual_delivery.sum(axis=0).astype(np.float32)
-        delivered_quality = np.array(
-            [delivered_per_user[n] * self._quality_weight(int(layers[n])) for n in range(self.num_user)],
-            dtype=np.float32,
-        )
+        # delivery 총계산
+        delivered_rsu_per_user = rsu_result.delivered_per_user.astype(np.float32)
+        delivered_uav_per_user = uav_result.delivered_per_user.astype(np.float32)
+        delivered_total_per_user = delivered_rsu_per_user + delivered_uav_per_user
 
+        quality_rsu_per_user = rsu_result.quality_per_user.astype(np.float32)
+        quality_uav_per_user = uav_result.quality_per_user.astype(np.float32)
+        quality_total_per_user = quality_rsu_per_user + quality_uav_per_user
+
+        playback = effective.playback.astype(np.float32)
         consumed = np.minimum(self.queue, playback)
         stall = np.maximum(playback - self.queue, 0.0)
-        self.queue = np.clip(self.queue - consumed + delivered_per_user, 0.0, self.cfg.max_queue)
 
-        reward = float(
-            delivered_quality.sum()
-            - self.cfg.stall_penalty * stall.sum()
-            - self.cfg.battery_virtual_penalty * self.Y.sum()
-            - self.cfg.outage_penalty * self.outage.sum()
-        )
+        self.queue = np.clip(
+            self.queue - consumed + delivered_total_per_user,
+            0.0,
+            float(self.cfg.max_queue),
+        ).astype(np.float32)
 
+
+        # reward 아직 확정되지않았으므로, 미구현
+
+        # time update
         self.t += 1
         self.round_slot = self.t % self.slow_T
+
         done = False
 
         info: Dict[str, Any] = {
-            "prev_E": prev_E,
+            "prev_Q": prev_Q.copy(),
+            "next_Q": self.queue.copy(),
+            "prev_Z": prev_Z.copy(),
+            "next_Z": self.Z.copy(),
+            "prev_E": prev_E.copy(),
             "next_E": self.E.copy(),
-            "prev_Y": prev_Y,
+            "prev_Y": prev_Y.copy(),
             "next_Y": self.Y.copy(),
-            "mu": self.mu.copy(),
-            "scheduled_users": self.scheduled_users.copy(),
-            "effective_served_users": served_users.copy(),
-            "actual_delivery": actual_delivery.copy(),
-            "delivered_per_user": delivered_per_user.copy(),
-            "delivered_quality": delivered_quality.copy(),
-            "uav_user_rate_bps": user_rate.copy(),
-            "queue_before": queue_before,
-            "queue_after": self.queue.copy(),
+            "round_idx": int(self.round_idx),
+            "round_slot": int(self.round_slot),
+            "uav_hiring": self.uav_hiring.copy(),
+            "rsu_scheduling": self.rsu_scheduling.copy(),
+            "uav_scheduling": self.uav_scheduling.copy(),
+            "requested_content": self.requested_content.copy(),
+            "uav_cached_content": self.uav_cached_content.copy(),
             "playback": playback.copy(),
+            "consumed": consumed.copy(),
             "stall": stall.copy(),
-            "tx_power": self.tx_power.copy(),
-            "charge": charge.copy(),
+            "delivered_rsu_per_user": delivered_rsu_per_user.copy(),
+            "delivered_uav_per_user": delivered_uav_per_user.copy(),
+            "delivered_total_per_user": delivered_total_per_user.copy(),
+            "quality_rsu_per_user": quality_rsu_per_user.copy(),
+            "quality_uav_per_user": quality_uav_per_user.copy(),
+            "quality_total_per_user": quality_total_per_user.copy(),
             "outage": self.outage.copy(),
-            "battery_step_info": battery_infos,
-            "round_slot": self.round_slot,
-            "round_idx": self.round_idx,
+            "charging_state": self.charging_state.copy(),
+            "battery_step_info": battery_step_info,
+            "rsu_result": {
+                "requested_mask": rsu_result.requested_mask.copy(),
+                "capped_mask": rsu_result.capped_mask.copy(),
+                "active_mask": rsu_result.active_mask.copy(),
+                "delivered_chunks": rsu_result.delivered_chunks.copy(),
+                "delivered_bits": rsu_result.delivered_bits.copy(),
+                "delivered_quality": rsu_result.delivered_quality.copy(),
+                "raw_channel_gain": rsu_result.raw_channel_gain.copy(),
+                "link_capacity_bps": rsu_result.link_capacity_bps.copy(),
+            },
+            "uav_result": {
+                "requested_mask": uav_result.requested_mask.copy(),
+                "capped_mask": uav_result.capped_mask.copy(),
+                "active_mask": uav_result.active_mask.copy(),
+                "delivered_chunks": uav_result.delivered_chunks.copy(),
+                "delivered_bits": uav_result.delivered_bits.copy(),
+                "delivered_quality": uav_result.delivered_quality.copy(),
+                "raw_channel_gain": uav_result.raw_channel_gain.copy(),
+                "link_capacity_bps": uav_result.link_capacity_bps.copy(),
+                "tx_power": uav_result.tx_power.copy(),
+                "charge_mask": uav_result.charge_mask.copy(),
+            },
         }
 
-        return self._get_state(), reward, done, info
+        # 원래는 reward도 추가해야함
+        return self._get_state(), done, info
