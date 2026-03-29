@@ -8,8 +8,8 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 from ppo import PPOconfig
-from network import ActorCritic
-from buffer import RolloutBuffer
+from ppo_network import ActorCritic
+from ppo_buffer import RolloutBuffer
 
 EPS = 1e-6
 
