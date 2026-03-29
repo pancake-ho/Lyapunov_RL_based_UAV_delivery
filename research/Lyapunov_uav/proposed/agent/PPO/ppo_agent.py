@@ -7,7 +7,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
 
-from ppo import PPOconfig
+from ppo_config import PPOConfig
 from ppo_network import ActorCritic
 from ppo_buffer import RolloutBuffer
 
@@ -15,7 +15,7 @@ EPS = 1e-6
 
 
 class PPOAgent:
-    def __init__(self, obs_dim: int, action_dim: int, cfg: PPOconfig):
+    def __init__(self, obs_dim: int, action_dim: int, cfg: PPOConfig):
         self.cfg = cfg
         self.device = torch.device(cfg.device)
 
@@ -47,7 +47,7 @@ class PPOAgent:
         obs_torch = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) # batch 차원 추가
 
         with torch.no_grad():
-            dist, mean, value = self.model.get_dist(obs_torch)
+            dist, mean, value = self.model.get_dict(obs_torch)
             raw_action = mean if deterministic else dist.rsample() # action 샘플링 (deterministic이면 mean)
             action = torch.tanh(raw_action) # [-1, 1] 범위의 action 생성
             log_prob = self._squash_log_prob(dist, raw_action, action)
@@ -190,7 +190,7 @@ class PPOAgent:
         torch.save(
             {
                 "model": self.model.state_dict(),
-                "optimizer": self.optimzier.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
                 "config": vars(self.cfg)
             },
             path,

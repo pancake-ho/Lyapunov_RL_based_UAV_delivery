@@ -220,7 +220,7 @@ class Env:
             soc_before=float(soc_before),
             soc_after=float(battery.soc),
             virtual_before=float(virtual_before),
-            virtual_after=float(battery.virtual_q),
+            virtual_after=float(battery_virtual_q),
             outage=bool(is_outage),
         )
 
@@ -281,7 +281,7 @@ class Env:
 
         self.outage = np.zeros(self.num_uav, dtype=np.int32)
         self.charging_state = np.zeros(self.num_uav, dtype=np.int32)
-        self.charging_counters = np.zeros(self.num_uav, dtype=np.float32)
+        self.charge_counters = np.zeros(self.num_uav, dtype=np.float32)
 
         self.round_start_E = self.E.copy()
 

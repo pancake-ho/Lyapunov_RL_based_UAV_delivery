@@ -90,7 +90,7 @@ class ActorCritic(nn.Module):
         PPO에서 일반적으로 actor output은 작은 gain이기에,
         critic output은 1.0 gain을 사용. 이를 구현하는 함수
         """
-        _init_layer(self.action_dim, gain=0.01)
+        _init_layer(self.actor_mean, gain=0.01)
         _init_layer(self.critic, gain=1.0)
     
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

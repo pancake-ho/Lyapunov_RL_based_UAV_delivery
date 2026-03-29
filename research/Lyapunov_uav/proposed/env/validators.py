@@ -117,7 +117,7 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
     )
 
     uav_scheduling = _as_binary_matrix(
-        action.get("uav_schedule", action.get("uav_schedule", np.zeros((u, n), dtype=np.int32))),
+        action.get("uav_schedule", action.get("uav_scheduling", np.zeros((u, n), dtype=np.int32))),
         (u, n),
         "uav_scheduling",
     )
