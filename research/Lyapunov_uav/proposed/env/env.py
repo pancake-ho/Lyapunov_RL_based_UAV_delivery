@@ -6,8 +6,8 @@ from typing import Any, Dict
 import numpy as np
 
 from config import EnvConfig
-from .action_types import EnvAction, ParsedAction, StepResult
-from .validators import parse_action
+from .action_types import EnvAction, SlowAction, FastAction
+from .validators import parse_slow_action, parse_fast_action
 from .channel import RSUChannelModel, UAVChannelModel
 from .delivery.rsu_delivery import compute_rsu_delivery
 from .delivery.uav_delivery import compute_uav_delivery
@@ -145,28 +145,57 @@ class Env:
         for battery in self.batteries:
             battery.start_round(round_horizon=self.slow_T)
 
-    def _build_effective_action(self, parsed: ParsedAction) -> ParsedAction:
+    def apply_slow_action(self, action: EnvAction) -> SlowAction:
+        """
+        slow-timescale decision을 갱신하는 함수
+        """
+        slow_act = parse_slow_action(action, self.cfg)
+
+        self.rsu_scheduling = slow_act.rsu_scheduling.copy()
+        self.uav_hiring = slow_act.uav_hiring.copy()
+        self.uav_scheduling = slow_act.uav_scheduling.copy()
+
+        self._start_new_round()
+        return slow_act
+
+    def _build_effective_fast_action(self, fast_act: FastAction) -> FastAction:
         """
         slow-timescale decision은 round 경계에서 갱신되고,
         나머지 slot에서는 이전의 round decision을 유지하도록 하는 effective action을 생성하는 함수
         """
-        residual_users = (
-            (self.rsu_scheduling.sum(axis=0) == 0).astype(np.int32)
-        )
+        residual_users = (self.rsu_scheduling.sum(axis=0) == 0).astype(np.int32)
 
-        return ParsedAction(
-            rsu_scheduling=self.rsu_scheduling.copy(),
-            uav_hiring=self.uav_hiring.copy(),
-            uav_scheduling=(self.uav_scheduling * residual_users[None, :]).copy(),
-            rsu_chunks=parsed.rsu_chunks.copy(),
-            rsu_layers=parsed.rsu_layers.copy(),
-            uav_chunks=(parsed.uav_chunks * residual_users[None, :]).copy(),
-            uav_layers=(parsed.uav_layers * residual_users[None, :]).copy(),
-            uav_power=(parsed.uav_power * residual_users[None, :].astype(np.float32)).copy(),
-            uav_charge=parsed.uav_charge.copy(),
-            playback=parsed.playback.copy(),
-            rsu_user_distance=parsed.rsu_user_distance.copy(),
-            uav_user_distance=parsed.uav_user_distance.copy(),
+        # 유효한 action 정의
+        effective_uav_chunks = fast_act.uav_chunks.copy()
+        effective_uav_layers = fast_act.uav_layers.copy()
+        effective_uav_power = fast_act.uav_power.copy()
+
+        # round-level hiring이 꺼져 있는 UAV는 fast action 제거
+        inactive_uav_mask = (self.uav_hiring <= 0)
+        effective_uav_chunks[inactive_uav_mask, :] = 0
+        effective_uav_layers[inactive_uav_mask, :] = 0
+        effective_uav_power[inactive_uav_mask, :] = 0.0
+
+        # round-level uav scheduling이 없는 링크는 fast action 제거
+        effective_uav_chunks = effective_uav_chunks * self.uav_scheduling
+        effective_uav_layers = effective_uav_layers * self.uav_scheduling
+        effective_uav_power = effective_uav_power * self.uav_scheduling.astype(np.float32)
+
+        # residual user가 아니면 UAV service 제거
+        effective_uav_chunks = effective_uav_chunks * residual_users[None, :]
+        effective_uav_layers = effective_uav_layers * residual_users[None, :]
+        effective_uav_power = effective_uav_power * residual_users[None, :].astype(np.float32)
+
+        return FastAction(
+            rsu_chunks=fast_act.rsu_chunks.copy(),
+            rsu_layers=fast_act.rsu_layers.copy(),
+            uav_chunks=effective_uav_chunks,
+            uav_layers=effective_uav_layers,
+            uav_power=effective_uav_power,
+            uav_charge=fast_act.uav_charge.copy(),
+            playback=fast_act.playback.copy(),
+            rsu_user_distance=fast_act.rsu_user_distance.copy(),
+            uav_user_distance=fast_act.uav_user_distance.copy(),
             residual_users=residual_users.astype(np.int32),
             user_virtual_queue=self.Z.copy(),
             requested_content=self.requested_content.copy(),
@@ -289,21 +318,14 @@ class Env:
 
     def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
         """
-        환경의 1-slot 진행 함수
-
-        - Slow Timescale: UAV 고용 및 스케줄링 수행
-        - Fast Timescale: 비디오 청크 및 레이어 전송 수행
+        환경의 1-slot 진행 함수로, Fast-timescale 진행을 담당
         """
-        parsed = parse_action(action, self.cfg)
+        fast_act = parse_fast_action(action, self.cfg)
+        effective = self._build_effective_fast_action(fast_act)
 
-        # round 경계에서 slow-timescale decision을 갱신함
-        if self.t % self.slow_T == 0:
-            self.rsu_scheduling = parsed.rsu_scheduling.copy()
-            self.uav_hiring = parsed.uav_hiring.copy()
-            self.uav_scheduling = parsed.uav_scheduling.copy()
-            self._start_new_round()
-        
-        effective = self._build_effective_action(parsed)
+        prev_t = int(self.t)
+        prev_round_idx = int(self.round_idx)
+        prev_round_slot = int(self.round_slot)
 
         prev_E = self.E.copy()
         prev_Y = self.Y.copy()
@@ -383,42 +405,62 @@ class Env:
         ).astype(np.float32)
 
 
-        # reward 아직 확정되지않았으므로, 미구현
+        # reward 아직 확정되지않았으므로, 
+        reward = 0.0
 
         # time update
         self.t += 1
         self.round_slot = self.t % self.slow_T
 
+        # 갱신
+        next_t = int(self.t)
+        next_round_idx = int(self.round_idx)
+        next_round_slot = int(self.round_slot)
+
         done = False
 
         info: Dict[str, Any] = {
-            "prev_Q": prev_Q.copy(),
-            "next_Q": self.queue.copy(),
-            "prev_Z": prev_Z.copy(),
-            "next_Z": self.Z.copy(),
-            "prev_E": prev_E.copy(),
-            "next_E": self.E.copy(),
-            "prev_Y": prev_Y.copy(),
-            "next_Y": self.Y.copy(),
-            "round_idx": int(self.round_idx),
-            "round_slot": int(self.round_slot),
+            # 1) transition meta
+            "prev_time": prev_t,
+            "next_time": next_t,
+            "prev_round_slot": prev_round_slot,
+            "next_round_slot": next_round_slot,
+            "active_round_idx": prev_round_idx,
+
+            # 2) slow-timescale active context
             "uav_hiring": self.uav_hiring.copy(),
             "rsu_scheduling": self.rsu_scheduling.copy(),
             "uav_scheduling": self.uav_scheduling.copy(),
             "requested_content": self.requested_content.copy(),
             "uav_cached_content": self.uav_cached_content.copy(),
+            "residual_users": effective.residual_users.copy(),
+
+            # 3) queue transition
+            "prev_Q": prev_Q.copy(),
+            "next_Q": self.queue.copy(),
+            "prev_Z": prev_Z.copy(),
+            "next_Z": self.Z.copy(),
             "playback": playback.copy(),
             "consumed": consumed.copy(),
             "stall": stall.copy(),
+
+            # 4) battery transition
+            "prev_E": prev_E.copy(),
+            "next_E": self.E.copy(),
+            "prev_Y": prev_Y.copy(),
+            "next_Y": self.Y.copy(),
+            "outage": self.outage.copy(),
+            "charging_state": self.charging_state.copy(),
+            "battery_step_info": battery_step_info,
+
+            # 5) slot execution result
             "delivered_rsu_per_user": delivered_rsu_per_user.copy(),
             "delivered_uav_per_user": delivered_uav_per_user.copy(),
             "delivered_total_per_user": delivered_total_per_user.copy(),
             "quality_rsu_per_user": quality_rsu_per_user.copy(),
             "quality_uav_per_user": quality_uav_per_user.copy(),
             "quality_total_per_user": quality_total_per_user.copy(),
-            "outage": self.outage.copy(),
-            "charging_state": self.charging_state.copy(),
-            "battery_step_info": battery_step_info,
+
             "rsu_result": {
                 "requested_mask": rsu_result.requested_mask.copy(),
                 "capped_mask": rsu_result.capped_mask.copy(),
@@ -444,4 +486,4 @@ class Env:
         }
 
         # 원래는 reward도 추가해야함
-        return self._get_state(), done, info
+        return self._get_state(), reward, done, info

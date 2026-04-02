@@ -91,4 +91,13 @@ class FastActionSpaceConfig:
     max_chunk_level: int
     max_quality_level: int
 
-    
+
+class FastPolicy(nn.Module):
+    """
+    Fast-timescale PPO용 Multi-head Actor-Critic 클래스
+    """
+    def __init__(self, obs_dim: int, hidden_dim: int, action_cfg: FastActionSpaceConfig):
+        super().__init__()
+
+        if obs_dim <= 0:
+            rasie
