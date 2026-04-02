@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 import numpy as np
 
-from .action_types import EnvAction, ParsedAction
+from .action_types import EnvAction, ParsedAction, SlowAction, FastAction
 from proposed.config import EnvConfig
 
 
@@ -94,6 +94,13 @@ def _default_distance_matrix(
     min_distance: float,
 ) -> np.ndarray:
     return np.full((rows, cols), max(distance, min_distance), dtype=np.float32)
+
+
+def parse_slow_action(action: EnvAction, cfg: EnvConfig) -> SlowAction:
+    """
+    가능한 모든 slow-timescale action을 파싱하는 함수
+    """
+
 
 
 def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:

@@ -7,7 +7,7 @@ import numpy as np
 
 from config import EnvConfig
 from ..channel import RSUChannelModel
-from ..action_types import ParsedAction
+from ..action_types import SlowAction, FastAction
 
 @dataclass
 class RSUDeliveryResult:
@@ -88,7 +88,8 @@ def _priority_score(cfg: EnvConfig, feasible_chunks: int, layer: int, cap_bps: f
 
 def compute_rsu_delivery(
     cfg: EnvConfig,
-    parsed: ParsedAction,
+    slow_act: SlowAction,
+    fast_act: FastAction,
     rsu_channel: RSUChannelModel,
     rng: Optional[np.random.Generator] = None,
 ) -> RSUDeliveryResult:
@@ -107,16 +108,16 @@ def compute_rsu_delivery(
     rsu_capacity = max(0, int(cfg.rsu_capacity))
 
     rsu_scheduling = _safe_int_array(
-        parsed.rsu_scheduling, (num_rsu, num_user), "parsed.rsu_scheduling"
+        slow_act.rsu_scheduling, (num_rsu, num_user), "slow_act.rsu_scheduling"
     )
     rsu_chunks = _safe_int_array(
-        parsed.rsu_chunks, (num_rsu, num_user), "parsed.rsu_chunks"
+        fast_act.rsu_chunks, (num_rsu, num_user), "fast_act.rsu_chunks"
     )
     rsu_layers = _safe_int_array(
-        parsed.rsu_layers, (num_rsu, num_user), "parsed.rsu_layers"
+        fast_act.rsu_layers, (num_rsu, num_user), "fast_act.rsu_layers"
     )
     rsu_user_distance = _safe_float_array(
-        parsed.rsu_user_distance, (num_rsu, num_user), "parsed.rsu_user_distance"
+        fast_act.rsu_user_distance, (num_rsu, num_user), "fast_act.rsu_user_distance"
     )
 
     # 1차 delivery 후보
