@@ -170,6 +170,9 @@ class Env:
         effective_uav_layers = fast_act.uav_layers.copy()
         effective_uav_power = fast_act.uav_power.copy()
 
+        effective_rsu_chunks = fast_act.rsu_chunks.copy()
+        effective_rsu_layers = fast_act.rsu_layers.copy()
+
         # round-level hiring이 꺼져 있는 UAV는 fast action 제거
         inactive_uav_mask = (self.uav_hiring <= 0)
         effective_uav_chunks[inactive_uav_mask, :] = 0
@@ -181,14 +184,18 @@ class Env:
         effective_uav_layers = effective_uav_layers * self.uav_scheduling
         effective_uav_power = effective_uav_power * self.uav_scheduling.astype(np.float32)
 
+        # round-level rsu scheduling 없으면 fast rsu action 제거
+        effective_rsu_chunks = effective_rsu_chunks * self.rsu_scheduling
+        effective_rsu_layers = effective_rsu_layers * self.rsu_scheduling
+
         # residual user가 아니면 UAV service 제거
         effective_uav_chunks = effective_uav_chunks * residual_users[None, :]
         effective_uav_layers = effective_uav_layers * residual_users[None, :]
         effective_uav_power = effective_uav_power * residual_users[None, :].astype(np.float32)
 
         return FastAction(
-            rsu_chunks=fast_act.rsu_chunks.copy(),
-            rsu_layers=fast_act.rsu_layers.copy(),
+            rsu_chunks=effective_rsu_chunks,
+            rsu_layers=effective_rsu_layers,
             uav_chunks=effective_uav_chunks,
             uav_layers=effective_uav_layers,
             uav_power=effective_uav_power,
@@ -255,9 +262,24 @@ class Env:
 
         return asdict(step_info)
     
-    def _get_state(self) -> Dict[str, np.ndarray]:
+    def get_slow_obs(self) -> Dict[str, np.ndarray]:
         """
-        현 상태값을 반환하는 함수
+        slow-timescale 상태값을 반환하는 함수
+        """
+        return {
+            "Q": self.queue.copy(),
+            "Z": self.Z.copy(),
+            "E": self.E.copy(),
+            "Y": self.Y.copy(),
+            "requested_content": self.requested_content.copy(),
+            "uav_cached_content": self.uav_cached_content.copy(),
+            "outage": self.outage.copy(),
+            "round_idx": np.array([self.round_idx], dtype=np.int32),
+        }
+
+    def get_fast_obs(self) -> Dict[str, np.ndarray]:
+        """
+        fast-timescale 상태값을 반환하는 함수
         """
         return {
             "Q": self.queue.copy(),
@@ -275,7 +297,7 @@ class Env:
             "round_slot": np.array([self.round_slot], dtype=np.int32),
             "time": np.array([self.t], dtype=np.int32),
         }
-    
+        
     def reset(self) -> Dict[str, np.ndarray]:
         """
         에피소드 초기화 수행 함수로
@@ -321,7 +343,13 @@ class Env:
         환경의 1-slot 진행 함수로, Fast-timescale 진행을 담당
         """
         fast_act = parse_fast_action(action, self.cfg)
-        effective = self._build_effective_fast_action(fast_act)
+        fast_act_eff = self._build_effective_fast_action(fast_act)
+
+        slow_act = SlowAction(
+            rsu_scheduling=self.rsu_scheduling.copy(),
+            uav_hiring=self.uav_hiring.copy(),
+            uav_scheduling=self.uav_scheduling.copy(),
+        )
 
         prev_t = int(self.t)
         prev_round_idx = int(self.round_idx)
@@ -335,7 +363,8 @@ class Env:
         # RSU delivery
         rsu_result = compute_rsu_delivery(
             cfg=self.cfg,
-            parsed=effective,
+            slow_act=slow_act,
+            fast_act=fast_act_eff,
             rsu_channel=self.rsu_channel,
             rng=self.rng,
         )
@@ -344,7 +373,8 @@ class Env:
         battery_soc_before_uav = self.E.copy()
         uav_result = compute_uav_delivery(
             cfg=self.cfg,
-            parsed=effective,
+            slow_act=slow_act,
+            parsed=fast_act_eff,
             battery_parsed=battery_soc_before_uav,
             uav_channel=self.uav_channel,
             rng=self.rng,
@@ -355,7 +385,7 @@ class Env:
 
         for u in range(self.num_uav):
             mu_active = bool(self.uav_hiring[u])
-            charge_flag = bool(effective.uav_charge[u])
+            charge_flag = bool(fast_act_eff.uav_charge[u])
 
             if not mu_active:
                 mode = UAVBatteryMode.IDLE
@@ -394,7 +424,7 @@ class Env:
         quality_uav_per_user = uav_result.quality_per_user.astype(np.float32)
         quality_total_per_user = quality_rsu_per_user + quality_uav_per_user
 
-        playback = effective.playback.astype(np.float32)
+        playback = fast_act_eff.playback.astype(np.float32)
         consumed = np.minimum(self.queue, playback)
         stall = np.maximum(playback - self.queue, 0.0)
 
@@ -433,7 +463,7 @@ class Env:
             "uav_scheduling": self.uav_scheduling.copy(),
             "requested_content": self.requested_content.copy(),
             "uav_cached_content": self.uav_cached_content.copy(),
-            "residual_users": effective.residual_users.copy(),
+            "residual_users": fast_act_eff.residual_users.copy(),
 
             # 3) queue transition
             "prev_Q": prev_Q.copy(),
