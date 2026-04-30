@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import torch
+
 
 @dataclass
 class PPOConfig:
@@ -12,4 +14,9 @@ class PPOConfig:
     update_epochs: int = 10
     batch_size: int = 256
     hidden_dim: int = 256
-    device: str = "cpu"
+    rollout_steps: int = 1024
+    total_updates: int = 1000
+    save_interval: int = 50
+    log_interval: int = 10
+    seed: int = 2026
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
