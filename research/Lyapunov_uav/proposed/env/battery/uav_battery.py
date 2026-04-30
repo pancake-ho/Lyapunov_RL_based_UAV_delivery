@@ -101,7 +101,7 @@ class UAVBattery:
             mode=mode,
             mu_active=bool(mu_active),
             links=links,
-            hover_only_when_serving=self.consume_hover_when_idle,
+            consume_hover_when_idle=self.consume_hover_when_idle,
         )
 
 

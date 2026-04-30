@@ -240,7 +240,7 @@ class Env:
         )
 
         battery.soc = float(next_soc)
-        battery_virtual_q = float(next_virtual_q)
+        battery.virtual_q = float(next_virtual_q)
         battery.round_remaining_slots = max(0, int(battery.round_remaining_slots) - 1)
 
         is_outage = bool(check_outage(battery.soc))
@@ -256,7 +256,7 @@ class Env:
             soc_before=float(soc_before),
             soc_after=float(battery.soc),
             virtual_before=float(virtual_before),
-            virtual_after=float(battery_virtual_q),
+            virtual_after=float(battery.virtual_q),
             outage=bool(is_outage),
         )
 
@@ -447,6 +447,7 @@ class Env:
         next_round_idx = int(self.round_idx)
         next_round_slot = int(self.round_slot)
 
+        reward = 0.0
         done = False
 
         info: Dict[str, Any] = {
