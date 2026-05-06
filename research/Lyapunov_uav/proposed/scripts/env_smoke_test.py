@@ -84,6 +84,16 @@ def main() -> None:
     _, _, terminated, truncated, step_info = env.step(fast_action)
     assert terminated is False
     assert truncated is False
+    reward_components = step_info["dpp_terms"]
+    assert reward_components is step_info["reward_components"]
+    for key in (
+        "video_delivery_pressure",
+        "quality_reward",
+        "battery_service_pressure",
+        "charging_effect",
+        "total_dpp_reward",
+    ):
+        assert key in reward_components
     assert int(step_info["uav_charge_effective"][0]) == 1
     assert float(step_info["delivered_uav_per_user"][0]) == 0.0
     assert step_info["battery_step_info"][0]["mode"] == "charge"
