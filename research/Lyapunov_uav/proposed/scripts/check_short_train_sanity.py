@@ -91,6 +91,20 @@ def run_checks(
         f"found {len(updates)} short_train_update records",
     )
 
+    reward_preset = start.get("reward_preset")
+    reward_coefficients = start.get("reward_coefficients")
+    if reward_preset is None and reward_coefficients is None:
+        reward_config_ok = True
+        reward_config_detail = "reward config metadata not recorded; legacy log accepted"
+    else:
+        reward_config_ok = isinstance(reward_preset, str) and isinstance(reward_coefficients, dict)
+        reward_config_detail = (
+            f"reward_preset={reward_preset!r}, coefficient_keys={sorted(reward_coefficients)}"
+            if reward_config_ok
+            else f"reward_preset={reward_preset!r}, reward_coefficients={reward_coefficients!r}"
+        )
+    _add_result(results, "reward_config_readable", reward_config_ok, reward_config_detail)
+
     finite_metrics = ("actor_loss", "critic_loss", "total_reward")
     bad_finite = []
     for idx, row in enumerate(updates, start=1):

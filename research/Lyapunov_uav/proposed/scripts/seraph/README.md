@@ -55,9 +55,13 @@ export MAX_STEPS=20
 export MAX_UPDATES=2
 export ROLLOUT_STEPS=4
 export DEVICE=auto
+export REWARD_PRESET=balanced
 
 bash Lyapunov_uav/proposed/scripts/seraph/srun_short_hrl_train.sh
 ```
+
+Available reward presets are `balanced`, `conservative_queue`, and `quality_oriented`.
+Use them only to prepare short smoke runs at this stage; do not compare or tune them yet.
 
 Run sanity check after the short train:
 
@@ -123,9 +127,12 @@ export MAX_STEPS=20
 export MAX_UPDATES=2
 export ROLLOUT_STEPS=4
 export DEVICE=auto
+export REWARD_PRESET=balanced
 
 sbatch Lyapunov_uav/proposed/scripts/seraph/sbatch_short_hrl_train_template.sh
 ```
+
+Available reward presets are `balanced`, `conservative_queue`, and `quality_oriented`.
 
 ## 3. Monitor the job
 

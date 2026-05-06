@@ -61,6 +61,13 @@ def _dpp_summary(info: Dict[str, Any]) -> Dict[str, float]:
     return {key: float(terms.get(key, 0.0)) for key in keys}
 
 
+def _reward_metadata(cfg) -> Dict[str, Any]:
+    return {
+        "reward_preset": str(cfg.reward.preset_name),
+        "reward_coefficients": cfg.reward_coefficients(),
+    }
+
+
 def _json_line(path: Path, record: Dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
@@ -114,6 +121,7 @@ def run_short_train(args: argparse.Namespace) -> Path:
 
     cfg = EnvConfig()
     cfg.seed = int(args.seed)
+    cfg.set_reward_preset(str(args.reward_preset))
 
     core = Env(cfg)
     slow_env = SlowEnv(cfg, core_env=core)
@@ -147,6 +155,7 @@ def run_short_train(args: argparse.Namespace) -> Path:
             "reset_info": reset_info,
             "log_path": str(log_path),
             "checkpoint_dir": str(checkpoint_dir),
+            **_reward_metadata(cfg),
         },
     )
 
@@ -240,6 +249,7 @@ def run_short_train(args: argparse.Namespace) -> Path:
             "entropy": float(stats["entropy"]),
             "approx_kl": float(stats["approx_kl_div"]),
             "clip_frac": float(stats["clip_frac"]),
+            **_reward_metadata(cfg),
         }
         _json_line(log_path, record)
 
@@ -258,6 +268,7 @@ def run_short_train(args: argparse.Namespace) -> Path:
                     "seed": int(args.seed),
                     "device": device,
                     "log_path": str(log_path),
+                    **_reward_metadata(cfg),
                 },
             )
             _json_line(
@@ -294,6 +305,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", type=str, default="Lyapunov_uav/proposed/outputs/checkpoints")
     parser.add_argument("--run-name", type=str, default="short_hrl_train")
     parser.add_argument("--hidden-dim", type=int, default=32)
+    parser.add_argument("--reward-preset", type=str, default="balanced")
     parser.add_argument("--checkpoint-interval", type=int, default=1)
     parser.add_argument("--save-checkpoint", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--append-log", action="store_true")

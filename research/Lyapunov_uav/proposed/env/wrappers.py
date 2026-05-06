@@ -171,6 +171,8 @@ class SlowEnv:
         if int(self.core.round_slot) != 0:
             raise RuntimeError("slow action can only be applied at a round boundary.")
         slow_action = self.core.apply_slow_action(action)
+        hiring_cost = float(self.cfg.reward.hiring_cost_weight) * float(np.asarray(slow_action.uav_hiring).sum())
+        slow_reward = -float(self.cfg.reward.slow_reward_weight) * hiring_cost
         info = {
             "slow_action": slow_action,
             "round_idx": int(self.core.round_idx),
@@ -178,8 +180,11 @@ class SlowEnv:
             "round_pending_fast_rollout": True,
             "terminated": False,
             "truncated": False,
+            "reward_preset": str(self.cfg.reward.preset_name),
+            "reward_coefficients": self.cfg.reward_coefficients(),
+            "hiring_cost": hiring_cost,
         }
-        return self.core.get_slow_obs(), 0.0, False, False, info
+        return self.core.get_slow_obs(), slow_reward, False, False, info
 
     def step_vector(self, action: np.ndarray):
         return self.step(decode_slow_action_vector(action, self.cfg))

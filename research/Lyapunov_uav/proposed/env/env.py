@@ -231,14 +231,17 @@ class Env:
         charging_effect = float(np.sum(prev_Y_arr * y_reduction))
 
         total_dpp_reward = (
-            float(self.cfg.dpp_video_weight) * video_delivery_pressure
-            + float(self.cfg.dpp_quality_weight) * quality_reward
-            + float(self.cfg.dpp_battery_weight) * battery_service_pressure
-            + float(self.cfg.dpp_charging_weight) * charging_effect
+            float(self.cfg.reward.video_delivery_weight) * video_delivery_pressure
+            + float(self.cfg.reward.quality_weight) * quality_reward
+            + float(self.cfg.reward.battery_service_weight) * battery_service_pressure
+            + float(self.cfg.reward.charging_weight) * charging_effect
         )
+        fast_reward = float(self.cfg.reward.fast_reward_weight) * float(total_dpp_reward)
 
         components = {
             "reward_version": "perturbed_dpp_hook_v1",
+            "reward_preset": str(self.cfg.reward.preset_name),
+            "reward_coefficients": self.cfg.reward_coefficients(),
             "theta_z": theta_z.copy(),
             "prev_Q": np.asarray(prev_Q, dtype=np.float32).copy(),
             "next_Q": np.asarray(next_Q, dtype=np.float32).copy(),
@@ -253,6 +256,7 @@ class Env:
             "battery_service_pressure": battery_service_pressure,
             "charging_effect": charging_effect,
             "total_dpp_reward": float(total_dpp_reward),
+            "fast_reward": float(fast_reward),
             "stall_sum": float(np.asarray(stall, dtype=np.float32).sum()),
             "quality_sum": quality_reward,
             "battery_virtual_sum": float(np.asarray(next_Y, dtype=np.float32).sum()),
@@ -260,14 +264,17 @@ class Env:
             "num_charging_uav": int(np.asarray(charging_state, dtype=np.int32).sum()),
             "num_outage_uav": int(self.outage.sum()),
             "weights": {
-                "video": float(self.cfg.dpp_video_weight),
-                "quality": float(self.cfg.dpp_quality_weight),
-                "battery": float(self.cfg.dpp_battery_weight),
-                "charging": float(self.cfg.dpp_charging_weight),
+                "video_delivery_weight": float(self.cfg.reward.video_delivery_weight),
+                "quality_weight": float(self.cfg.reward.quality_weight),
+                "battery_service_weight": float(self.cfg.reward.battery_service_weight),
+                "charging_weight": float(self.cfg.reward.charging_weight),
+                "slow_reward_weight": float(self.cfg.reward.slow_reward_weight),
+                "fast_reward_weight": float(self.cfg.reward.fast_reward_weight),
+                "hiring_cost_weight": float(self.cfg.reward.hiring_cost_weight),
             },
             "battery_step_info": battery_step_info,
         }
-        return float(total_dpp_reward), components
+        return float(fast_reward), components
 
     def apply_slow_action(self, action: EnvAction) -> SlowAction:
         """

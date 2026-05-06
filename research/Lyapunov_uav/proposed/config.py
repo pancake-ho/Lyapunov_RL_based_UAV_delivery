@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Dict, Tuple, Optional
 
 @dataclass
 class ChannelConfig:
@@ -79,6 +79,77 @@ class BatteryConfig:
 
 
 @dataclass
+class RewardConfig:
+    """
+    Reward / DPP coefficient config.
+
+    The default values preserve the previous perturb-DPP hook behavior:
+    all DPP terms have weight 1, fast reward is unscaled, slow reward and
+    hiring cost do not change the reward surface.
+    """
+    preset_name: str = "balanced"
+    video_delivery_weight: float = 1.0
+    quality_weight: float = 1.0
+    battery_service_weight: float = 1.0
+    charging_weight: float = 1.0
+    slow_reward_weight: float = 1.0
+    fast_reward_weight: float = 1.0
+    hiring_cost_weight: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name, value in self.as_dict().items():
+            if name == "preset_name":
+                continue
+            if float(value) < 0.0:
+                raise ValueError(f"{name}는 0 이상의 값을 가져야 합니다.")
+
+    def as_dict(self) -> Dict[str, float | str]:
+        return asdict(self)
+
+
+REWARD_PRESETS: Dict[str, RewardConfig] = {
+    "balanced": RewardConfig(
+        preset_name="balanced",
+        video_delivery_weight=1.0,
+        quality_weight=1.0,
+        battery_service_weight=1.0,
+        charging_weight=1.0,
+        slow_reward_weight=1.0,
+        fast_reward_weight=1.0,
+        hiring_cost_weight=0.0,
+    ),
+    "conservative_queue": RewardConfig(
+        preset_name="conservative_queue",
+        video_delivery_weight=1.5,
+        quality_weight=0.7,
+        battery_service_weight=1.5,
+        charging_weight=1.2,
+        slow_reward_weight=1.0,
+        fast_reward_weight=1.0,
+        hiring_cost_weight=0.02,
+    ),
+    "quality_oriented": RewardConfig(
+        preset_name="quality_oriented",
+        video_delivery_weight=0.8,
+        quality_weight=1.8,
+        battery_service_weight=0.8,
+        charging_weight=0.8,
+        slow_reward_weight=1.0,
+        fast_reward_weight=1.0,
+        hiring_cost_weight=0.01,
+    ),
+}
+
+
+def make_reward_config(preset_name: str = "balanced") -> RewardConfig:
+    if preset_name not in REWARD_PRESETS:
+        valid = ", ".join(sorted(REWARD_PRESETS))
+        raise ValueError(f"unknown reward preset {preset_name!r}; valid presets: {valid}")
+    preset = REWARD_PRESETS[preset_name]
+    return RewardConfig(**preset.as_dict())
+
+
+@dataclass
 class EnvConfig:
     # 시스템 설정
     num_user: int = 10
@@ -122,6 +193,8 @@ class EnvConfig:
     base_chunk_size_bits: float = 2e5
 
     # reward 계수
+    reward: RewardConfig = field(default_factory=lambda: make_reward_config("balanced"))
+
     # Perturbed Lyapunov / DPP reward hook
     theta_z: Optional[Tuple[float, ...]] = None
     dpp_video_weight: float = 1.0
@@ -196,6 +269,31 @@ class EnvConfig:
                 float(min(max(theta, 0.0), float(self.max_queue)))
                 for theta in self.theta_z
             )
+        legacy_dpp_override = (
+            self.reward.preset_name == "balanced"
+            and (
+                float(self.dpp_video_weight) != float(self.reward.video_delivery_weight)
+                or float(self.dpp_quality_weight) != float(self.reward.quality_weight)
+                or float(self.dpp_battery_weight) != float(self.reward.battery_service_weight)
+                or float(self.dpp_charging_weight) != float(self.reward.charging_weight)
+            )
+        )
+        if legacy_dpp_override:
+            self.reward = RewardConfig(
+                preset_name="custom",
+                video_delivery_weight=float(self.dpp_video_weight),
+                quality_weight=float(self.dpp_quality_weight),
+                battery_service_weight=float(self.dpp_battery_weight),
+                charging_weight=float(self.dpp_charging_weight),
+                slow_reward_weight=float(self.reward.slow_reward_weight),
+                fast_reward_weight=float(self.reward.fast_reward_weight),
+                hiring_cost_weight=float(self.reward.hiring_cost_weight),
+            )
+        else:
+            self.dpp_video_weight = float(self.reward.video_delivery_weight)
+            self.dpp_quality_weight = float(self.reward.quality_weight)
+            self.dpp_battery_weight = float(self.reward.battery_service_weight)
+            self.dpp_charging_weight = float(self.reward.charging_weight)
         if self.dpp_video_weight < 0.0:
             raise ValueError("dpp_video_weight는 0 이상의 값을 가져야 합니다.")
         if self.dpp_quality_weight < 0.0:
@@ -204,8 +302,18 @@ class EnvConfig:
             raise ValueError("dpp_battery_weight는 0 이상의 값을 가져야 합니다.")
         if self.dpp_charging_weight < 0.0:
             raise ValueError("dpp_charging_weight는 0 이상의 값을 가져야 합니다.")
-        
+
         # 하나의 UAV는 coverage region(RSU) 당 한 대 고용될 수 있음
         if self.num_uav != self.num_rsu:
             raise ValueError(f"coverage region 당 하나의 UAV 고용을 가정합니다. 현재는 \
                              NUM_UAV: {self.num_uav}, NUM_RSU: {self.num_rsu}입니다.")
+
+    def set_reward_preset(self, preset_name: str) -> None:
+        self.reward = make_reward_config(preset_name)
+        self.dpp_video_weight = float(self.reward.video_delivery_weight)
+        self.dpp_quality_weight = float(self.reward.quality_weight)
+        self.dpp_battery_weight = float(self.reward.battery_service_weight)
+        self.dpp_charging_weight = float(self.reward.charging_weight)
+
+    def reward_coefficients(self) -> Dict[str, float | str]:
+        return self.reward.as_dict()

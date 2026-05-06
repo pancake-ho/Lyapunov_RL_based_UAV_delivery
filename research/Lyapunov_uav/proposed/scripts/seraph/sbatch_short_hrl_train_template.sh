@@ -29,6 +29,7 @@ ROLLOUT_STEPS="${ROLLOUT_STEPS:-4}"
 SEED="${SEED:-2026}"
 HIDDEN_DIM="${HIDDEN_DIM:-32}"
 DEVICE="${DEVICE:-auto}"
+REWARD_PRESET="${REWARD_PRESET:-balanced}"
 
 mkdir -p "${LOG_DIR}" "${CHECKPOINT_DIR}" "${OUTPUT_DIR}"
 
@@ -49,6 +50,7 @@ echo "CHECKPOINT_DIR=${CHECKPOINT_DIR}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "RUN_NAME=${RUN_NAME}"
 echo "DEVICE=${DEVICE}"
+echo "REWARD_PRESET=${REWARD_PRESET}"
 
 python3 -c "import torch; print('torch_cuda_available=', torch.cuda.is_available()); print('torch_cuda_device_count=', torch.cuda.device_count())"
 
@@ -59,6 +61,7 @@ python3 Lyapunov_uav/proposed/scripts/short_hrl_train.py \
     --seed "${SEED}" \
     --hidden-dim "${HIDDEN_DIM}" \
     --device "${DEVICE}" \
+    --reward-preset "${REWARD_PRESET}" \
     --run-name "${RUN_NAME}" \
     --log-dir "${LOG_DIR}" \
     --checkpoint-dir "${CHECKPOINT_DIR}" \
