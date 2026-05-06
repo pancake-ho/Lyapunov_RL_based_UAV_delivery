@@ -286,7 +286,56 @@ python3 Lyapunov_uav/proposed/scripts/analyze_repeat_candidates.py \
 Check the `recommended_long_run_candidates` field in the JSON or markdown report.
 Run at most those one or two presets in the next longer candidate experiment.
 
-## 7. Failure checklist
+## 7. Medium candidate training
+
+Prepare medium-length stability runs for only the recommended long-run candidate
+presets. Medium runs are longer than short smoke runs, but they are still not final
+long training and do not compare baselines.
+
+```bash
+export MEDIUM_RUN_NAME=reward_preset_medium
+export MEDIUM_SEEDS="0 1 2"
+export MEDIUM_MAX_STEPS=1000
+export MEDIUM_MAX_UPDATES=50
+export MEDIUM_ROLLOUT_STEPS=32
+
+python3 Lyapunov_uav/proposed/scripts/prepare_medium_candidate_runs.py \
+  --candidate-report-json "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_candidate_analysis.json" \
+  --seeds $MEDIUM_SEEDS \
+  --run-name "$MEDIUM_RUN_NAME" \
+  --log-dir "$LOG_DIR/preset_medium" \
+  --checkpoint-dir "$CHECKPOINT_DIR/preset_medium" \
+  --output-dir "$OUTPUT_DIR/preset_medium" \
+  --max-steps "$MEDIUM_MAX_STEPS" \
+  --max-updates "$MEDIUM_MAX_UPDATES" \
+  --rollout-steps "$MEDIUM_ROLLOUT_STEPS" \
+  --device auto \
+  --checkpoint-interval 10
+```
+
+Set the Slurm array range in
+`Lyapunov_uav/proposed/scripts/seraph/sbatch_medium_candidate_template.sh` to
+`0-(job_count - 1)` from the manifest. For example, if the manifest has 6 jobs,
+use `#SBATCH --array=0-5`.
+
+```bash
+export MANIFEST_JSON="$OUTPUT_DIR/preset_medium/${MEDIUM_RUN_NAME}_manifest.json"
+
+sbatch Lyapunov_uav/proposed/scripts/seraph/sbatch_medium_candidate_template.sh
+```
+
+Each array task runs one preset-seed pair and writes separated logs, checkpoints,
+reports, sanity output, and scale analysis under:
+
+- `$LOG_DIR/preset_medium/<preset>/seed_<seed>/`
+- `$CHECKPOINT_DIR/preset_medium/<preset>/seed_<seed>/`
+- `$OUTPUT_DIR/preset_medium/<preset>/seed_<seed>/`
+
+After all array jobs finish, inspect each task's report and scale-analysis files.
+Do not treat this as final performance or baseline evidence; this stage only
+checks stability and trend quality before a later long run.
+
+## 8. Failure checklist
 
 Import error:
 
