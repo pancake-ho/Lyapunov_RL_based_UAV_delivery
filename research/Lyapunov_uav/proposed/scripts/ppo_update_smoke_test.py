@@ -82,6 +82,9 @@ def _assert_batch_shapes(batch: Dict[str, torch.Tensor], rollout_steps: int, obs
 def _make_ppo_cfg(*, device: str, hidden_dim: int, rollout_steps: int):
     from proposed.agent.PPO.ppo_config import PPOConfig
 
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     return PPOConfig(
         hidden_dim=hidden_dim,
         batch_size=rollout_steps,
@@ -248,7 +251,7 @@ def main() -> None:
     parser.add_argument("--fast-steps", type=int, default=4)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--hidden-dim", type=int, default=32)
-    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="cpu")
     args = parser.parse_args()
 
     if args.device == "cuda" and not torch.cuda.is_available():
