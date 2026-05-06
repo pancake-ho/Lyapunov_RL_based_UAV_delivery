@@ -190,7 +190,38 @@ Check that:
 - `$OUTPUT_DIR/${RUN_NAME}_scale_analysis.md` exists.
 - Sanity check ends with `PASS short_train_sanity`.
 
-## 4. Failure checklist
+## 4. Sequential preset comparison smoke
+
+After a single-preset short train works, run the candidate presets sequentially with
+the same seed and short horizon. This is only an execution-gate comparison; do not
+select final coefficients from it.
+
+```bash
+export RUN_NAME=reward_preset_compare_smoke
+export MAX_STEPS=20
+export MAX_UPDATES=2
+export ROLLOUT_STEPS=4
+export SEED=2026
+export DEVICE=auto
+
+python3 Lyapunov_uav/proposed/scripts/compare_reward_presets.py \
+  --presets conservative_queue balanced quality_oriented \
+  --seed "$SEED" \
+  --max-steps "$MAX_STEPS" \
+  --max-updates "$MAX_UPDATES" \
+  --rollout-steps "$ROLLOUT_STEPS" \
+  --device "$DEVICE" \
+  --run-name "$RUN_NAME" \
+  --log-dir "$LOG_DIR/preset_compare" \
+  --checkpoint-dir "$CHECKPOINT_DIR/preset_compare" \
+  --output-dir "$OUTPUT_DIR/preset_compare"
+```
+
+Check that `$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.json` and
+`$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.md` exist. Each preset also gets
+its own report and scale-analysis files under `$OUTPUT_DIR/preset_compare/<preset>/`.
+
+## 5. Failure checklist
 
 Import error:
 
