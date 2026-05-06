@@ -88,6 +88,8 @@ def _summarize_one(
     run_name: str,
     log_path: Path,
     checkpoint_dir: Path,
+    report_json_path: Path,
+    scale_analysis_json_path: Path,
     report: Dict[str, Any],
     scale_analysis: Dict[str, Any],
     sanity_results: List[Dict[str, str]],
@@ -103,6 +105,8 @@ def _summarize_one(
         "device": report.get("device"),
         "log_path": str(log_path),
         "checkpoint_dir": str(checkpoint_dir),
+        "report_json_path": str(report_json_path),
+        "scale_analysis_json_path": str(scale_analysis_json_path),
         "sanity_status": _sanity_status(sanity_results),
         "final_total_reward": _metric_final(report, "total_reward"),
         "mean_total_reward": _metric_mean(report, "total_reward"),
@@ -227,16 +231,21 @@ def run_comparison(args: argparse.Namespace) -> Dict[str, Any]:
                 approx_kl_max=float(args.approx_kl_max),
             )
 
-            (preset_output_dir / f"{run_name}_report.md").write_text(format_report_markdown(report), encoding="utf-8")
-            (preset_output_dir / f"{run_name}_report.json").write_text(
+            report_md_path = preset_output_dir / f"{run_name}_report.md"
+            report_json_path = preset_output_dir / f"{run_name}_report.json"
+            scale_md_path = preset_output_dir / f"{run_name}_scale_analysis.md"
+            scale_json_path = preset_output_dir / f"{run_name}_scale_analysis.json"
+
+            report_md_path.write_text(format_report_markdown(report), encoding="utf-8")
+            report_json_path.write_text(
                 json.dumps(report, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-            (preset_output_dir / f"{run_name}_scale_analysis.md").write_text(
+            scale_md_path.write_text(
                 format_scale_markdown(scale_analysis) + "\n",
                 encoding="utf-8",
             )
-            (preset_output_dir / f"{run_name}_scale_analysis.json").write_text(
+            scale_json_path.write_text(
                 json.dumps(scale_analysis, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
@@ -246,6 +255,8 @@ def run_comparison(args: argparse.Namespace) -> Dict[str, Any]:
                     run_name=run_name,
                     log_path=log_path,
                     checkpoint_dir=preset_checkpoint_dir,
+                    report_json_path=report_json_path,
+                    scale_analysis_json_path=scale_json_path,
                     report=report,
                     scale_analysis=scale_analysis,
                     sanity_results=sanity_results,

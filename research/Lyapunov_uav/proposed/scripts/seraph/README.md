@@ -221,6 +221,20 @@ Check that `$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.json` and
 `$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.md` exist. Each preset also gets
 its own report and scale-analysis files under `$OUTPUT_DIR/preset_compare/<preset>/`.
 
+Then classify each candidate as `viable`, `caution`, or `reject`. This only filters
+obviously unsuitable presets after short train comparison; it does not select final
+coefficients.
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_preset_comparison.py \
+  --summary-json "$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.json" \
+  --output-json "$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.json" \
+  --output-md "$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.md"
+```
+
+Check that `$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.json` and
+`$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.md` exist.
+
 ## 5. Failure checklist
 
 Import error:
