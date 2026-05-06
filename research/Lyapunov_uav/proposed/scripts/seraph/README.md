@@ -235,7 +235,41 @@ python3 Lyapunov_uav/proposed/scripts/analyze_preset_comparison.py \
 Check that `$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.json` and
 `$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.md` exist.
 
-## 5. Failure checklist
+## 5. Multi-seed repeat short runs
+
+After the viability analysis, repeat only `viable` and `caution` presets over a
+small seed list. Presets classified as `reject` in the viability JSON are excluded
+automatically. This is still a short-run stability check; do not start long
+training, choose final coefficients, or compare baselines from this output.
+
+```bash
+export REPEAT_RUN_NAME=reward_preset_repeat_smoke
+export REPEAT_SEEDS="0 1 2"
+
+python3 Lyapunov_uav/proposed/scripts/repeat_reward_preset_short_runs.py \
+  --viability-json "$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.json" \
+  --seeds $REPEAT_SEEDS \
+  --max-steps "$MAX_STEPS" \
+  --max-updates "$MAX_UPDATES" \
+  --rollout-steps "$ROLLOUT_STEPS" \
+  --device "$DEVICE" \
+  --run-name "$REPEAT_RUN_NAME" \
+  --log-dir "$LOG_DIR/preset_repeat" \
+  --checkpoint-dir "$CHECKPOINT_DIR/preset_repeat" \
+  --output-dir "$OUTPUT_DIR/preset_repeat"
+```
+
+Check that:
+
+- `$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_aggregate_summary.json` exists.
+- `$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_aggregate_summary.md` exists.
+- Per-seed comparison and viability files exist under
+  `$OUTPUT_DIR/preset_repeat/seed_<seed>/`.
+- Per-preset logs/checkpoints are separated under
+  `$LOG_DIR/preset_repeat/seed_<seed>/<preset>/` and
+  `$CHECKPOINT_DIR/preset_repeat/seed_<seed>/<preset>/`.
+
+## 6. Failure checklist
 
 Import error:
 
