@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from proposed.config import BatteryConfig
+from config import BatteryConfig
 from .battery_types import CommLinkInput, UAVBatteryMode
 
 

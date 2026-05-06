@@ -1,1 +1,3 @@
-from env import Env
+from .env import Env
+
+__all__ = ["Env"]

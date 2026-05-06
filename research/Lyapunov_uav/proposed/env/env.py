@@ -34,7 +34,7 @@ class Env:
     def __init__(self, config: EnvConfig):
         self.cfg = config
         self.rng = np.random.default_rng(self.cfg.seed)
-        
+
         # 시스템 설정
         # user, uav, rsu 수 정의
         self.num_rsu = int(self.cfg.num_rsu)
@@ -57,7 +57,7 @@ class Env:
         ]
 
         # reward 산식은 확정되지 않았으므로 미선언
-        
+
         # runtime state
         self.t = 0
         self.episode = 0
@@ -84,21 +84,21 @@ class Env:
 
         # round energy
         self.round_start_E = np.zeros(self.num_uav, dtype=np.float32)
-    
+
     @property
     def E(self) -> np.ndarray:
         """
         UAV Actual SoC Queue
         """
         return np.array([b.soc for b in self.batteries], dtype=np.float32)
-    
+
     @property
     def Y(self) -> np.ndarray:
         """
         UAV Virtual Soc Queue
         """
         return np.array([b.virtual_q for b in self.batteries], dtype=np.float32)
-    
+
     @property
     def Z(self) -> np.ndarray:
         """
@@ -109,7 +109,7 @@ class Env:
             0.0,
             float(self.cfg.max_queue),
         ).astype(np.float32)
-    
+
     def _sample_requested_content(self) -> np.ndarray:
         """
         사용자가 요청하는 content 샘플링하는 함수로,
@@ -120,7 +120,7 @@ class Env:
         probs = probs / probs.sum()
         sampled = self.rng.choice(self.cfg.num_video, size=self.num_user, p=probs)
         return sampled.astype(np.int32)
-    
+
     def _sample_uav_cached_content(self) -> np.ndarray:
         """
         UAV cache content 초기화하는 함수로,
@@ -133,7 +133,7 @@ class Env:
             dtype=np.int32,
         )
         return sampled.astype(np.int32)
-    
+
     def _start_new_round(self) -> None:
         """
         라운드 초기화 함수
@@ -208,7 +208,7 @@ class Env:
             requested_content=self.requested_content.copy(),
             uav_cached_content=self.uav_cached_content.copy(),
         )
-    
+
     def _apply_battery_transition(
         self,
         uav_idx: int,
@@ -231,7 +231,7 @@ class Env:
             links=links,
             consume_hover_when_idle=battery.consume_hover_when_idle,
         )
-        
+
         consumed_soc, charged_soc, next_soc, next_virtual_q = update_soc_virtual_q(
             config=self.cfg.battery,
             soc=battery.soc,
@@ -261,7 +261,7 @@ class Env:
         )
 
         return asdict(step_info)
-    
+
     def get_slow_obs(self) -> Dict[str, np.ndarray]:
         """
         slow-timescale 상태값을 반환하는 함수
@@ -297,7 +297,16 @@ class Env:
             "round_slot": np.array([self.round_slot], dtype=np.int32),
             "time": np.array([self.t], dtype=np.int32),
         }
-        
+
+    def _get_state(self) -> Dict[str, np.ndarray]:
+        """
+        현재 환경 상태를 반환하는 기본 observation 함수.
+
+        reset/step의 공통 반환값으로 사용되며, active slow-timescale
+        decision까지 포함하는 fast-timescale observation을 기준 상태로 둔다.
+        """
+        return self.get_fast_obs()
+
     def reset(self) -> Dict[str, np.ndarray]:
         """
         에피소드 초기화 수행 함수로
@@ -374,7 +383,7 @@ class Env:
         uav_result = compute_uav_delivery(
             cfg=self.cfg,
             slow_act=slow_act,
-            parsed=fast_act_eff,
+            fast_act=fast_act_eff,
             battery_parsed=battery_soc_before_uav,
             uav_channel=self.uav_channel,
             rng=self.rng,
@@ -402,7 +411,7 @@ class Env:
             else:
                 mode = UAVBatteryMode.IDLE
                 links = []
-            
+
             self.charging_state[u] = int(mode == UAVBatteryMode.CHARGE)
             self.charge_counters[u] += int(mode == UAVBatteryMode.CHARGE)
 
@@ -414,7 +423,7 @@ class Env:
             )
             battery_info_u["mode"] = str(mode.value)
             battery_step_info.append(battery_info_u)
-        
+
         # delivery 총계산
         delivered_rsu_per_user = rsu_result.delivered_per_user.astype(np.float32)
         delivered_uav_per_user = uav_result.delivered_per_user.astype(np.float32)
@@ -435,7 +444,7 @@ class Env:
         ).astype(np.float32)
 
 
-        # reward 아직 확정되지않았으므로, 
+        # reward 아직 확정되지않았으므로,
         reward = 0.0
 
         # time update
