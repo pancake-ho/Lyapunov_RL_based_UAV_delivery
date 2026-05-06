@@ -269,7 +269,24 @@ Check that:
   `$LOG_DIR/preset_repeat/seed_<seed>/<preset>/` and
   `$CHECKPOINT_DIR/preset_repeat/seed_<seed>/<preset>/`.
 
-## 6. Failure checklist
+## 6. Long-run candidate analysis
+
+After multi-seed repeat short runs, narrow presets to at most one or two longer-run
+candidates. This uses the aggregate summary plus per-run report/scale artifacts.
+It still does not start long training, tune coefficients, or compare baselines.
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_repeat_candidates.py \
+  --aggregate-json "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_aggregate_summary.json" \
+  --output-json "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_candidate_analysis.json" \
+  --output-md "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_candidate_analysis.md" \
+  --max-candidates 2
+```
+
+Check the `recommended_long_run_candidates` field in the JSON or markdown report.
+Run at most those one or two presets in the next longer candidate experiment.
+
+## 7. Failure checklist
 
 Import error:
 
