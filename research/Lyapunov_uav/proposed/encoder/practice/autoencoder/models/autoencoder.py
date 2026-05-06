@@ -21,6 +21,7 @@ class AutoencoderConfig:
 
 class PrintShape(nn.Module):
     """
-    Debug helper for inspecting intermediate tensor shapes.
+    Debug helper placeholder for inspecting intermediate tensor shapes.
     """
-    def forward(self, x: TeNSOR)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x

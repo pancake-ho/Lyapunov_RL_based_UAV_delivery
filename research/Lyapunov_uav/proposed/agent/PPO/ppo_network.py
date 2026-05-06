@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Beta, Bernoulli, Categorical, Independent
+from torch.distributions import Beta, Bernoulli, Categorical, Independent, Normal
 
 EPS = 1e-6
 BETA_MIN_PARAM = 1.0

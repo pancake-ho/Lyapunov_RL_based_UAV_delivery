@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 EnvAction = Dict[str, Any]
+SlowActionVector = np.ndarray
+FastActionVector = np.ndarray
+ObservationVector = np.ndarray
 
 
 @dataclass
@@ -14,7 +17,7 @@ class SlowAction:
     slow timescale에서 가능한 모든 동작을 파싱하는 클래스
     """
     rsu_scheduling: np.ndarray      # y_mn(r), shape (M,N)
-    uav_hiring: np.ndarray          # mu_m(r), shape (M,)
+    uav_hiring: np.ndarray          # h_u(r), shape (U,)
     uav_scheduling: np.ndarray      # phi_un(r), shape (U,N)
 
 
@@ -30,7 +33,7 @@ class FastAction:
     uav_chunks: np.ndarray          # l_un(t), shape (U, N)
     uav_layers: np.ndarray          # k_un(t), shape (U, N)
     uav_power: np.ndarray           # p_un(t), shape (U, N)
-    uav_charge: np.ndarray          # I_u(t), shape (U,)
+    uav_charge: np.ndarray          # I_u(t), shape (U,), core parser compatibility; policy vector excludes this
     
     playback: np.ndarray            # b_n(t), shape (N,)
     rsu_user_distance: np.ndarray   # shape: (M, N)

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
 
 def _add_import_paths() -> None:
@@ -39,6 +40,7 @@ def main() -> None:
 
     from proposed.config import EnvConfig
     from proposed.env import Env, FastEnv, SlowEnv
+    from proposed.agent.PPO.ppo_network import ActorCritic
 
     cfg = EnvConfig()
 
@@ -50,10 +52,15 @@ def main() -> None:
     fast_env = FastEnv(cfg)
     fast_obs, fast_info = fast_env.reset()
     assert fast_env.observation_space.contains(fast_obs)
+    fast_obs_vec = fast_env.flatten_obs(fast_obs)
+    assert fast_obs_vec.shape == (fast_env.observation_vector_spec.dim,)
+    assert fast_obs_vec.dtype == np.float32
     assert fast_env.action_space.contains({})
     fast_action = _zero_fast_action(cfg)
     assert fast_env.action_space.contains(fast_action)
     assert len(fast_env.step(fast_action)) == 5
+    fast_vec_action = np.zeros(fast_env.action_vector_spec.dim, dtype=np.float32)
+    assert len(fast_env.step_vector(fast_vec_action)) == 5
 
     try:
         fast_env.apply_slow_action(_zero_slow_action(cfg))
@@ -66,8 +73,24 @@ def main() -> None:
     slow_obs, slow_info = slow_env.reset()
     slow_action = _zero_slow_action(cfg)
     assert slow_env.observation_space.contains(slow_obs)
+    slow_obs_vec = slow_env.flatten_obs(slow_obs)
+    assert slow_obs_vec.shape == (slow_env.observation_vector_spec.dim,)
+    assert slow_obs_vec.dtype == np.float32
     assert slow_env.action_space.contains(slow_action)
     assert len(slow_env.step(slow_action)) == 5
+    slow_env.reset()
+    slow_vec_action = np.zeros(slow_env.action_vector_spec.dim, dtype=np.float32)
+    assert len(slow_env.step_vector(slow_vec_action)) == 5
+
+    model = ActorCritic(
+        obs_dim=fast_env.observation_vector_spec.dim,
+        action_dim=fast_env.action_vector_spec.dim,
+        hidden_dim=32,
+    )
+    mean, log_std, value = model.forward(torch.as_tensor(fast_obs_vec))
+    assert tuple(mean.shape) == (fast_env.action_vector_spec.dim,)
+    assert tuple(log_std.shape) == (fast_env.action_vector_spec.dim,)
+    assert value.ndim == 0
 
     env = Env(cfg)
     env.reset()

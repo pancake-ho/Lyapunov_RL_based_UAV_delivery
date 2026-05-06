@@ -11,6 +11,16 @@ except ModuleNotFoundError:  # pragma: no cover - script-style fallback
 
 from .action_types import EnvAction
 from .env import Env
+from .interface import (
+    decode_fast_action_vector,
+    decode_slow_action_vector,
+    fast_action_spec,
+    fast_obs_spec,
+    flatten_fast_obs,
+    flatten_slow_obs,
+    slow_action_spec,
+    slow_obs_spec,
+)
 from .spaces import BoxSpace, DictSpace, MultiBinarySpace
 
 
@@ -107,6 +117,8 @@ class FastEnv:
         self.core = core_env if core_env is not None else Env(config)
         self.observation_space = _fast_observation_space(config)
         self.action_space = _fast_action_space(config)
+        self.observation_vector_spec = fast_obs_spec(config)
+        self.action_vector_spec = fast_action_spec(config)
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         if seed is not None:
@@ -118,6 +130,9 @@ class FastEnv:
     def step(self, action: EnvAction):
         return self.core.step(action)
 
+    def step_vector(self, action: np.ndarray):
+        return self.step(decode_fast_action_vector(action, self.cfg))
+
     def apply_slow_action(self, action: EnvAction):
         if int(self.core.round_slot) != 0:
             raise RuntimeError("slow action can only be applied at a round boundary.")
@@ -125,6 +140,9 @@ class FastEnv:
 
     def get_fast_obs(self) -> Dict[str, np.ndarray]:
         return self.core.get_fast_obs()
+
+    def flatten_obs(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
+        return flatten_fast_obs(obs, self.cfg)
 
 
 class SlowEnv:
@@ -139,6 +157,8 @@ class SlowEnv:
         self.core = core_env if core_env is not None else Env(config)
         self.observation_space = _slow_observation_space(config)
         self.action_space = _slow_action_space(config)
+        self.observation_vector_spec = slow_obs_spec(config)
+        self.action_vector_spec = slow_action_spec(config)
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         if seed is not None:
@@ -160,6 +180,12 @@ class SlowEnv:
             "truncated": False,
         }
         return self.core.get_slow_obs(), 0.0, False, False, info
+
+    def step_vector(self, action: np.ndarray):
+        return self.step(decode_slow_action_vector(action, self.cfg))
+
+    def flatten_obs(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
+        return flatten_slow_obs(obs, self.cfg)
 
 
 RoundEnv = SlowEnv
