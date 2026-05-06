@@ -49,5 +49,10 @@ class FastAction:
 class StepResult:
     state: Dict[str, np.ndarray]
     reward: float
-    done: bool
+    terminated: bool
+    truncated: bool
     info: Dict[str, Any]
+
+    @property
+    def done(self) -> bool:
+        return bool(self.terminated or self.truncated)

@@ -4,7 +4,10 @@ from typing import Optional, Tuple
 import numpy as np
 
 from .action_types import EnvAction, SlowAction, FastAction
-from proposed.config import EnvConfig
+try:
+    from proposed.config import EnvConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import EnvConfig
 
 
 def _as_binary_matrix(value: np.ndarray, shape: Tuple[int, int], name: str) -> np.ndarray:

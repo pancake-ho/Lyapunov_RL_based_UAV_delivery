@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from proposed.config import BatteryConfig
+try:
+    from proposed.config import BatteryConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import BatteryConfig
+
 from .battery_types import CommLinkInput, UAVBatteryMode
 
 

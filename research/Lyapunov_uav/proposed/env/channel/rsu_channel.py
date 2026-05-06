@@ -2,7 +2,11 @@ import math
 from typing import Optional
 
 import numpy as np
-from config import ChannelConfig
+try:
+    from proposed.config import ChannelConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import ChannelConfig
+
 from .base_channel import BaseChannelModel
 
 

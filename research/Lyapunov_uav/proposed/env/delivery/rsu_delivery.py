@@ -5,7 +5,11 @@ from typing import Optional
 
 import numpy as np
 
-from config import EnvConfig
+try:
+    from proposed.config import EnvConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import EnvConfig
+
 from ..channel import RSUChannelModel
 from ..action_types import SlowAction, FastAction
 

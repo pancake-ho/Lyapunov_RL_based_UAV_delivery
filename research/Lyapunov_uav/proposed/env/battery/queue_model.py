@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from config import BatteryConfig
+try:
+    from proposed.config import BatteryConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import BatteryConfig
 
 
 def energy_to_soc(

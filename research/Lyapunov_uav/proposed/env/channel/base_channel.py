@@ -1,6 +1,10 @@
 from typing import Optional
 import numpy as np
-from config import ChannelConfig
+
+try:
+    from proposed.config import ChannelConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import ChannelConfig
 
 
 class BaseChannelModel:
@@ -32,6 +36,9 @@ class BaseChannelModel:
         
         seed = getattr(config, "seed", None)
         self.rng = np.random.default_rng(seed)
+
+        # normalized noise power used by delivery/battery link info.
+        self.noise_power = 1.0 / max(self.db_to_linear(self.gamma_db), 1e-12)
         
     @staticmethod
     def db_to_linear(db_value: float) -> float:
