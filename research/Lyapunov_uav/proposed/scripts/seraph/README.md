@@ -73,6 +73,27 @@ Expected final line:
 PASS short_train_sanity
 ```
 
+Create a short report for the run:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/report_short_train.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --checkpoint-dir "$CHECKPOINT_DIR" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_report.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_report.md"
+```
+
+Diagnose reward and DPP term scales without tuning coefficients:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_reward_scale.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.md"
+```
+
 ## 2. Submit short train with sbatch
 
 Edit `sbatch_short_hrl_train_template.sh` before submission:
@@ -130,11 +151,36 @@ python3 Lyapunov_uav/proposed/scripts/check_short_train_sanity.py \
   --checkpoint-dir "$CHECKPOINT_DIR"
 ```
 
+Then create a report:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/report_short_train.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --checkpoint-dir "$CHECKPOINT_DIR" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_report.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_report.md"
+```
+
+Then diagnose reward and DPP term scales:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_reward_scale.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.md"
+```
+
 Check that:
 
 - `$LOG_DIR/${RUN_NAME}.jsonl` exists.
 - `$LOG_DIR/${RUN_NAME}_console.log` exists.
 - `$CHECKPOINT_DIR/${RUN_NAME}_update0001.pt` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_report.json` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_report.md` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_scale_analysis.json` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_scale_analysis.md` exists.
 - Sanity check ends with `PASS short_train_sanity`.
 
 ## 4. Failure checklist
