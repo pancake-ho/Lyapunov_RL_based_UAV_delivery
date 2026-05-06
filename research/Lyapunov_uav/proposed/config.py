@@ -122,10 +122,12 @@ class EnvConfig:
     base_chunk_size_bits: float = 2e5
 
     # reward 계수
-    # 아직 최적화 산식이 완료되지 않았으므로, 주석 처리.
-    # stall_penalty: float = 4.0
-    # battery_virtual_penalty: float = 0.2
-    # outage_penalty: float = 5.0
+    # Perturbed Lyapunov / DPP reward hook
+    theta_z: Optional[Tuple[float, ...]] = None
+    dpp_video_weight: float = 1.0
+    dpp_quality_weight: float = 1.0
+    dpp_battery_weight: float = 1.0
+    dpp_charging_weight: float = 1.0
 
     # 각 layer에 대한 quality 가중치
     quality_weights: Tuple[float, ...] = (1.0, 2.0, 3.0, 4.0, 5.0)
@@ -183,9 +185,25 @@ class EnvConfig:
             raise ValueError("playback_rate는 0 이상의 값을 가져야 합니다.")
         if self.base_chunk_size_bits <= 0.0:
             raise ValueError("base_chunk_size_bits는 양수 값을 가져야 합니다.")
-    
+
         if len(self.quality_weights) != self.layer:
             raise ValueError(f"quality_weights의 len {len(self.quality_weights)}는 layer와 같아야 합니다.")
+
+        if self.theta_z is not None:
+            if len(self.theta_z) != self.num_user:
+                raise ValueError("theta_z가 주어지면 num_user와 같은 길이를 가져야 합니다.")
+            self.theta_z = tuple(
+                float(min(max(theta, 0.0), float(self.max_queue)))
+                for theta in self.theta_z
+            )
+        if self.dpp_video_weight < 0.0:
+            raise ValueError("dpp_video_weight는 0 이상의 값을 가져야 합니다.")
+        if self.dpp_quality_weight < 0.0:
+            raise ValueError("dpp_quality_weight는 0 이상의 값을 가져야 합니다.")
+        if self.dpp_battery_weight < 0.0:
+            raise ValueError("dpp_battery_weight는 0 이상의 값을 가져야 합니다.")
+        if self.dpp_charging_weight < 0.0:
+            raise ValueError("dpp_charging_weight는 0 이상의 값을 가져야 합니다.")
         
         # 하나의 UAV는 coverage region(RSU) 당 한 대 고용될 수 있음
         if self.num_uav != self.num_rsu:

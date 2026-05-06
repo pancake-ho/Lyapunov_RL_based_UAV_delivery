@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import List
 
-from proposed.config import BatteryConfig
+try:
+    from proposed.config import BatteryConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import BatteryConfig
+
 from .battery_types import BatteryAction, UAVBatteryMode, CommLinkInput
 
 
@@ -29,6 +33,7 @@ def validate_links(links: List[CommLinkInput],) -> List[CommLinkInput]:
     for link in links:
         scheduled = bool(link.scheduled)
         delivered_chunks = max(0, int(link.delivered_chunks))
+        delivered_layers = max(0, int(link.delivered_layers))
         payload_bits = max(0.0, float(link.payload_bits))
         channel_gain = max(0.0, float(link.channel_gain))
         noise_power = max(0.0, float(link.noise_power))
@@ -52,6 +57,7 @@ def validate_links(links: List[CommLinkInput],) -> List[CommLinkInput]:
             CommLinkInput(
                 scheduled=scheduled,
                 delivered_chunks=delivered_chunks,
+                delivered_layers=delivered_layers,
                 payload_bits=payload_bits,
                 channel_gain=channel_gain,
                 noise_power=noise_power,

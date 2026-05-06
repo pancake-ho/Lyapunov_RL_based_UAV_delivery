@@ -7,9 +7,14 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
 
-from ppo_config import PPOConfig
-from ppo_network import ActorCritic
-from ppo_buffer import RolloutBuffer
+try:
+    from .ppo_config import PPOConfig
+    from .ppo_network import ActorCritic
+    from .ppo_buffer import RolloutBuffer
+except ImportError:  # pragma: no cover - script-style fallback
+    from ppo_config import PPOConfig
+    from ppo_network import ActorCritic
+    from ppo_buffer import RolloutBuffer
 
 EPS = 1e-6
 

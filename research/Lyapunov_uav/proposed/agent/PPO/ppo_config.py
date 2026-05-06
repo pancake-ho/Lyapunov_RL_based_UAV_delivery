@@ -1,15 +1,32 @@
 from dataclasses import dataclass
+import torch
+
 
 @dataclass
 class PPOConfig:
+    """
+    PPO 공통 설정 클래스
+
+    Low-level PPO와 High-level PPO가 같은 PPO를 공유하되,
+    obs/action-dim 및 rollout 단위만 다르게 설정
+    """
     gamma: float = 0.99
     gae_lambda: float = 0.95
+
     clip_ratio: float = 0.2
     learning_rate: float = 3e-4
     value_coef: float = 0.5
     entropy_coef: float = 0.01
-    max_grad_norn: float = 0.5
+    max_grad_norm: float = 0.5
+
     update_epochs: int = 10
     batch_size: int = 256
     hidden_dim: int = 256
-    device: str
+
+    rollout_steps: int = 1024
+    total_updates: int = 1000
+    save_interval: int = 50
+    log_interval: int = 10
+    
+    seed: int = 2026
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"

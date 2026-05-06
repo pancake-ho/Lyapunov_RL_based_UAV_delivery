@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import numpy as np
 
-from config import EnvConfig
-from .action_types import EnvAction, ParsedAction, StepResult
-from .validators import parse_action
+try:
+    from proposed.config import EnvConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import EnvConfig
+
+from .action_types import EnvAction, SlowAction, FastAction
+from .validators import parse_slow_action, parse_fast_action
 from .channel import RSUChannelModel, UAVChannelModel
 from .delivery.rsu_delivery import compute_rsu_delivery
 from .delivery.uav_delivery import compute_uav_delivery
@@ -84,6 +88,16 @@ class Env:
 
         # round energy
         self.round_start_E = np.zeros(self.num_uav, dtype=np.float32)
+
+    def _reset_info(self) -> Dict[str, Any]:
+        return {
+            "episode": int(self.episode),
+            "time": int(self.t),
+            "round_idx": int(self.round_idx),
+            "round_slot": int(self.round_slot),
+            "slow_timescale_ready": True,
+            "fast_timescale_ready": True,
+        }
     
     @property
     def E(self) -> np.ndarray:
@@ -145,28 +159,174 @@ class Env:
         for battery in self.batteries:
             battery.start_round(round_horizon=self.slow_T)
 
-    def _build_effective_action(self, parsed: ParsedAction) -> ParsedAction:
+    def _rule_based_uav_charge(self) -> np.ndarray:
+        """
+        fast action에 uav_charge가 명시되지 않은 경우 사용할 rule-based charging hook.
+
+        현재 1단계에서는 SoC가 e_min 이하이고 고용된 UAV만 charging 후보로 둔다.
+        """
+        if not bool(self.cfg.battery.allow_charge):
+            return np.zeros(self.num_uav, dtype=np.int32)
+        if not bool(self.cfg.battery.enable_charging):
+            return np.zeros(self.num_uav, dtype=np.int32)
+
+        low_soc = (self.E <= float(self.cfg.battery.e_min)).astype(np.int32)
+        return (low_soc * self.uav_hiring).astype(np.int32)
+
+    def _clear_charging_service_actions(self, fast_act: FastAction) -> None:
+        for uav_idx in range(self.num_uav):
+            if int(fast_act.uav_charge[uav_idx]) != 1:
+                continue
+            fast_act.uav_chunks[uav_idx, :] = 0
+            fast_act.uav_layers[uav_idx, :] = 0
+            fast_act.uav_power[uav_idx, :] = 0.0
+
+    def _theta_z(self) -> np.ndarray:
+        theta_z = getattr(self.cfg, "theta_z", None)
+        if theta_z is None:
+            return np.full(
+                self.num_user,
+                0.5 * float(self.cfg.max_queue),
+                dtype=np.float32,
+            )
+        return np.asarray(theta_z, dtype=np.float32)
+
+    def _compute_reward(
+        self,
+        *,
+        prev_Q: np.ndarray,
+        next_Q: np.ndarray,
+        prev_Z: np.ndarray,
+        next_Z: np.ndarray,
+        prev_E: np.ndarray,
+        next_E: np.ndarray,
+        prev_Y: np.ndarray,
+        next_Y: np.ndarray,
+        stall: np.ndarray,
+        quality_total_per_user: np.ndarray,
+        uav_hiring: np.ndarray,
+        charging_state: np.ndarray,
+        battery_step_info: list[Dict[str, Any]],
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        Perturbed Lyapunov DPP reward hook.
+
+        Z_n(t)는 theta_z 근처로 유지하고, battery virtual queue는 service
+        feasibility pressure로만 반영한다. 실제 PPO 연결은 별도 adapter에서
+        수행한다.
+        """
+        theta_z = self._theta_z()
+        prev_Z_arr = np.asarray(prev_Z, dtype=np.float32)
+        next_Z_arr = np.asarray(next_Z, dtype=np.float32)
+        prev_Y_arr = np.asarray(prev_Y, dtype=np.float32)
+        next_Y_arr = np.asarray(next_Y, dtype=np.float32)
+
+        z_drift = next_Z_arr - prev_Z_arr
+        y_drift = next_Y_arr - prev_Y_arr
+        y_reduction = np.maximum(prev_Y_arr - next_Y_arr, 0.0)
+
+        video_delivery_pressure = -float(np.sum((prev_Z_arr - theta_z) * z_drift))
+        quality_reward = float(np.asarray(quality_total_per_user, dtype=np.float32).sum())
+        battery_service_pressure = -float(np.sum(prev_Y_arr * np.maximum(y_drift, 0.0)))
+        charging_effect = float(np.sum(prev_Y_arr * y_reduction))
+
+        total_dpp_reward = (
+            float(self.cfg.dpp_video_weight) * video_delivery_pressure
+            + float(self.cfg.dpp_quality_weight) * quality_reward
+            + float(self.cfg.dpp_battery_weight) * battery_service_pressure
+            + float(self.cfg.dpp_charging_weight) * charging_effect
+        )
+
+        components = {
+            "reward_version": "perturbed_dpp_hook_v1",
+            "theta_z": theta_z.copy(),
+            "prev_Q": np.asarray(prev_Q, dtype=np.float32).copy(),
+            "next_Q": np.asarray(next_Q, dtype=np.float32).copy(),
+            "prev_Z": prev_Z_arr.copy(),
+            "next_Z": next_Z_arr.copy(),
+            "prev_E": np.asarray(prev_E, dtype=np.float32).copy(),
+            "next_E": np.asarray(next_E, dtype=np.float32).copy(),
+            "prev_Y": prev_Y_arr.copy(),
+            "next_Y": next_Y_arr.copy(),
+            "video_delivery_pressure": video_delivery_pressure,
+            "quality_reward": quality_reward,
+            "battery_service_pressure": battery_service_pressure,
+            "charging_effect": charging_effect,
+            "total_dpp_reward": float(total_dpp_reward),
+            "stall_sum": float(np.asarray(stall, dtype=np.float32).sum()),
+            "quality_sum": quality_reward,
+            "battery_virtual_sum": float(np.asarray(next_Y, dtype=np.float32).sum()),
+            "num_hired_uav": int(np.asarray(uav_hiring, dtype=np.int32).sum()),
+            "num_charging_uav": int(np.asarray(charging_state, dtype=np.int32).sum()),
+            "num_outage_uav": int(self.outage.sum()),
+            "weights": {
+                "video": float(self.cfg.dpp_video_weight),
+                "quality": float(self.cfg.dpp_quality_weight),
+                "battery": float(self.cfg.dpp_battery_weight),
+                "charging": float(self.cfg.dpp_charging_weight),
+            },
+            "battery_step_info": battery_step_info,
+        }
+        return float(total_dpp_reward), components
+
+    def apply_slow_action(self, action: EnvAction) -> SlowAction:
+        """
+        slow-timescale decision을 갱신하는 함수
+        """
+        slow_act = parse_slow_action(action, self.cfg)
+
+        self.rsu_scheduling = slow_act.rsu_scheduling.copy()
+        self.uav_hiring = slow_act.uav_hiring.copy()
+        self.uav_scheduling = slow_act.uav_scheduling.copy()
+
+        self._start_new_round()
+        return slow_act
+
+    def _build_effective_fast_action(self, fast_act: FastAction) -> FastAction:
         """
         slow-timescale decision은 round 경계에서 갱신되고,
         나머지 slot에서는 이전의 round decision을 유지하도록 하는 effective action을 생성하는 함수
         """
-        residual_users = (
-            (self.rsu_scheduling.sum(axis=0) == 0).astype(np.int32)
-        )
+        residual_users = (self.rsu_scheduling.sum(axis=0) == 0).astype(np.int32)
 
-        return ParsedAction(
-            rsu_scheduling=self.rsu_scheduling.copy(),
-            uav_hiring=self.uav_hiring.copy(),
-            uav_scheduling=(self.uav_scheduling * residual_users[None, :]).copy(),
-            rsu_chunks=parsed.rsu_chunks.copy(),
-            rsu_layers=parsed.rsu_layers.copy(),
-            uav_chunks=(parsed.uav_chunks * residual_users[None, :]).copy(),
-            uav_layers=(parsed.uav_layers * residual_users[None, :]).copy(),
-            uav_power=(parsed.uav_power * residual_users[None, :].astype(np.float32)).copy(),
-            uav_charge=parsed.uav_charge.copy(),
-            playback=parsed.playback.copy(),
-            rsu_user_distance=parsed.rsu_user_distance.copy(),
-            uav_user_distance=parsed.uav_user_distance.copy(),
+        # 유효한 action 정의
+        effective_uav_chunks = fast_act.uav_chunks.copy()
+        effective_uav_layers = fast_act.uav_layers.copy()
+        effective_uav_power = fast_act.uav_power.copy()
+
+        effective_rsu_chunks = fast_act.rsu_chunks.copy()
+        effective_rsu_layers = fast_act.rsu_layers.copy()
+
+        # round-level hiring이 꺼져 있는 UAV는 fast action 제거
+        inactive_uav_mask = (self.uav_hiring <= 0)
+        effective_uav_chunks[inactive_uav_mask, :] = 0
+        effective_uav_layers[inactive_uav_mask, :] = 0
+        effective_uav_power[inactive_uav_mask, :] = 0.0
+
+        # round-level uav scheduling이 없는 링크는 fast action 제거
+        effective_uav_chunks = effective_uav_chunks * self.uav_scheduling
+        effective_uav_layers = effective_uav_layers * self.uav_scheduling
+        effective_uav_power = effective_uav_power * self.uav_scheduling.astype(np.float32)
+
+        # round-level rsu scheduling 없으면 fast rsu action 제거
+        effective_rsu_chunks = effective_rsu_chunks * self.rsu_scheduling
+        effective_rsu_layers = effective_rsu_layers * self.rsu_scheduling
+
+        # residual user가 아니면 UAV service 제거
+        effective_uav_chunks = effective_uav_chunks * residual_users[None, :]
+        effective_uav_layers = effective_uav_layers * residual_users[None, :]
+        effective_uav_power = effective_uav_power * residual_users[None, :].astype(np.float32)
+
+        return FastAction(
+            rsu_chunks=effective_rsu_chunks,
+            rsu_layers=effective_rsu_layers,
+            uav_chunks=effective_uav_chunks,
+            uav_layers=effective_uav_layers,
+            uav_power=effective_uav_power,
+            uav_charge=fast_act.uav_charge.copy(),
+            playback=fast_act.playback.copy(),
+            rsu_user_distance=fast_act.rsu_user_distance.copy(),
+            uav_user_distance=fast_act.uav_user_distance.copy(),
             residual_users=residual_users.astype(np.int32),
             user_virtual_queue=self.Z.copy(),
             requested_content=self.requested_content.copy(),
@@ -204,7 +364,7 @@ class Env:
         )
 
         battery.soc = float(next_soc)
-        battery_virtual_q = float(next_virtual_q)
+        battery.virtual_q = float(next_virtual_q)
         battery.round_remaining_slots = max(0, int(battery.round_remaining_slots) - 1)
 
         is_outage = bool(check_outage(battery.soc))
@@ -220,15 +380,30 @@ class Env:
             soc_before=float(soc_before),
             soc_after=float(battery.soc),
             virtual_before=float(virtual_before),
-            virtual_after=float(battery_virtual_q),
+            virtual_after=float(battery.virtual_q),
             outage=bool(is_outage),
         )
 
         return asdict(step_info)
     
-    def _get_state(self) -> Dict[str, np.ndarray]:
+    def get_slow_obs(self) -> Dict[str, np.ndarray]:
         """
-        현 상태값을 반환하는 함수
+        slow-timescale 상태값을 반환하는 함수
+        """
+        return {
+            "Q": self.queue.copy(),
+            "Z": self.Z.copy(),
+            "E": self.E.copy(),
+            "Y": self.Y.copy(),
+            "requested_content": self.requested_content.copy(),
+            "uav_cached_content": self.uav_cached_content.copy(),
+            "outage": self.outage.copy(),
+            "round_idx": np.array([self.round_idx], dtype=np.int32),
+        }
+
+    def get_fast_obs(self) -> Dict[str, np.ndarray]:
+        """
+        fast-timescale 상태값을 반환하는 함수
         """
         return {
             "Q": self.queue.copy(),
@@ -246,8 +421,8 @@ class Env:
             "round_slot": np.array([self.round_slot], dtype=np.int32),
             "time": np.array([self.t], dtype=np.int32),
         }
-    
-    def reset(self) -> Dict[str, np.ndarray]:
+        
+    def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
         에피소드 초기화 수행 함수로
         큐, 배터리, 위치 등 State 변수 초기화
@@ -285,25 +460,30 @@ class Env:
 
         self.round_start_E = self.E.copy()
 
-        return self._get_state()
+        return self.get_fast_obs(), self._reset_info()
 
-    def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
+    def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         """
-        환경의 1-slot 진행 함수
-
-        - Slow Timescale: UAV 고용 및 스케줄링 수행
-        - Fast Timescale: 비디오 청크 및 레이어 전송 수행
+        환경의 1-slot 진행 함수로, Fast-timescale 진행을 담당
         """
-        parsed = parse_action(action, self.cfg)
+        charge_action_provided = "uav_charge" in action
+        fast_act = parse_fast_action(action, self.cfg)
 
-        # round 경계에서 slow-timescale decision을 갱신함
-        if self.t % self.slow_T == 0:
-            self.rsu_scheduling = parsed.rsu_scheduling.copy()
-            self.uav_hiring = parsed.uav_hiring.copy()
-            self.uav_scheduling = parsed.uav_scheduling.copy()
-            self._start_new_round()
-        
-        effective = self._build_effective_action(parsed)
+        if not charge_action_provided:
+            fast_act.uav_charge = self._rule_based_uav_charge()
+            self._clear_charging_service_actions(fast_act)
+
+        fast_act_eff = self._build_effective_fast_action(fast_act)
+
+        slow_act = SlowAction(
+            rsu_scheduling=self.rsu_scheduling.copy(),
+            uav_hiring=self.uav_hiring.copy(),
+            uav_scheduling=self.uav_scheduling.copy(),
+        )
+
+        prev_t = int(self.t)
+        prev_round_idx = int(self.round_idx)
+        prev_round_slot = int(self.round_slot)
 
         prev_E = self.E.copy()
         prev_Y = self.Y.copy()
@@ -313,7 +493,8 @@ class Env:
         # RSU delivery
         rsu_result = compute_rsu_delivery(
             cfg=self.cfg,
-            parsed=effective,
+            slow_act=slow_act,
+            fast_act=fast_act_eff,
             rsu_channel=self.rsu_channel,
             rng=self.rng,
         )
@@ -322,7 +503,8 @@ class Env:
         battery_soc_before_uav = self.E.copy()
         uav_result = compute_uav_delivery(
             cfg=self.cfg,
-            parsed=effective,
+            slow_act=slow_act,
+            fast_act=fast_act_eff,
             battery_parsed=battery_soc_before_uav,
             uav_channel=self.uav_channel,
             rng=self.rng,
@@ -333,7 +515,7 @@ class Env:
 
         for u in range(self.num_uav):
             mu_active = bool(self.uav_hiring[u])
-            charge_flag = bool(effective.uav_charge[u])
+            charge_flag = bool(fast_act_eff.uav_charge[u])
 
             if not mu_active:
                 mode = UAVBatteryMode.IDLE
@@ -372,7 +554,7 @@ class Env:
         quality_uav_per_user = uav_result.quality_per_user.astype(np.float32)
         quality_total_per_user = quality_rsu_per_user + quality_uav_per_user
 
-        playback = effective.playback.astype(np.float32)
+        playback = fast_act_eff.playback.astype(np.float32)
         consumed = np.minimum(self.queue, playback)
         stall = np.maximum(playback - self.queue, 0.0)
 
@@ -382,43 +564,85 @@ class Env:
             float(self.cfg.max_queue),
         ).astype(np.float32)
 
-
-        # reward 아직 확정되지않았으므로, 미구현
-
         # time update
         self.t += 1
+        self.round_idx = self.t // self.slow_T
         self.round_slot = self.t % self.slow_T
 
-        done = False
+        # 갱신
+        next_t = int(self.t)
+        next_round_idx = int(self.round_idx)
+        next_round_slot = int(self.round_slot)
+
+        reward, reward_components = self._compute_reward(
+            prev_Q=prev_Q,
+            next_Q=self.queue,
+            prev_Z=prev_Z,
+            next_Z=self.Z,
+            prev_E=prev_E,
+            next_E=self.E,
+            prev_Y=prev_Y,
+            next_Y=self.Y,
+            stall=stall,
+            quality_total_per_user=quality_total_per_user,
+            uav_hiring=self.uav_hiring,
+            charging_state=self.charging_state,
+            battery_step_info=battery_step_info,
+        )
+        terminated = False
+        truncated = False
+        is_round_boundary = bool(next_round_slot == 0)
 
         info: Dict[str, Any] = {
-            "prev_Q": prev_Q.copy(),
-            "next_Q": self.queue.copy(),
-            "prev_Z": prev_Z.copy(),
-            "next_Z": self.Z.copy(),
-            "prev_E": prev_E.copy(),
-            "next_E": self.E.copy(),
-            "prev_Y": prev_Y.copy(),
-            "next_Y": self.Y.copy(),
-            "round_idx": int(self.round_idx),
-            "round_slot": int(self.round_slot),
+            # 1) transition meta
+            "prev_time": prev_t,
+            "next_time": next_t,
+            "prev_round_slot": prev_round_slot,
+            "next_round_slot": next_round_slot,
+            "active_round_idx": prev_round_idx,
+            "next_round_idx": next_round_idx,
+            "is_round_boundary": is_round_boundary,
+            "terminated": terminated,
+            "truncated": truncated,
+
+            # 2) slow-timescale active context
             "uav_hiring": self.uav_hiring.copy(),
             "rsu_scheduling": self.rsu_scheduling.copy(),
             "uav_scheduling": self.uav_scheduling.copy(),
             "requested_content": self.requested_content.copy(),
             "uav_cached_content": self.uav_cached_content.copy(),
+            "residual_users": fast_act_eff.residual_users.copy(),
+            "charge_action_provided": bool(charge_action_provided),
+            "uav_charge_effective": fast_act_eff.uav_charge.copy(),
+
+            # 3) queue transition
+            "prev_Q": prev_Q.copy(),
+            "next_Q": self.queue.copy(),
+            "prev_Z": prev_Z.copy(),
+            "next_Z": self.Z.copy(),
             "playback": playback.copy(),
             "consumed": consumed.copy(),
             "stall": stall.copy(),
+
+            # 4) battery transition
+            "prev_E": prev_E.copy(),
+            "next_E": self.E.copy(),
+            "prev_Y": prev_Y.copy(),
+            "next_Y": self.Y.copy(),
+            "outage": self.outage.copy(),
+            "charging_state": self.charging_state.copy(),
+            "battery_step_info": battery_step_info,
+
+            # 5) slot execution result
             "delivered_rsu_per_user": delivered_rsu_per_user.copy(),
             "delivered_uav_per_user": delivered_uav_per_user.copy(),
             "delivered_total_per_user": delivered_total_per_user.copy(),
             "quality_rsu_per_user": quality_rsu_per_user.copy(),
             "quality_uav_per_user": quality_uav_per_user.copy(),
             "quality_total_per_user": quality_total_per_user.copy(),
-            "outage": self.outage.copy(),
-            "charging_state": self.charging_state.copy(),
-            "battery_step_info": battery_step_info,
+            "dpp_terms": reward_components,
+            "reward_components": reward_components,
+
             "rsu_result": {
                 "requested_mask": rsu_result.requested_mask.copy(),
                 "capped_mask": rsu_result.capped_mask.copy(),
@@ -443,5 +667,4 @@ class Env:
             },
         }
 
-        # 원래는 reward도 추가해야함
-        return self._get_state(), done, info
+        return self.get_fast_obs(), reward, terminated, truncated, info

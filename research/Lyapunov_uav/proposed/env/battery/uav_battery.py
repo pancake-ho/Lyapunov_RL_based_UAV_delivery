@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import List
 
-from proposed.config import BatteryConfig
+try:
+    from proposed.config import BatteryConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import BatteryConfig
+
 from .battery_types import (
     BatteryAction,
     BatteryState,
@@ -101,7 +105,7 @@ class UAVBattery:
             mode=mode,
             mu_active=bool(mu_active),
             links=links,
-            hover_only_when_serving=self.consume_hover_when_idle,
+            consume_hover_when_idle=self.consume_hover_when_idle,
         )
 
 

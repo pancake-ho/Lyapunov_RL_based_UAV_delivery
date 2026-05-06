@@ -5,10 +5,14 @@ from typing import Optional
 
 import numpy as np
 
-from config import EnvConfig
+try:
+    from proposed.config import EnvConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import EnvConfig
+
 from ..battery import CommLinkInput
 from ..channel import UAVChannelModel
-from ..action_types import ParsedAction
+from ..action_types import SlowAction, FastAction
 from ..util import _ensure_shape, _safe_get_attr
 
 
@@ -116,7 +120,8 @@ def _normalize_battery_soc(
     
 def compute_uav_delivery(
     cfg: EnvConfig,
-    parsed: ParsedAction,
+    slow_act: SlowAction,
+    fast_act: FastAction,
     battery_parsed,
     uav_channel: UAVChannelModel,
     rng: Optional[np.random.Generator] = None,
@@ -134,14 +139,14 @@ def compute_uav_delivery(
     # slow timescale
     # 고용 여부와 스케줄링 여부를 결정
     hire_mask = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_hiring"], None),
+        _safe_get_attr(slow_act, ["uav_hiring"], None),
         (num_uav,),
         bool,
         fill_value=False,
     )
 
     sched_mask = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_scheduling"], None),
+        _safe_get_attr(slow_act, ["uav_scheduling"], None),
         (num_uav, num_user),
         bool,
         fill_value=False,
@@ -150,7 +155,7 @@ def compute_uav_delivery(
     # residual user set
     # True 이면, UAV로 처리되지 못해 UAV의 후보에 포함된 것
     residual_mask = _ensure_shape(
-        _safe_get_attr(parsed, ["residual_users"], None),
+        _safe_get_attr(fast_act, ["residual_users"], None),
         (num_user,),
         bool,
         fill_value=True,
@@ -159,21 +164,21 @@ def compute_uav_delivery(
     # fast timescale
     # 청크 수 및 레이어 수, 송신 전력 제어를 결정
     req_chunks = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_chunks"], None),
+        _safe_get_attr(fast_act, ["uav_chunks"], None),
         (num_uav, num_user),
         np.int32,
         fill_value=0,
     )
 
     req_layers = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_layers"], None),
+        _safe_get_attr(fast_act, ["uav_layers"], None),
         (num_uav, num_user),
         np.int32,
         fill_value=0,
     )
 
     tx_power = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_power"], None),
+        _safe_get_attr(fast_act, ["uav_power"], None),
         (num_uav, num_user),
         np.float32,
         fill_value=0.0,
@@ -182,38 +187,38 @@ def compute_uav_delivery(
 
     # 충전 여부 및 state
     charge_mask = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_charge"], None),
+        _safe_get_attr(fast_act, ["uav_charge"], None),
         (num_uav,),
         bool,
         fill_value=False,
     )
 
-    battery_soc = +_normalize_battery_soc(battery_parsed, num_uav)
+    battery_soc = _normalize_battery_soc(battery_parsed, num_uav)
 
     # distance 및 user side information 관련
     uav_user_distance = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_user_distance"], None),
+        _safe_get_attr(fast_act, ["uav_user_distance"], None),
         (num_uav, num_user),
         np.float32,
         fill_value=float(cfg.uav_channel.distance),
     )
 
     user_virtual_queue = _ensure_shape(
-        _safe_get_attr(parsed, ["user_virtual_queue"], None),
+        _safe_get_attr(fast_act, ["user_virtual_queue"], None),
         (num_user,),
         np.float32,
         fill_value=0.0,
     )
 
     requested_content = _ensure_shape(
-        _safe_get_attr(parsed, ["requested_content"], None),
+        _safe_get_attr(fast_act, ["requested_content"], None),
         (num_user,),
         np.int32,
         fill_value=-1,
     )
 
     cached_content = _ensure_shape(
-        _safe_get_attr(parsed, ["uav_cached_content"], None),
+        _safe_get_attr(fast_act, ["uav_cached_content"], None),
         (num_uav,),
         np.int32,
         fill_value=-1,
