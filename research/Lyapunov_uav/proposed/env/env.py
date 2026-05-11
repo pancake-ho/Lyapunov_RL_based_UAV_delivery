@@ -60,8 +60,6 @@ class Env:
             for _ in range(self.num_uav)
         ]
 
-        # reward 산식은 확정되지 않았으므로 미선언
-        
         # runtime state
         self.t = 0
         self.episode = 0
@@ -89,15 +87,57 @@ class Env:
         # round energy
         self.round_start_E = np.zeros(self.num_uav, dtype=np.float32)
 
-    def _reset_info(self) -> Dict[str, Any]:
-        return {
+    
+    def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        """
+        에피소드 초기화 수행 함수로
+        큐, 배터리, 위치 등 State 변수 초기화
+        """
+        # time slot 및 round 초기화 / 동시에 에피소드는 1 증가
+        self.t = 0
+        self.episode += 1
+        self.round_idx = 0
+        self.round_slot = 0
+
+        # 사용자 큐 초기화
+        self.queue = np.full(self.num_user, float(self.cfg.init_queue), dtype=np.float32)
+
+        # slow-timescale decision 초기화
+        self.rsu_scheduling = np.zeros(
+            (self.num_rsu, self.num_user), dtype=np.int32
+        )
+        self.uav_hiring = np.zeros(self.num_uav, dtype=np.int32)
+        self.uav_scheduling = np.zeros(
+            (self.num_uav, self.num_user), dtype=np.int32
+        )
+
+        # content 초기화
+        self.requested_content = self._sample_requested_content()
+        self.uav_cached_content = self._sample_uav_cached_content()
+
+        # battery 초기화
+        for battery in self.batteries:
+            battery.reset_episode()
+            battery.start_round(round_horizon=self.slow_T)
+
+        self.outage = np.zeros(self.num_uav, dtype=np.int32)
+        self.charging_state = np.zeros(self.num_uav, dtype=np.int32)
+        self.charge_counters = np.zeros(self.num_uav, dtype=np.float32)
+
+        self.round_start_E = self.E.copy()
+
+        obs = self.get_fast_obs()
+        info: Dict[str, Any] = {
             "episode": int(self.episode),
             "time": int(self.t),
             "round_idx": int(self.round_idx),
             "round_slot": int(self.round_slot),
-            "slow_timescale_ready": True,
-            "fast_timescale_ready": True,
+            "reset": True,
+            "obs_type": "fast_obs",
         }
+
+        return obs, info
+
     
     @property
     def E(self) -> np.ndarray:
@@ -193,7 +233,6 @@ class Env:
 
     def _compute_reward(
         self,
-        *,
         prev_Q: np.ndarray,
         next_Q: np.ndarray,
         prev_Z: np.ndarray,
@@ -428,46 +467,6 @@ class Env:
             "round_slot": np.array([self.round_slot], dtype=np.int32),
             "time": np.array([self.t], dtype=np.int32),
         }
-        
-    def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-        """
-        에피소드 초기화 수행 함수로
-        큐, 배터리, 위치 등 State 변수 초기화
-        """
-        # time slot 및 round 초기화 / 동시에 에피소드는 1 증가
-        self.t = 0
-        self.episode += 1
-        self.round_idx = 0
-        self.round_slot = 0
-
-        # 사용자 큐 초기화
-        self.queue = np.full(self.num_user, float(self.cfg.init_queue), dtype=np.float32)
-
-        # slow-timescale decision 초기화
-        self.rsu_scheduling = np.zeros(
-            (self.num_rsu, self.num_user), dtype=np.int32
-        )
-        self.uav_hiring = np.zeros(self.num_uav, dtype=np.int32)
-        self.uav_scheduling = np.zeros(
-            (self.num_uav, self.num_user), dtype=np.int32
-        )
-
-        # content 초기화
-        self.requested_content = self._sample_requested_content()
-        self.uav_cached_content = self._sample_uav_cached_content()
-
-        # battery 초기화
-        for battery in self.batteries:
-            battery.reset_episode()
-            battery.start_round(round_horizon=self.slow_T)
-
-        self.outage = np.zeros(self.num_uav, dtype=np.int32)
-        self.charging_state = np.zeros(self.num_uav, dtype=np.int32)
-        self.charge_counters = np.zeros(self.num_uav, dtype=np.float32)
-
-        self.round_start_E = self.E.copy()
-
-        return self.get_fast_obs(), self._reset_info()
 
     def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         """
