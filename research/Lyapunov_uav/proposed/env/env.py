@@ -138,7 +138,6 @@ class Env:
 
         return obs, info
 
-    
     @property
     def E(self) -> np.ndarray:
         """
@@ -231,7 +230,7 @@ class Env:
             )
         return np.asarray(theta_z, dtype=np.float32)
 
-    def _compute_reward(
+    def _compute_fast_reward(
         self,
         prev_Q: np.ndarray,
         next_Q: np.ndarray,
@@ -241,79 +240,91 @@ class Env:
         next_E: np.ndarray,
         prev_Y: np.ndarray,
         next_Y: np.ndarray,
-        stall: np.ndarray,
+        delivered_total_per_user: np.ndarray,
         quality_total_per_user: np.ndarray,
         uav_hiring: np.ndarray,
         charging_state: np.ndarray,
         battery_step_info: list[Dict[str, Any]],
     ) -> Tuple[float, Dict[str, Any]]:
         """
-        Perturbed Lyapunov DPP reward hook.
+        Fast-timescale perturbed DPP reward
 
         Z_n(t)는 theta_z 근처로 유지하고, battery virtual queue는 service
         feasibility pressure로만 반영한다. 실제 PPO 연결은 별도 adapter에서
         수행한다.
         """
         theta_z = self._theta_z()
+
+        prev_Q_arr = np.asarray(prev_Q, dtype=np.float32)
+        next_Q_arr = np.asarray(next_Q, dtype=np.float32)
         prev_Z_arr = np.asarray(prev_Z, dtype=np.float32)
         next_Z_arr = np.asarray(next_Z, dtype=np.float32)
+        prev_E_arr = np.asarray(prev_E, dtype=np.float32)
+        next_E_arr = np.asarray(next_E, dtype=np.float32)
         prev_Y_arr = np.asarray(prev_Y, dtype=np.float32)
         next_Y_arr = np.asarray(next_Y, dtype=np.float32)
 
-        z_drift = next_Z_arr - prev_Z_arr
-        y_drift = next_Y_arr - prev_Y_arr
-        y_reduction = np.maximum(prev_Y_arr - next_Y_arr, 0.0)
+        delivered_arr = np.asarray(delivered_total_per_user, dtype=np.float32)
+        quality_arr = np.asarray(quality_total_per_user, dtype=np.float32)
 
-        video_delivery_pressure = -float(np.sum((prev_Z_arr - theta_z) * z_drift))
-        quality_reward = float(np.asarray(quality_total_per_user, dtype=np.float32).sum())
-        battery_service_pressure = -float(np.sum(prev_Y_arr * np.maximum(y_drift, 0.0)))
-        charging_effect = float(np.sum(prev_Y_arr * y_reduction))
-
-        total_dpp_reward = (
-            float(self.cfg.reward.video_delivery_weight) * video_delivery_pressure
-            + float(self.cfg.reward.quality_weight) * quality_reward
-            + float(self.cfg.reward.battery_service_weight) * battery_service_pressure
-            + float(self.cfg.reward.charging_weight) * charging_effect
+        consumed_soc_arr = np.array(
+            [
+                float(info.get("consumed_soc", 0.0))
+                for info in battery_step_info
+            ],
+            dtype=np.float32,
         )
-        fast_reward = float(self.cfg.reward.fast_reward_weight) * float(total_dpp_reward)
+        charged_soc_arr = np.array(
+            [
+                float(info.get("charged_soc", 0.0))
+                for info in battery_step_info
+            ],
+            dtype=np.float32,
+        )
+
+        # Reward 계산
+        video_delivery_term = float(np.sum((prev_Z_arr - theta_z) * delivered_arr))
+        battery_consume_term = -float(np.sum(prev_Y_arr * consumed_soc_arr))
+        battery_charge_term = float(np.sum(prev_Y_arr * charged_soc_arr))
+
+        V = float(getattr(self.cfg.rewrad, "V", getattr(self.cfg.reward, "quality_weight", 1.0)))
+        quality_term = V * float(np.sum(quality_arr))
+
+        low_level_reward = (
+            video_delivery_term
+            + battery_consume_term
+            + battery_charge_term
+            + quality_term
+        )
 
         components = {
-            "reward_version": "perturbed_dpp_hook_v1",
             "reward_preset": str(self.cfg.reward.preset_name),
             "reward_coefficients": self.cfg.reward_coefficients(),
+
             "theta_z": theta_z.copy(),
-            "prev_Q": np.asarray(prev_Q, dtype=np.float32).copy(),
-            "next_Q": np.asarray(next_Q, dtype=np.float32).copy(),
+            "V": V,
+
+            "prev_Q": prev_Q_arr.copy(),
+            "next_Q": next_Q_arr.copy(),
             "prev_Z": prev_Z_arr.copy(),
             "next_Z": next_Z_arr.copy(),
-            "prev_E": np.asarray(prev_E, dtype=np.float32).copy(),
-            "next_E": np.asarray(next_E, dtype=np.float32).copy(),
+            "prev_E": prev_E_arr.copy(),
+            "next_E": next_E_arr.copy(),
             "prev_Y": prev_Y_arr.copy(),
             "next_Y": next_Y_arr.copy(),
-            "video_delivery_pressure": video_delivery_pressure,
-            "quality_reward": quality_reward,
-            "battery_service_pressure": battery_service_pressure,
-            "charging_effect": charging_effect,
-            "total_dpp_reward": float(total_dpp_reward),
-            "fast_reward": float(fast_reward),
-            "stall_sum": float(np.asarray(stall, dtype=np.float32).sum()),
-            "quality_sum": quality_reward,
-            "battery_virtual_sum": float(np.asarray(next_Y, dtype=np.float32).sum()),
+
+            "video_delivery_term": video_delivery_term,
+            "battery_consume_term": battery_consume_term,
+            "battery_charge_term": battery_charge_term,
+            "quality_term": quality_term,
+
+            "low_level_reward": float(low_level_reward),
+
             "num_hired_uav": int(np.asarray(uav_hiring, dtype=np.int32).sum()),
             "num_charging_uav": int(np.asarray(charging_state, dtype=np.int32).sum()),
-            "num_outage_uav": int(self.outage.sum()),
-            "weights": {
-                "video_delivery_weight": float(self.cfg.reward.video_delivery_weight),
-                "quality_weight": float(self.cfg.reward.quality_weight),
-                "battery_service_weight": float(self.cfg.reward.battery_service_weight),
-                "charging_weight": float(self.cfg.reward.charging_weight),
-                "slow_reward_weight": float(self.cfg.reward.slow_reward_weight),
-                "fast_reward_weight": float(self.cfg.reward.fast_reward_weight),
-                "hiring_cost_weight": float(self.cfg.reward.hiring_cost_weight),
-            },
-            "battery_step_info": battery_step_info,
+            "num_outage_uav": int(np.asarray(self.outage.sum())),
         }
-        return float(fast_reward), components
+        return float(low_level_reward), components
 
     def apply_slow_action(self, action: EnvAction) -> SlowAction:
         """
