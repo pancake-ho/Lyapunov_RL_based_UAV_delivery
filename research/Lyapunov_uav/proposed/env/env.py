@@ -178,19 +178,23 @@ class Env:
         """
         UAV 1대당 hiring cost 반환
         """
-        candidates = (
-            "uav_hiring_cost",
-            "hiring_cost",
-        )
+        value = getattr(self.cfg, "uav_hiring_cost", None)
 
-        value = None
-        for name in candidates:
-            if hasattr(self.cfg, name):
-                value = name
-                break
-        
-        raise ValueError(f"hiring_cost의 이름 혹은 변수를 결정해 주세요.")
+        if value is None:
+            return np.full(self.num_uav, 1.0, dtype=np.float32)
 
+        arr = np.asarray(value, dtype=np.float32)
+
+        if arr.ndim == 0:
+            return np.full(self.num_uav, float(arr), dtype=np.float32)
+
+        if arr.shape != (self.num_uav,):
+            raise ValueError(
+                f"uav_hiring_cost must have shape ({self.num_uav},), got {arr.shape}"
+            )
+
+        return arr
+    
     @property
     def E(self) -> np.ndarray:
         """
@@ -274,16 +278,6 @@ class Env:
             fast_act.uav_chunks[uav_idx, :] = 0
             fast_act.uav_layers[uav_idx, :] = 0
             fast_act.uav_power[uav_idx, :] = 0.0
-
-    def _theta_z(self) -> np.ndarray:
-        theta_z = getattr(self.cfg, "theta_z", None)
-        if theta_z is None:
-            return np.full(
-                self.num_user,
-                0.5 * float(self.cfg.max_queue),
-                dtype=np.float32,
-            )
-        return np.asarray(theta_z, dtype=np.float32)
 
     def _compute_fast_reward(
         self,

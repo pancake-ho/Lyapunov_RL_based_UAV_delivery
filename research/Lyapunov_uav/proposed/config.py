@@ -49,7 +49,8 @@ class BatteryConfig:
 
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
-    energy_to_soc_factor: Optional[float] = 0.05
+    battery_capacity_energy: float = 3000.0
+    energy_to_soc_factor: float = 100.0 / battery_capacity_energy
 
     # 최대 통신 power bound
     max_tx_power: float = 10.0
@@ -88,12 +89,12 @@ class RewardConfig:
     hiring cost do not change the reward surface.
     """
     preset_name: str = "balanced"
-    video_delivery_weight: float = 1.0
+    # video_delivery_weight: float = 1.0
     quality_weight: float = 1.0
-    battery_service_weight: float = 1.0
-    charging_weight: float = 1.0
+    # battery_service_weight: float = 1.0
+    # charging_weight: float = 1.0
     slow_reward_weight: float = 1.0
-    fast_reward_weight: float = 1.0
+    # fast_reward_weight: float = 1.0
     hiring_cost_weight: float = 1.0
 
     def __post_init__(self) -> None:
@@ -196,7 +197,7 @@ class EnvConfig:
     reward: RewardConfig = field(default_factory=lambda: make_reward_config("balanced"))
 
     # Perturbed Lyapunov / DPP reward hook
-    theta_z: float = 1.0
+    theta_z: Optional[Tuple[float, ...]] = None
     dpp_video_weight: float = 1.0
     dpp_quality_weight: float = 1.0
     dpp_battery_weight: float = 1.0
