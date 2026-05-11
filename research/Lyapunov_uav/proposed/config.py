@@ -94,7 +94,7 @@ class RewardConfig:
     charging_weight: float = 1.0
     slow_reward_weight: float = 1.0
     fast_reward_weight: float = 1.0
-    hiring_cost_weight: float = 0.0
+    hiring_cost_weight: float = 1.0
 
     def __post_init__(self) -> None:
         for name, value in self.as_dict().items():

@@ -342,7 +342,7 @@ class Env:
         battery_consume_term = -float(np.sum(prev_Y_arr * consumed_soc_arr))
         battery_charge_term = float(np.sum(prev_Y_arr * charged_soc_arr))
 
-        V = float(getattr(self.cfg.rewrad, "V", getattr(self.cfg.reward, "quality_weight", 1.0)))
+        V = float(getattr(self.cfg.reward, "V", getattr(self.cfg.reward, "quality_weight", 1.0)))
         quality_term = V * float(np.sum(quality_arr))
 
         low_level_reward = (
@@ -352,12 +352,11 @@ class Env:
             + quality_term
         )
 
-        components = {
+        components: Dict[str, Any] = {
             "reward_preset": str(self.cfg.reward.preset_name),
             "reward_coefficients": self.cfg.reward_coefficients(),
 
             "theta_z": theta_z.copy(),
-            "V": V,
 
             "prev_Q": prev_Q_arr.copy(),
             "next_Q": next_Q_arr.copy(),
@@ -368,41 +367,135 @@ class Env:
             "prev_Y": prev_Y_arr.copy(),
             "next_Y": next_Y_arr.copy(),
 
+            "delivered_total_per_user": delivered_arr.copy(),
+            "quality_total_per_user": quality_arr.copy(),
+
             "video_delivery_term": video_delivery_term,
             "battery_consume_term": battery_consume_term,
             "battery_charge_term": battery_charge_term,
             "quality_term": quality_term,
 
-            "low_level_reward": float(low_level_reward),
+            "fast_reward": float(low_level_reward),
 
             "num_hired_uav": int(np.asarray(uav_hiring, dtype=np.int32).sum()),
             "num_charging_uav": int(np.asarray(charging_state, dtype=np.int32).sum()),
             "num_outage_uav": int(np.asarray(self.outage.sum())),
+
+            "sum_delivery": float(np.sum(delivered_arr)),
+            "sum_quality": float(np.sum(quality_arr)),
+            "sum_consumed_soc": float(np.sum(consumed_soc_arr)),
+            "sum_charged_soc": float(np.sum(charged_soc_arr)),
         }
         return float(low_level_reward), components
     
     def _compute_slow_reward(
         self,
-        slow_act: SlowAction,
-        round_info: list[Dict[str, Any]],
+        is_round_boundary: bool,
+        fast_reward: float,
+        reward_components: Dict[str, Any],
     ) -> Tuple[float, Dict[str, Any]]:
         """
         Slow-timescale reward
 
         - round가 끝난 뒤 round_info를 모아서 계산해야 한다.
         """
-        if len(round_info) == 0:
-            raise ValueError(
-                "_compute_slow_reward 함수는 non_empty round_infos를 요구합니다"
-            )
+        self.round_fast_reward_sum += float(fast_reward)
+        self.round_quality_sum += float(reward_components.get("sum_quality", 0.0))
+        self.round_delivery_sum += float(reward_components.get("sum_delivery", 0.0))
+        self.round_battery_consume_sum += float(reward_components.get("battery_consume_term", 0.0))
+        self.round_battery_charge_sum += float(reward_components.get("battery_charge_term", 0.0))
+
+        hire_cost_per_uav = self._hire_cost()
+        hire_cost_raw = float(np.sum(np.asarray(self.uav_hiring, dtype=np.float32) * hire_cost_per_uav))
+        hire_cost = -float(self.cfg.reward.hiring_cost_weight) * hire_cost_raw
+
+        if not is_round_boundary:
+            components = {
+                "is_round_boundary": False,
+                "slow_reward": 0.0,
+                "round_fast_reward_sum_so_far": float(self.round_fast_reward_sum),
+                "round_quality_sum_so_far": float(self.round_quality_sum),
+                "round_delivery_sum_so_far": float(self.round_delivery_sum),
+                "hire_cost_raw": float(hire_cost_raw),
+                "hire_cost": float(hire_cost),
+            }
+            return 0.0, components
         
-        uav_hiring = np.asarray(slow_act.uav_hiring, dtype=np.float32).reshape(-1)
-        if uav_hiring.size != self.num_uav:
-            raise ValueError(
-                f"slow_act.uav_hiring size mismatch: "
-                f"expected={self.num_uav}, got={uav_hiring.size}"
-            )
-        
+        slow_reward = float(hire_cost) + float(self.round_fast_reward_sum)
+        components = {
+            "is_round_boundary": True,
+            "slow_reward": slow_reward,
+
+            "round_fast_reward_sum": float(self.round_fast_reward_sum),
+            "round_quality_sum": float(self.round_quality_sum),
+            "round_delivery_sum": float(self.round_delivery_sum),
+            "round_battery_consume_sum": float(
+                self.round_battery_consume_sum
+            ),
+            "round_battery_charge_sum": float(
+                self.round_battery_charge_sum
+            ),
+            "uav_hiring": self.uav_hiring.copy(),
+            "hire_cost_per_uav": hire_cost_per_uav.copy(),
+            "hire_cost_raw": float(hire_cost_raw),
+            "hire_cost": float(hire_cost),
+        }
+
+        return float(slow_reward), components
+    
+    def _compute_reward(
+        self,
+        prev_Q: np.ndarray,
+        next_Q: np.ndarray,
+        prev_Z: np.ndarray,
+        next_Z: np.ndarray,
+        prev_E: np.ndarray,
+        next_E: np.ndarray,
+        prev_Y: np.ndarray,
+        next_Y: np.ndarray,
+        delivered_total_per_user: np.ndarray,
+        quality_total_per_user: np.ndarray,
+        uav_hiring: np.ndarray,
+        charging_state: np.ndarray,
+        battery_step_info: list[Dict[str, Any]],
+        is_round_boundary: bool,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        env.step()에서 호출하는 통합 함수
+
+        현재 반환하는 reward는 fast PPO 학습에 바로 쓰기 위해 fast_reward로 설정.
+        slow_reward는 info["slow_reward_components"]에 넣고, HRL high-level trainer가 별도로 읽어 쓰는 구조를 선택함.
+        """
+        fast_reward, fast_components = self._compute_fast_reward(
+            prev_Q=prev_Q,
+            next_Q=next_Q,
+            prev_Z=prev_Z,
+            next_Z=next_Z,
+            prev_E=prev_E,
+            next_E=next_E,
+            prev_Y=prev_Y,
+            next_Y=next_Y,
+            delivered_total_per_user=delivered_total_per_user,
+            quality_total_per_user=quality_total_per_user,
+            uav_hiring=uav_hiring,
+            charging_state=charging_state,
+            battery_step_info=battery_step_info,
+        )
+
+        slow_reward, slow_components = self._compute_slow_reward(
+            is_round_boundary=is_round_boundary,
+            fast_reward=fast_reward,
+            reward_components=fast_components,
+        )
+
+        components: Dict[str, Any] = {
+            "fast_reward": float(fast_reward),
+            "slow_reward": float(slow_reward),
+            "fast_reward_components": fast_components,
+            "slow_reward_components": slow_components,
+        }
+
+        return float(fast_reward), components
 
     def apply_slow_action(self, action: EnvAction) -> SlowAction:
         """
@@ -669,6 +762,10 @@ class Env:
         next_round_idx = int(self.round_idx)
         next_round_slot = int(self.round_slot)
 
+        terminated = False
+        truncated = False
+        is_round_boundary = bool(next_round_slot == 0)
+
         reward, reward_components = self._compute_reward(
             prev_Q=prev_Q,
             next_Q=self.queue,
@@ -678,15 +775,13 @@ class Env:
             next_E=self.E,
             prev_Y=prev_Y,
             next_Y=self.Y,
-            stall=stall,
+            delivered_total_per_user=delivered_total_per_user,
             quality_total_per_user=quality_total_per_user,
             uav_hiring=self.uav_hiring,
             charging_state=self.charging_state,
             battery_step_info=battery_step_info,
+            is_round_boundary=is_round_boundary,
         )
-        terminated = False
-        truncated = False
-        is_round_boundary = bool(next_round_slot == 0)
 
         info: Dict[str, Any] = {
             # 1) transition meta
