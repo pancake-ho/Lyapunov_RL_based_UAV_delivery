@@ -87,6 +87,13 @@ class Env:
         # round energy
         self.round_start_E = np.zeros(self.num_uav, dtype=np.float32)
 
+        # round-level reward accumulator
+        self.round_fast_reward_sum = 0.0
+        self.round_quality_sum = 0.0
+        self.round_delivery_sum = 0.0
+        self.round_stall_sum = 0.0
+        self.round_battery_consume_sum = 0.0
+        self.round_battery_charge_sum = 0.0
     
     def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
@@ -125,6 +132,7 @@ class Env:
         self.charge_counters = np.zeros(self.num_uav, dtype=np.float32)
 
         self.round_start_E = self.E.copy()
+        self._reset_round_reward_accumulators()
 
         obs = self.get_fast_obs()
         info: Dict[str, Any] = {
@@ -137,6 +145,51 @@ class Env:
         }
 
         return obs, info
+    
+    def _reset_round_reward_accumulators(self):
+        """
+        slow-timescale reward 계산을 위한 round-level accumulator 초기화
+        (slot별 fast reward component을 누적)
+        """
+        self.round_fast_reward_sum = 0.0
+        self.round_quality_sum = 0.0
+        self.round_delivery_sum = 0.0
+        self.round_stall_sum = 0.0
+        self.round_battery_consume_sum = 0.0
+        self.round_battery_charge_sum = 0.0
+
+    def _theta_z(self) -> np.ndarray:
+        """
+        user-side perturbed Lyapunov Target 반환
+        """
+        theta_z = getattr(self.cfg, "theta_z", None)
+        if theta_z is None:
+            raise ValueError("EnvConfig에서 theta_z의 값을 먼저 확정하세요.")
+        
+        theta_arr = np.asarray(theta_z, dtype=np.float32)
+        if theta_arr.shape != (self.num_user, ):
+            raise ValueError(
+                f"theta_z는 ({self.num_user}, )의 shape을 가져야 합니다, 현재는 {theta_arr.shape} shape입니다."
+            )
+        
+        return np.clip(theta_arr).astype(np.float32)
+    
+    def _hire_cost(self) -> np.ndarray:
+        """
+        UAV 1대당 hiring cost 반환
+        """
+        candidates = (
+            "uav_hiring_cost",
+            "hiring_cost",
+        )
+
+        value = None
+        for name in candidates:
+            if hasattr(self.cfg, name):
+                value = name
+                break
+        
+        raise ValueError(f"hiring_cost의 이름 혹은 변수를 결정해 주세요.")
 
     @property
     def E(self) -> np.ndarray:
@@ -197,6 +250,8 @@ class Env:
 
         for battery in self.batteries:
             battery.start_round(round_horizon=self.slow_T)
+
+        self._reset_round_reward_accumulators()
 
     def _rule_based_uav_charge(self) -> np.ndarray:
         """
@@ -325,6 +380,29 @@ class Env:
             "num_outage_uav": int(np.asarray(self.outage.sum())),
         }
         return float(low_level_reward), components
+    
+    def _compute_slow_reward(
+        self,
+        slow_act: SlowAction,
+        round_info: list[Dict[str, Any]],
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        Slow-timescale reward
+
+        - round가 끝난 뒤 round_info를 모아서 계산해야 한다.
+        """
+        if len(round_info) == 0:
+            raise ValueError(
+                "_compute_slow_reward 함수는 non_empty round_infos를 요구합니다"
+            )
+        
+        uav_hiring = np.asarray(slow_act.uav_hiring, dtype=np.float32).reshape(-1)
+        if uav_hiring.size != self.num_uav:
+            raise ValueError(
+                f"slow_act.uav_hiring size mismatch: "
+                f"expected={self.num_uav}, got={uav_hiring.size}"
+            )
+        
 
     def apply_slow_action(self, action: EnvAction) -> SlowAction:
         """

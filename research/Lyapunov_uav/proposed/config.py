@@ -196,7 +196,7 @@ class EnvConfig:
     reward: RewardConfig = field(default_factory=lambda: make_reward_config("balanced"))
 
     # Perturbed Lyapunov / DPP reward hook
-    theta_z: Optional[Tuple[float, ...]] = None
+    theta_z: float = 1.0
     dpp_video_weight: float = 1.0
     dpp_quality_weight: float = 1.0
     dpp_battery_weight: float = 1.0
