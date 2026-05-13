@@ -31,6 +31,20 @@ class UAVChannelModel(BaseChannelModel):
         self.altitude = float(getattr(config, "altitude", 50.0))
         self.beta_zero = float(getattr(config, "beta_zero", 1.0))
         self.receiver_noise_power = float(getattr(config, "noise_power", 1.0))
+        self.capacity_gap = float(getattr(config, "capacity_gap", 1.0))
+
+        if self.altitude < 0.0:
+            raise ValueError(f"altitude는 0 이상이어야 합니다. 현재 값: {self.altitude}")
+        if self.beta_zero <= 0.0:
+            raise ValueError(f"beta_zero는 양수여야 합니다. 현재 값: {self.beta_zero}")
+        if self.receiver_noise_power <= 0.0:
+            raise ValueError(
+                f"noise_power는 양수여야 합니다. 현재 값: {self.receiver_noise_power}"
+            )
+        if self.capacity_gap <= 0.0:
+            raise ValueError(
+                f"capacity_gap은 양수여야 합니다. 현재 값: {self.capacity_gap}"
+            )
 
         self.noise_power = float(self.receiver_noise_power)
 
@@ -42,12 +56,13 @@ class UAVChannelModel(BaseChannelModel):
         UAV와 user 사이의 horizontal distance ||q_u(t) - w_n(t)||를 반환하는 함수
         """
         d = self.distance if distance is None else float(distance)
+        if d < 0.0:
+            raise ValueError(f"distance는 0 이상이어야 합니다. 현재 값: {d}")
         return max(float(d), 0.0)
     
     def compute_gain(
         self,
         distance: Optional[float] = None,
-        rng: Optional[np.random.Generator] = None,
     ) -> float:
         """
         UAV와 user 사이의 channel power gain h_un(t)를 계산하는 함수
@@ -64,16 +79,18 @@ class UAVChannelModel(BaseChannelModel):
         gain: float,
     ) -> float:
         """
-        UAV와 user 사이 channel gain을 계산하기 위한, (p_un(t) * h_un(t) / (sigma^2 * gamma)) term을 계산하는 함수
+        UAV transmit power와 UAV channel gain으로부터 SNR term을 계산하는 산식을 구현하는 함수
         """
         if tx_power < 0.0:
             raise ValueError(f"tx_power는 0 이상이어야 합니다. 현재 값: {tx_power}")
-        if tx_power == 0.0:
+        if gain < 0.0:
+            raise ValueError(f"gain은 0 이상이어야 합니다. 현재 값: {gain}")
+        if tx_power == 0.0 or gain == 0.0:
             return 0.0
         
-        denominator = max(1e-12, float(self.receiver_noise_power) * float(self.capacity))
+        denominator = max(1e-12, float(self.receiver_noise_power) * float(self.capacity_gap))
 
-        return float(tx_power * self.sample_channel_gain / denominator)
+        return float(tx_power * gain / denominator)
     
     def compute_snr(
         self,
@@ -91,7 +108,7 @@ class UAVChannelModel(BaseChannelModel):
             return 0.0
         
         gain = self.compute_gain(distance=distance, rng=rng)
-        return self.snr_from_gain(tx_power, gain)
+        return self.snr_from_gain(tx_power, gain=gain)
 
     def capacity(
         self,
@@ -99,8 +116,11 @@ class UAVChannelModel(BaseChannelModel):
         distance: Optional[float] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> float:
+        """
+        UAV-user 사이 channel capacity를 계산하는 함수
+        """
         snr = self.compute_snr(tx_power=tx_power, distance=distance, rng=rng)
-        return self.bandwidth * math.log2(1.0 + snr)
+        return float(self.bandwidth * math.log2(1.0 + snr))
     
     def capacity_from_gain(
         self,
@@ -108,7 +128,7 @@ class UAVChannelModel(BaseChannelModel):
         gain: float,
     ) -> float:
         """
-        이미 샘플링된 gain을 이용하여 capacity를 계산하는 함수
+        이미 계산된 g_un(t)를 이용하여 UAV-user capacity를 계산하는 함수
         """
         snr = self.snr_from_gain(tx_power=tx_power, gain=gain)
-        return self.bandwidth * math.log2(1.0 + snr)
+        return float(self.bandwidth * math.log2(1.0 + snr))
