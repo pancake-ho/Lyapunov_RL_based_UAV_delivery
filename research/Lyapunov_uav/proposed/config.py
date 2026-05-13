@@ -6,14 +6,25 @@ class ChannelConfig:
     """
     Channel 및 PHY parameter config 클래스
     """
+
+    # 공통 변수
     distance: float = 20.0
     bandwidth: float = 1e6
-    gamma_db: float = 25.0
-    sigma_db: float = 4.0
-    beta: float = 2.0
-    mu_db: float = 0.0
     min_distance: float = 1.0
     seed: int = 42
+
+    # RSU Rayleigh/shadowing model
+    gamma_db: float = 25.0
+    inr_db: float = 0.0
+    sigma_db: float = 4.0
+    mu_db: float = 0.0
+    beta: float = 2.0
+
+    # UAV LoS free-space model
+    altitude: float = 50.0
+    beta_zero: float = 1.0
+    noise_power: float = 1.0 # sigma^2
+    capacity_gap: float = 1.0 
 
     def __post_init__(self) -> None:
         if self.bandwidth <= 0.0:
@@ -22,6 +33,19 @@ class ChannelConfig:
             raise ValueError("min_distance는 양수 값을 가져야 합니다.")
         if self.distance < self.min_distance:
             self.distance = float(self.min_distance)
+
+        if self.beta <= 0.0:
+            raise ValueError("beta는 양수 값을 가져야 합니다.")
+        if self.sigma_db < 0.0:
+            raise ValueError("sigma_db는 0 이상의 값을 가져야 합니다.")
+        if self.altitude < 0.0:
+            raise ValueError("altitude는 0 이상의 값을 가져야 합니다.")
+        if self.beta_zero <= 0.0:
+            raise ValueError("beta_zero는 양수 값을 가져야 합니다.")
+        if self.noise_power <= 0.0:
+            raise ValueError("noise_power는 양수 값을 가져야 합니다.")
+        if self.capacity_gap <= 0.0:
+            raise ValueError("capacity_gap은 양수 값을 가져야 합니다.")
 
 @dataclass
 class BatteryConfig:
