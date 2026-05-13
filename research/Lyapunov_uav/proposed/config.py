@@ -50,7 +50,7 @@ class BatteryConfig:
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
     battery_capacity_energy: float = 3000.0
-    energy_to_soc_factor: float = 100.0 / battery_capacity_energy
+    energy_to_soc_factor: Optional[float] = None
 
     # 최대 통신 power bound
     max_tx_power: float = 10.0
@@ -63,7 +63,9 @@ class BatteryConfig:
         if self.target_service_slots_per_round <= 0:
             raise ValueError("target_service_slots_per_round는 양수 값을 가져야 합니다.")
         if self.p_0 < 0.0 or self.p_i < 0.0:
-            raise ValueError(f"p_0와 p_i는 앙수 값을 가져야 합니다. 현재 두 값은 각각 {self.p_0}, {self.p_i}입니다.")
+            raise ValueError(
+                f"p_0와 p_i는 0 이상의 값을 가져야 합니다. 현재 값: {self.p_0}, {self.p_i}"
+            )
         if self.tx_energy_coeff <= 0.0:
             raise ValueError("tx_energy_coeff는 양수 값을 가져야 합니다.")
         if self.charging_rate < 0.0:
@@ -72,11 +74,18 @@ class BatteryConfig:
             raise ValueError("eta_c는 양수 값을 가져야 합니다.")
         if self.max_tx_power <= 0.0:
             raise ValueError("max_tx_power는 양수 값을 가져야 합니다.")
-        
+        if self.battery_capacity_energy <= 0.0:
+            raise ValueError("battery_capacity_energy는 양수 값을 가져야 합니다.")
+
         self.e_init = float(min(max(self.e_init, 0.0), float(self.e_max)))
         self.e_min = float(min(max(self.e_min, 0.0), float(self.e_max)))
 
-        self.energy_to_soc_factor = 100.0 / float(self.e_max)
+        if self.energy_to_soc_factor is None:
+            self.energy_to_soc_factor = 100.0 / float(self.battery_capacity_energy)
+        else:
+            self.energy_to_soc_factor = float(self.energy_to_soc_factor)
+            if self.energy_to_soc_factor <= 0.0:
+                raise ValueError("energy_to_soc_factor는 양수 값을 가져야 합니다.")
 
 
 @dataclass
@@ -89,13 +98,9 @@ class RewardConfig:
     hiring cost do not change the reward surface.
     """
     preset_name: str = "balanced"
-    # video_delivery_weight: float = 1.0
-    quality_weight: float = 1.0
-    # battery_service_weight: float = 1.0
-    # charging_weight: float = 1.0
     slow_reward_weight: float = 1.0
-    # fast_reward_weight: float = 1.0
-    hiring_cost_weight: float = 1.0
+
+    V: float = 1.0
 
     def __post_init__(self) -> None:
         for name, value in self.as_dict().items():
@@ -111,33 +116,18 @@ class RewardConfig:
 REWARD_PRESETS: Dict[str, RewardConfig] = {
     "balanced": RewardConfig(
         preset_name="balanced",
-        video_delivery_weight=1.0,
-        quality_weight=1.0,
-        battery_service_weight=1.0,
-        charging_weight=1.0,
         slow_reward_weight=1.0,
-        fast_reward_weight=1.0,
-        hiring_cost_weight=0.0,
+        V=1.0,
     ),
     "conservative_queue": RewardConfig(
         preset_name="conservative_queue",
-        video_delivery_weight=1.5,
-        quality_weight=0.7,
-        battery_service_weight=1.5,
-        charging_weight=1.2,
         slow_reward_weight=1.0,
-        fast_reward_weight=1.0,
-        hiring_cost_weight=0.02,
+        V=0.5,
     ),
     "quality_oriented": RewardConfig(
         preset_name="quality_oriented",
-        video_delivery_weight=0.8,
-        quality_weight=1.8,
-        battery_service_weight=0.8,
-        charging_weight=0.8,
         slow_reward_weight=1.0,
-        fast_reward_weight=1.0,
-        hiring_cost_weight=0.01,
+        V=2.0,
     ),
 }
 

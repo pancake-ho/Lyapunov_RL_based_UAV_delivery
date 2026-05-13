@@ -74,6 +74,15 @@ def _chunk_size_bits(cfg: EnvConfig, layer_idx: int) -> float:
     return float(cfg.base_chunk_size_bits) * float(layer)
 
 
+def _soc_cost_from_energy(cfg: EnvConfig, energy: float) -> float:
+    """
+    일반 energy 값을 SoC 단위 비용으로 변환하는 함수
+    """
+    return max(0.0, float(energy)) * float(cfg.battery.energy_to_soc_factor)
+
+
+
+
 def _priority_score(
     cfg: EnvConfig,
     feasible_chunks: int,
@@ -385,7 +394,7 @@ def compute_uav_delivery(
                 user_idx=int(n),
                 layer_idx=int(layer),
                 link_capacity_bps=float(link_capacity_bps[u, n]),
-                tx_time=int(slot_duration),
+                tx_time=float(slot_duration),
             )
         )
 
