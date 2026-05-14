@@ -656,18 +656,18 @@ def assert_reward_consistency(
             raise TestFailure(f"{step_name}: fast_reward_components missing key: {key}")
 
     theta_z = np.asarray(frc["theta_z"], dtype=np.float32)
-    prev_z = np.asarray(frc["prev_Z"], dtype=np.float32)
+    next_z = np.asarray(frc["next_Z"], dtype=np.float32)
     delivered = np.asarray(frc["delivered_total_per_user"], dtype=np.float32)
-    prev_y = np.asarray(frc["prev_Y"], dtype=np.float32)
+    next_y = np.asarray(frc["next_Y"], dtype=np.float32)
     consumed_soc = np.asarray(frc["consumed_soc_per_uav"], dtype=np.float32)
     charged_soc = np.asarray(frc["charged_soc_per_uav"], dtype=np.float32)
     quality = np.asarray(frc["quality_total_per_user"], dtype=np.float32)
 
     V = float(getattr(cfg.reward, "V", 1.0))
 
-    expected_video_term = float(np.sum((prev_z - theta_z) * delivered))
-    expected_battery_consume_term = -float(np.sum(prev_y * consumed_soc))
-    expected_battery_charge_term = float(np.sum(prev_y * charged_soc))
+    expected_video_term = float(np.sum((next_z - theta_z) * delivered))
+    expected_battery_consume_term = -float(np.sum(next_y * consumed_soc))
+    expected_battery_charge_term = float(np.sum(next_y * charged_soc))
     expected_quality_term = V * float(np.sum(quality))
 
     assert_array_close(
@@ -747,21 +747,20 @@ def assert_reward_consistency(
 
 def print_step_summary(env: Env, reward: float, info: Dict[str, Any], label: str) -> None:
     print(c(label, BOLD))
-    kv("time", f"{info.get('prev_time')} -> {info.get('next_time')}")
-    kv("round", f"{info.get('active_round_idx')} -> {info.get('next_round_idx')}")
+    kv("time_slot", f"{info.get('prev_time')} -> {info.get('next_time')}")
+    kv("round_idx", f"{info.get('active_round_idx')} -> {info.get('next_round_idx')}")
     kv("round_slot", f"{info.get('prev_round_slot')} -> {info.get('next_round_slot')}")
     kv("is_round_boundary", info.get("is_round_boundary"))
     kv("reward", f"{float(reward):.6f}")
-    kv("Q", fmt_arr(env.queue))
-    kv("Z", fmt_arr(env.Z))
-    kv("E", fmt_arr(env.E))
-    kv("Y", fmt_arr(env.Y))
-    kv("delivered_rsu", fmt_arr(info.get("delivered_rsu_per_user")))
-    kv("delivered_uav", fmt_arr(info.get("delivered_uav_per_user")))
-    kv("delivered_total", fmt_arr(info.get("delivered_total_per_user")))
+    kv("next_Q", fmt_arr(env.queue))
+    kv("next_Z", fmt_arr(env.Z))
+    kv("next_E", fmt_arr(env.E))
+    kv("next_B", fmt_arr(env.Y))
+    kv("rsu_chunk", fmt_arr(info.get("delivered_rsu_per_user")))
+    kv("uav_chunk", fmt_arr(info.get("delivered_uav_per_user")))
+    kv("chunk_total", fmt_arr(info.get("delivered_total_per_user")))
     kv("quality_total", fmt_arr(info.get("quality_total_per_user")))
-    kv("outage", fmt_arr(env.outage))
-    kv("charging_state", fmt_arr(env.charging_state))
+    kv("charging", fmt_arr(env.charging_state))
 
     rc = info.get("reward_components", {})
     if isinstance(rc, dict):
@@ -771,11 +770,11 @@ def print_step_summary(env: Env, reward: float, info: Dict[str, Any], label: str
             kv(
                 "fast_terms",
                 {
-                    "video": round(float(frc.get("video_delivery_term", 0.0)), 6),
-                    "battery_consume": round(float(frc.get("battery_consume_term", 0.0)), 6),
-                    "battery_charge": round(float(frc.get("battery_charge_term", 0.0)), 6),
-                    "quality": round(float(frc.get("quality_term", 0.0)), 6),
-                    "fast_reward": round(float(frc.get("fast_reward", 0.0)), 6),
+                    "vid_term": round(float(frc.get("video_delivery_term", 0.0)), 2),
+                    "battery_consume": round(float(frc.get("battery_consume_term", 0.0)), 2),
+                    "battery_charge": round(float(frc.get("battery_charge_term", 0.0)), 2),
+                    "quality": round(float(frc.get("quality_term", 0.0)), 2),
+                    "slot_fast_reward": round(float(frc.get("fast_reward", 0.0)), 2),
                 },
             )
         if isinstance(src, dict):
@@ -783,10 +782,11 @@ def print_step_summary(env: Env, reward: float, info: Dict[str, Any], label: str
                 "slow_terms",
                 {
                     "is_round_boundary": src.get("is_round_boundary"),
-                    "slow_reward": round(float(src.get("slow_reward", 0.0)), 6),
-                    "hire_cost": round(float(src.get("hire_cost", 0.0)), 6),
+                    "slow_reward": round(float(src.get("slow_reward", 0.0)), 2),
+                    "hire_cost": round(float(src.get("hire_cost", 0.0)), 2),
                 },
             )
+    print("\n")
 
 
 # =============================================================================

@@ -353,9 +353,9 @@ class Env:
         # Reward 계산
         V = float(getattr(self.cfg.reward, "V", 1.0))
 
-        video_delivery_term = float(np.sum((prev_Z_arr - theta_z) * delivered_arr))
-        battery_consume_term = -float(np.sum(prev_Y_arr * consumed_soc_arr))
-        battery_charge_term = float(np.sum(prev_Y_arr * charged_soc_arr))
+        video_delivery_term = float(np.sum((next_Z_arr - theta_z) * delivered_arr))
+        battery_consume_term = -float(np.sum(next_Y_arr * consumed_soc_arr))
+        battery_charge_term = float(np.sum(next_Y_arr * charged_soc_arr))
         quality_term = V * float(np.sum(quality_arr))
 
         fast_reward = (
