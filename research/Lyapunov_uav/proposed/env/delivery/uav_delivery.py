@@ -207,7 +207,6 @@ def compute_uav_delivery(
         (num_uav, num_user),
         low=0,
         high=int(cfg.chunk),
-        name="fast_act.uav_chunks",
     )
 
     req_layers = _clip_int_matrix(
@@ -215,7 +214,6 @@ def compute_uav_delivery(
         (num_uav, num_user),
         low=0,
         high=int(cfg.layer),
-        name="fast_act.uav_layers",
     )
 
     tx_power = _clip_float_matrix(
@@ -223,7 +221,6 @@ def compute_uav_delivery(
         (num_uav, num_user),
         low=0.0,
         high=float(cfg.battery.max_tx_power),
-        name="fast_act.uav_power",
     )
 
     # charging/service decision (env/rule-based로 채워지는 값)
@@ -247,7 +244,6 @@ def compute_uav_delivery(
         (num_uav, num_user),
         low=0.0,
         high=None,
-        name="fast_act.uav_user_distance",
     )
 
     user_virtual_queue = _ensure_shape(
@@ -319,7 +315,7 @@ def compute_uav_delivery(
             requested_mask[u, n] = True
             
             horizontal_distance = max(float(uav_user_distance[u, n]), 0.0)
-            raw_gain = float(uav_channel.compute_gain(distance=horizontal_distance, rng=generator))
+            raw_gain = float(uav_channel.compute_gain(distance=horizontal_distance, rng=rng))
             cap_bps = float(
                 uav_channel.capacity_from_gain(
                     tx_power=float(tx_power[u, n]),

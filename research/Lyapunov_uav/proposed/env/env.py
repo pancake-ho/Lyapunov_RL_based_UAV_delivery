@@ -619,7 +619,13 @@ class Env:
         battery.virtual_q = float(next_virtual_q)
         battery.round_remaining_slots = max(0, int(battery.round_remaining_slots) - 1)
 
-        is_outage = bool(check_outage(battery.soc))
+        is_outage = bool(
+            check_outage(
+                soc=battery.soc,
+                consumed_soc=float(consumed_soc),
+                soc_before=float(soc_before),
+            )
+        )
         self.outage[uav_idx] = int(is_outage)
 
         step_info = BatteryStepInfo(

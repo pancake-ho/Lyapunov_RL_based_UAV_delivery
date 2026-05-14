@@ -127,7 +127,7 @@ class UAVBattery:
         # 고용되지 않은 UAV는 service/charging을 수행하지 않음
         if not mu_active:
             mode = UAVBattery.IDLE
-            validate_links = []
+            validated_links = []
         
         # SERVE mode인데 실제 active link가 없으면 IDLE로 처리함
         if mode == UAVBatteryMode.SERVE and len(validated_links) == 0:
@@ -142,7 +142,7 @@ class UAVBattery:
             uav_idx=-1,
             mu_active=mu_active,
             mode=mode,
-            links=validate_links,
+            links=validated_links,
         )
         validate_action_mode(action)
 
@@ -150,7 +150,7 @@ class UAVBattery:
             config=self.config,
             mode=mode,
             mu_active=mu_active,
-            links=validate_links,
+            links=validated_links,
             bandwidth=self.bandwidth,
             consume_hover_when_idle=self.consume_hover_when_idle,
         )
