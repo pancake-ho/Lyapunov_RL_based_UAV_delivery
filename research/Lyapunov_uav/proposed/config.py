@@ -21,7 +21,7 @@ class ChannelConfig:
     beta: float = 2.0
 
     # UAV LoS free-space model
-    altitude: float = 50.0
+    altitude: float = 100.0
     beta_zero: float = 1.0
     noise_power: float = 1.0 # sigma^2
     capacity_gap: float = 1.0 
