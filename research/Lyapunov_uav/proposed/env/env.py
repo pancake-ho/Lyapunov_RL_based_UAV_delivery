@@ -777,17 +777,21 @@ class Env:
 
         # time update
         self.t += 1
-        self.round_idx = self.t // self.slow_T
-        self.round_slot = self.t % self.slow_T
+        self.round_slot += 1
 
-        # 갱신
+        is_round_boundary = bool(self.round_slot >= self.slow_T)
+
+        if is_round_boundary:
+            next_round_idx = int(self.t // self.slow_T)
+            next_round_slot = 0
+        else:
+            next_round_idx = int(self.t // self.slow_T)
+            next_round_slot = int(self.round_slot)
+
         next_t = int(self.t)
-        next_round_idx = int(self.round_idx)
-        next_round_slot = int(self.round_slot)
 
         terminated = False
         truncated = False
-        is_round_boundary = bool(next_round_slot == 0)
 
         reward, reward_components = self._compute_reward(
             prev_Q=prev_Q,
@@ -879,4 +883,15 @@ class Env:
             },
         }
 
-        return self.get_fast_obs(), reward, terminated, truncated, info
+        # --------------------------------------------------------------
+        # 실제 env round state 반영
+        # --------------------------------------------------------------
+        if is_round_boundary:
+            self._start_new_round()
+        else:
+            self.round_idx = int(next_round_idx)
+            self.round_slot = int(next_round_slot)
+
+        obs = self.get_fast_obs()
+
+        return obs, float(reward), terminated, truncated, info

@@ -100,14 +100,14 @@ def _clip_float_matrix(
         return np.maximum(arr, low).astype(np.float32, copy=False)
     return np.clip(arr, low, high).astype(np.float32, copy=False)
 
-def _priority_score(cfg: EnvConfig, feasible_chunks: int, layer: int, cap_bps: float, user_virtual_q: float=0.0) -> float:
+def _priority_score(cfg: EnvConfig, feasible_chunks: int, layer: int, cap_bps: float, user_virtual_queue: float=0.0) -> float:
     """
     RSU capacity 초과 또는 동일 user conflict가 발생했을 때 사용하는 score 계산 함수로,
     invalid action에 대한 안전장치 목적으로 구현.
     """
     quality_gain = float(feasible_chunks) * _quality_weight(cfg, layer)
     return (
-        2.0 * float(user_virtual_q)
+        2.0 * float(user_virtual_queue)
         + 1.0 * float(quality_gain)
         + 1e-9 * float(cap_bps)
     )
