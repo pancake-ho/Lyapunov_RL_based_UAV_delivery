@@ -105,8 +105,6 @@ def _priority_score(cfg: EnvConfig, feasible_chunks: int, layer: int, cap_bps: f
     RSU capacity 초과 또는 동일 user conflict가 발생했을 때 사용하는 score 계산 함수로,
     invalid action에 대한 안전장치 목적으로 구현.
     """
-    print("[RSU] capacity 초과 또는 동일 user conflict가 발생했습니다.")
-
     quality_gain = float(feasible_chunks) * _quality_weight(cfg, layer)
     return (
         2.0 * float(user_virtual_q)

@@ -201,6 +201,11 @@ class EnvConfig:
     # delivery (비트 당 청크 사이즈 정의)
     base_chunk_size_bits: float = 2e5
 
+    # UAV hiring cost
+    # 시스템 cost parameter이며 reward coefficient가 아님.
+    # slow reward에서 sum_u mu_u(r) * D_u^hire 형태로 사용.
+    uav_hiring_cost: float = 1.0
+
     # reward 계수
     reward: RewardConfig = field(default_factory=lambda: make_reward_config("balanced"))
 
@@ -267,13 +272,21 @@ class EnvConfig:
         if len(self.quality_weights) != self.layer:
             raise ValueError(f"quality_weights의 len {len(self.quality_weights)}는 layer와 같아야 합니다.")
 
-        if self.theta_z is not None:
+        if self.theta_z is None:
+            # Perturbed Lyapunov target buffer level.
+            # 기본값은 Q_bar의 절반으로 두고, 실험 단계에서 sweep 가능.
+            default_theta = 0.5 * float(self.max_queue)
+            self.theta_z = tuple(default_theta for _ in range(self.num_user))
+        else:
             if len(self.theta_z) != self.num_user:
                 raise ValueError("theta_z가 주어지면 num_user와 같은 길이를 가져야 합니다.")
             self.theta_z = tuple(
                 float(min(max(theta, 0.0), float(self.max_queue)))
                 for theta in self.theta_z
             )
+
+        if self.uav_hiring_cost < 0.0:
+            raise ValueError("uav_hiring_cost는 0 이상의 값을 가져야 합니다.")
 
         # 하나의 UAV는 coverage region(RSU) 당 한 대 고용될 수 있음
         if self.num_uav != self.num_rsu:

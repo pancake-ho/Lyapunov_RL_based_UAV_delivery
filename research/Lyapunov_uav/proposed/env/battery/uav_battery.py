@@ -126,7 +126,7 @@ class UAVBattery:
 
         # 고용되지 않은 UAV는 service/charging을 수행하지 않음
         if not mu_active:
-            mode = UAVBattery.IDLE
+            mode = UAVBatteryMode.IDLE
             validated_links = []
         
         # SERVE mode인데 실제 active link가 없으면 IDLE로 처리함

@@ -202,9 +202,6 @@ class Env:
         """
         value = getattr(self.cfg, "uav_hiring_cost", None)
 
-        if value is None:
-            return np.full(self.num_uav, 1.0, dtype=np.float32)
-
         arr = np.asarray(value, dtype=np.float32)
 
         if arr.ndim == 0:
@@ -215,7 +212,7 @@ class Env:
                 f"uav_hiring_cost must have shape ({self.num_uav},), got {arr.shape}"
             )
 
-        return arr
+        return arr.astype(np.float32)
     
     @property
     def E(self) -> np.ndarray:
@@ -425,7 +422,7 @@ class Env:
 
         hire_cost_per_uav = self._hire_cost()
         hire_cost_raw = float(np.sum(np.asarray(self.uav_hiring, dtype=np.float32) * hire_cost_per_uav))
-        hire_cost = -float(self.cfg.reward.hiring_cost_weight) * hire_cost_raw
+        hire_cost = -hire_cost_raw
 
         if not is_round_boundary:
             components = {
@@ -659,14 +656,23 @@ class Env:
 
     def get_fast_obs(self) -> Dict[str, np.ndarray]:
         """
-        fast-timescale 상태값을 반환하는 함수
+        fast-timescale 상태값을 반환하는 함수.
+
+        현재 시나리오 기준 fast policy는 slot t마다 다음을 관찰한다.
+            - user video virtual queue Z(t)
+            - UAV battery virtual queue B(t)
+            - user 위치/거리
+            - UAV-user scheduling decision phi(r)
+
+        실제 fast action은 chunk/layer delivery와 UAV power allocation이며,
+        UAV charging은 현재 구현에서는 rule-based service feasibility hook으로 처리한다.
         """
         return {
             "Z": self.Z.copy(),
             "Y": self.Y.copy(),
-            "uav_hiring": self.uav_hiring.copy(),
+            "uav_scheduling": self.uav_scheduling.copy(),
             "rsu_user_distance": self.rsu_user_distance.copy(),
-            "time": np.array([self.t], dtype=np.int32),
+            "uav_user_distance": self.uav_user_distance.copy(),
         }
 
     def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
