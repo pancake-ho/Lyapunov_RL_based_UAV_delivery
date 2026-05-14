@@ -11,6 +11,7 @@ from .utils import (
     count_params,
     to_numpy,
     to_tensor,
+    ScalarLogger
 )
 from .hrl_adapter import (
     flatten_obs,
