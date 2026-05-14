@@ -5,9 +5,15 @@ from typing import Optional
 
 import numpy as np
 
-from config import EnvConfig
+try:
+    from proposed.config import EnvConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import EnvConfig
+
+from ..action_types import SlowAction, FastAction
 from ..channel import RSUChannelModel
-from ..action_types import ParsedAction
+from ..util import _ensure_shape, _safe_get_attr
+
 
 @dataclass
 class RSUDeliveryResult:
@@ -15,13 +21,13 @@ class RSUDeliveryResult:
     RSU Delivery 결과 클래스
 
     - requested_mask:
-        scheduling = 1, chunks > 0, layers > 0인 1차 delivery 후보 link
+        RSU-user scheduling = 1 이고, chunk/layer request 가 양수인 1차 후보 link
 
     - capped_mask:
         RSU별 동시 서비스 가능 user 수(capacity) 적용 후 남은 link
 
     - active_mask:
-        동일 user에 대해 복수 RSU가 경쟁할 경우,
+        동일 user에 대해 복수 RSU가 동시에 선택된 경우,
         최종적으로 실제 delivery를 수행할 link만 남긴 mask
     """
     requested_mask: np.ndarray
@@ -41,7 +47,7 @@ class RSUDeliveryResult:
 
 def _quality_weight(cfg: EnvConfig, layer_idx: int) -> float:
     """
-    layer에 따른 quality weights를 반환하는 함수
+    layer index에 따른 quality weight를 반환하는 함수
     """
     layer = int(layer_idx)
     if layer <= 0:
@@ -54,7 +60,7 @@ def _quality_weight(cfg: EnvConfig, layer_idx: int) -> float:
 def _chunk_size_bits(cfg: EnvConfig, layer_idx: int) -> float:
     """
     layer 수에 따른 chunk size [bits] 계산하는 함수로,
-    현재는 base_chunk_size_bits * k의 단순 선형 모델로 구현했음.
+    S(k) = base_chunk_size_bits * k 의 단순 선형 모델을 차용함.
     """
     layer = int(layer_idx)
     if layer <= 0:
@@ -62,61 +68,120 @@ def _chunk_size_bits(cfg: EnvConfig, layer_idx: int) -> float:
     return float(cfg.base_chunk_size_bits) * float(layer)
 
 
-def _safe_int_array(arr: np.ndarray, shape: tuple[int, ...], name: str) -> np.ndarray:
-    arr = np.asarray(arr)
-    if arr.shape != shape:
-        raise ValueError(f"{name} shape mismatch: expected {shape}, got {arr.shape}")
-    return arr.astype(np.int32, copy=False)
-
-
-def _safe_float_array(arr: np.ndarray, shape: tuple[int, ...], name: str) -> np.ndarray:
-    arr = np.asarray(arr)
-    if arr.shape != shape:
-        raise ValueError(f"{name} shape mismatch: expected {shape}, got {arr.shape}")
-    return arr.astype(np.float32, copy=False)
-
-
-def _priority_score(cfg: EnvConfig, feasible_chunks: int, layer: int, cap_bps: float) -> float:
+def _clip_int_matrix(
+    value: np.ndarray,
+    shape: tuple[int, int],
+    dtype: np.dtype,
+    low: int,
+    high: int,
+    name: str,
+) -> np.ndarray:
     """
-    RSU 내부 user 우선 순위 및 user-conflict score 계산 함수로,
-    현재는 실제 전송 가능한 quality gain 및 tie-break용 capacity를 함께 고려함.
+    action matrix를 지정 shape/dtype으로 맞춘 뒤 [low, high] 범위로 clipping한다.
     """
+    arr = _ensure_shape(value, shape, dtype, fill_value=0, strict=False)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=high, neginf=low)
+    return np.clip(arr, low, high).astype(dtype, copy=False)
+
+
+def _clip_float_matrix(
+    value: np.ndarray,
+    shape: tuple[int, int],
+    low: float,
+    high: Optional[float],
+    name: str,
+) -> np.ndarray:
+    """
+    float matrix를 지정 shape으로 맞춘 뒤 clipping한다.
+    """
+    arr = _ensure_shape(value, shape, np.float32, fill_value=0.0, strict=False)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=high if high is not None else 0.0, neginf=low)
+    if high is None:
+        return np.maximum(arr, low).astype(np.float32, copy=False)
+    return np.clip(arr, low, high).astype(np.float32, copy=False)
+
+def _priority_score(cfg: EnvConfig, feasible_chunks: int, layer: int, cap_bps: float, user_virtual_queue: float=0.0) -> float:
+    """
+    RSU capacity 초과 또는 동일 user conflict가 발생했을 때 사용하는 score 계산 함수로,
+    invalid action에 대한 안전장치 목적으로 구현.
+    """
+    quality_gain = float(feasible_chunks) * _quality_weight(cfg, layer)
     return (
-        float(feasible_chunks) * _quality_weight(cfg, layer) + 1e-9 * float(cap_bps)
+        2.0 * float(user_virtual_queue)
+        + 1.0 * float(quality_gain)
+        + 1e-9 * float(cap_bps)
     )
 
 
 def compute_rsu_delivery(
     cfg: EnvConfig,
-    parsed: ParsedAction,
+    slow_act: SlowAction,
+    fast_act: FastAction,
     rsu_channel: RSUChannelModel,
     rng: Optional[np.random.Generator] = None,
 ) -> RSUDeliveryResult:
     """
-    RSU-User 간 delivery 동작 구현 함수로, 다음과 같은 흐름으로 동작함.
+    RSU-User 간 delivery 계산 함수로,
 
         1) requested_mask 생성
         2) 각 candidate link의 instantaneous channel 및 feasible chunks 계산
         3) RSU capacity를 적용하여 capped_mask 생성
         4) 동일 user에 대한 복수 RSU conflict 제거 (active_mask 생성)
         5) 최종 delivery
+
+    을 담당.
     """
     num_rsu = int(cfg.num_rsu)
     num_user = int(cfg.num_user)
     slot_duration = float(cfg.battery.slot_duration)
     rsu_capacity = max(0, int(cfg.rsu_capacity))
 
-    rsu_scheduling = _safe_int_array(
-        parsed.rsu_scheduling, (num_rsu, num_user), "parsed.rsu_scheduling"
+    if slot_duration <= 0.0:
+        raise ValueError(f"slot_duration은 양수여야 합니다. 현재 값: {slot_duration}")
+
+    # slow-timescale scheduling term
+    rsu_scheduling = _ensure_shape(
+        _safe_get_attr(slow_act, ["rsu_scheduling"], None),
+        (num_rsu, num_user),
+        np.int32,
+        fill_value=0,
+        strict=False,
     )
-    rsu_chunks = _safe_int_array(
-        parsed.rsu_chunks, (num_rsu, num_user), "parsed.rsu_chunks"
+    rsu_scheduling = (rsu_scheduling > 0)
+
+    # fast-timescale delivery term
+    rsu_chunks = _clip_int_matrix(
+        _safe_get_attr(fast_act, ["rsu_chunks"], None),
+        (num_rsu, num_user),
+        np.int32,
+        low=0,
+        high=int(cfg.chunk),
+        name="fast_act.rsu_chunks",
     )
-    rsu_layers = _safe_int_array(
-        parsed.rsu_layers, (num_rsu, num_user), "parsed.rsu_layers"
+
+    rsu_layers = _clip_int_matrix(
+        _safe_get_attr(fast_act, ["rsu_layers"], None),
+        (num_rsu, num_user),
+        np.int32,
+        low=0,
+        high=int(cfg.layer),
+        name="fast_act.rsu_layers",
     )
-    rsu_user_distance = _safe_float_array(
-        parsed.rsu_user_distance, (num_rsu, num_user), "parsed.rsu_user_distance"
+
+    rsu_user_distance = _clip_float_matrix(
+        _safe_get_attr(fast_act, ["rsu_user_distance"], None),
+        (num_rsu, num_user),
+        low=float(cfg.rsu_channel.min_distance),
+        high=None,
+        name="fast_act.rsu_user_distance",
+    )
+
+    user_virtual_queue = _ensure_shape(
+        _safe_get_attr(fast_act, ["user_virtual_queue"], None),
+        (num_user,),
+        np.float32,
+        fill_value=0.0,
+        strict=False,
     )
 
     # 1차 delivery 후보
@@ -130,7 +195,6 @@ def compute_rsu_delivery(
     link_capacity_bps = np.zeros((num_rsu, num_user), dtype=np.float32)
 
     potential_chunks = np.zeros((num_rsu, num_user), dtype=np.int32)
-    potential_quality = np.zeros((num_rsu, num_user), dtype=np.float32)
 
     # candidate link 별 achievable delivery 계산
     for m in range(num_rsu):
@@ -147,7 +211,7 @@ def compute_rsu_delivery(
             link_capacity_bps[m, n] = cap_bps
 
             chunk_bits = _chunk_size_bits(cfg, layer)
-            if chunk_bits <= 0.0:
+            if chunk_bits <= 0.0 or cap_bps <= 0.0:
                 feasible_chunks = 0
             else:
                 bit_budget = cap_bps * slot_duration
@@ -155,17 +219,14 @@ def compute_rsu_delivery(
             
             feasible_chunks = max(0, min(requested_chunks, feasible_chunks))
             potential_chunks[m, n] = feasible_chunks
-            potential_quality[m, n] = float(feasible_chunks) * _quality_weight(cfg, layer)
     
     # RSU별 동시 서비스 가능 user 수 제한 반영
     capped_mask = np.zeros((num_rsu, num_user), dtype=bool)
 
     for m in range(num_rsu):
         candidate_users = np.flatnonzero(requested_mask[m])
-
         if candidate_users.size == 0:
             continue
-
         if rsu_capacity <= 0:
             continue
 
@@ -176,6 +237,7 @@ def compute_rsu_delivery(
                     feasible_chunks=int(potential_chunks[m, n]),
                     layer=int(rsu_layers[m, n]),
                     cap_bps=float(link_capacity_bps[m, n]),
+                    user_virtual_queue=float(user_virtual_queue[n]),
                 )
                 for n in candidate_users
             ],
@@ -190,7 +252,7 @@ def compute_rsu_delivery(
             if potential_chunks[m, n] > 0:
                 capped_mask[m, n] = True
     
-    # 동일 user를 여러 RSU가 동시에 서비스하는 경우 방지
+    # 동일 user를 여러 RSU가 동시에 서비스하는 경우 방지 (안전장치)
     active_mask = np.zeros((num_rsu, num_user), dtype=bool)
 
     for n in range(num_user):
@@ -211,6 +273,7 @@ def compute_rsu_delivery(
                     feasible_chunks=int(potential_chunks[m, n]),
                     layer=int(rsu_layers[m, n]),
                     cap_bps=float(link_capacity_bps[m, n]),
+                    user_virtual_queue=float(user_virtual_queue[n]),
                 )
                 for m in providers
             ],

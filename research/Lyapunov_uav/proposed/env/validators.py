@@ -3,8 +3,11 @@ from __future__ import annotations
 from typing import Optional, Tuple
 import numpy as np
 
-from .action_types import EnvAction, ParsedAction
-from proposed.config import EnvConfig
+from .action_types import EnvAction, SlowAction, FastAction
+try:
+    from proposed.config import EnvConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import EnvConfig
 
 
 def _as_binary_matrix(value: np.ndarray, shape: Tuple[int, int], name: str) -> np.ndarray:
@@ -96,9 +99,9 @@ def _default_distance_matrix(
     return np.full((rows, cols), max(distance, min_distance), dtype=np.float32)
 
 
-def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
+def parse_slow_action(action: EnvAction, cfg: EnvConfig) -> SlowAction:
     """
-    가능한 모든 action을 파싱하는 함수
+    round-level slow-timescale action을 파싱하는 함수
     """
     m = cfg.num_rsu
     n = cfg.num_user
@@ -121,6 +124,24 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         (u, n),
         "uav_scheduling",
     )
+
+    # 각 UAV가 고용되지 않으면 scheduling 제거
+    uav_scheduling = uav_scheduling * uav_hiring[:, None]
+
+    return SlowAction(
+        rsu_scheduling=rsu_scheduling,
+        uav_hiring=uav_hiring,
+        uav_scheduling=uav_scheduling,
+    )
+
+
+def parse_fast_action(action: EnvAction, cfg: EnvConfig) -> FastAction:
+    """
+    slot-level fast-timescale action을 파싱하는 함수
+    """
+    m = cfg.num_rsu
+    n = cfg.num_user
+    u = cfg.num_uav
 
     rsu_chunks = _as_nonneg_int_matrix(
         action.get("rsu_chunks", np.zeros((m, n), dtype=np.int32)),
@@ -208,7 +229,7 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
     residual_users = _as_binary_vector(
         action.get(
             "residual_users",
-            (rsu_scheduling.sum(axis=0) == 0).astype(np.int32),
+            np.ones(n, dtype=np.int32)
         ),
         n,
         "residual_users",
@@ -242,39 +263,25 @@ def parse_action(action: EnvAction, cfg: EnvConfig) -> ParsedAction:
         "uav_cached_content",
     )
 
-    # 비활성 링크는 action을 0으로 정리
-    rsu_chunks = rsu_chunks * rsu_scheduling
-    rsu_layers = rsu_layers * rsu_scheduling
+    # fast validator 수준에서 할 수 있는 정적 정리만 수행
+    # chunks/layers/power 간 자기모순 제거
+    rsu_active = ((rsu_chunks > 0) & (rsu_layers > 0)).astype(np.int32)
+    rsu_chunks = rsu_chunks * rsu_active
+    rsu_layers = rsu_layers * rsu_active
 
-    uav_chunks = uav_chunks * uav_scheduling
-    uav_layers = uav_layers * uav_scheduling
-    uav_power = uav_power * uav_scheduling.astype(np.float32)
+    uav_active = ((uav_chunks > 0) & (uav_layers > 0) & (uav_power > 0.0)).astype(np.int32)
+    uav_chunks = uav_chunks * uav_active
+    uav_layers = uav_layers * uav_active
+    uav_power = uav_power * uav_active.astype(np.float32)
 
-    # hiring, charging UAV는 이번 slot 서비스 불가
-    for uavs in range(u):
-        if uav_hiring[uavs] == 1:
-            if uav_charge[uavs] == 1:
-                uav_scheduling[uavs, :] = 0
-                uav_chunks[uavs, :] = 0
-                uav_layers[uavs, :] = 0
-                uav_power[uavs, :] = 0.0
-        else:
-            uav_scheduling[uavs, :] = 0
-            uav_chunks[uavs, :] = 0
-            uav_layers[uavs, :] = 0
-            uav_power[uavs, :] = 0.0
+    # charging 중인 UAV는 해당 slot에서 service action 제거
+    for uu in range(u):
+        if uav_charge[uu] == 1:
+            uav_chunks[uu, :] = 0
+            uav_layers[uu, :] = 0
+            uav_power[uu, :] = 0.0
 
-    # residual user가 아닌 경우 UAV 서비스 제거
-    residual_mask = residual_users.astype(np.int32)[None, :]
-    uav_scheduling = uav_scheduling * residual_mask
-    uav_chunks = uav_chunks * residual_mask
-    uav_layers = uav_layers * residual_mask
-    uav_power = uav_power * residual_mask.astype(np.float32)
-
-    return ParsedAction(
-        rsu_scheduling=rsu_scheduling,
-        uav_hiring=uav_hiring,
-        uav_scheduling=uav_scheduling,
+    return FastAction(
         rsu_chunks=rsu_chunks,
         rsu_layers=rsu_layers,
         uav_chunks=uav_chunks,

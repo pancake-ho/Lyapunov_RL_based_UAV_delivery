@@ -1,48 +1,71 @@
+from __future__ import annotations
+
 import math
 from typing import Optional
 
 import numpy as np
-from config import ChannelConfig
+
+try:
+    from proposed.config import ChannelConfig
+except ModuleNotFoundError:  # pragma: no cover - script-style fallback
+    from config import ChannelConfig
+
 from .base_channel import BaseChannelModel
 
 
 class RSUChannelModel(BaseChannelModel):
     """
-    RSU-Vehicle 지상 link용 channel model 클래스로,
-    BaseChannelModel class가 생성한 normalized channel power gain을 사용하여
-    SNR 및 Shannon Capacity 계산을 담당.
+    RSU-user channel model 클래스
     """
-    def __init__(self, config: ChannelConfig, tx_power: float = 1.0):
+    def __init__(self, config: ChannelConfig, inr_db: Optional[float] = None):
         super().__init__(config)
-        self.tx_power = float(tx_power) # 현재 tx_power는 임의로 가정함
-
-        if self.tx_power < 0:
-            raise ValueError(f"tx_power는 0 이상이어야 합니다, 현재 값은 {self.tx_power}입니다.")
+        
+        if inr_db is None:
+            inr_db = getattr(config, "inr_db", 0.0)
+        self.inr_db = float(inr_db)
     
-    def compute_gain(
-        self,
-        distance: Optional[float] = None,
-        rng: Optional[np.random.Generator] = None,
-    ) -> float:
+    @property
+    def inr_linear(self) -> float:
+        """
+        INR_dB를 linear scale로 변환해 주는 함수
+        """
+        return self.db_to_linear(self.inr_db)
+    
+    @property
+    def gamma_linear(self) -> float:
+        """
+        gamma_dB를 linear scale로 변환해 주는 함수
+        """
+        return self.db_to_linear(self.gamma_db)
+    
+    def compute_channel_coeff(self, distance: Optional[float] = None, rng: Optional[np.random.Generator] = None) -> complex:
+        """
+        RSU와 user 사이 channel gain h_mn(t)룰 반환해 주는 함수
+        """
         return self.sample_channel_gain(distance=distance, rng=rng)
     
+    def compute_gain(self, distance: Optional[float] = None, rng: Optional[np.random.Generator] = None) -> float:
+        """
+        RSU와 user 사이 channel capacity 계산을 위한 |h_mn(t)|^2를 반환해 주는 함수
+        """
+        channel_coeff = self.compute_channel_coeff(distance=distance, rng=rng)
+        return float(abs(channel_coeff) ** 2)
+    
+    def snr_from_gain(self, gain: float) -> float:
+        """
+        RSU와 user 사이 channel capacity 계산을 위해, gain으로부터 SNR을 계산하는 함수
+        """
+        channel_power_gain = max(0.0, float(gain))
+        denominator = max(1e-12, 1.0 + self.inr_linear)
+        return float(self.gamma_linear * channel_power_gain / denominator)
+
     def compute_snr(
         self,
         distance: Optional[float] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> float:
-        """
-        RSU link instantaneous SNR을 계산하는 함수
-        """
         gain = self.compute_gain(distance=distance, rng=rng)
         return self.snr_from_gain(gain)
-    
-    def snr_from_gain(self, gain: float) -> float:
-        """
-        gain으로부터 SNR을 계산하는 함수
-        """
-        reference_snr = self.db_to_linear(self.gamma_db)
-        return float(self.tx_power * reference_snr * max(0.0, float(gain)))
     
     def capacity(
         self,
@@ -50,7 +73,7 @@ class RSUChannelModel(BaseChannelModel):
         rng: Optional[np.random.Generator] = None,
     ) -> float:
         """
-        Shannon Capacity[bps] 또는 config.bandwidth 단위에 따라 일관된 rate를 계산하는 함수
+        RSU에서 Channel Capacity를 계산하는 함수
         """
         gain = self.compute_gain(distance=distance, rng=rng)
         return self.capacity_from_gain(gain)
@@ -62,5 +85,5 @@ class RSUChannelModel(BaseChannelModel):
         """'
         gain으로부터 Capacity를 계산하는 함수
         """
-        snr = self.snr_from_gain(gain)
-        return float(self.bandwidth * math.log2(1.0 + snr))
+        sinr = self.snr_from_gain(gain)
+        return float(self.bandwidth * math.log2(1.0 + sinr))

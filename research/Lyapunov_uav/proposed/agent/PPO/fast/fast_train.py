@@ -234,8 +234,7 @@ def make_run_dir(args: argparse.Namespace) -> Path:
     """
     실행 결과 저장 directory 생성.
     """
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    run_name = f"fast_ppo_seed{args.seed}_{timestamp}"
+    run_name = f"fast_ppo_{args.mode}mode_episode{args.num_episodes}_slowT_{args.slowT}"
     run_dir = PROPOSED_ROOT / "runs" / "fast" / run_name
     ensure_dir(run_dir)
     ensure_dir(run_dir / "checkpoints")
