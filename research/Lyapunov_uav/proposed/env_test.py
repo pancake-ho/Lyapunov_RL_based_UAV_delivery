@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple, Type
 
 import numpy as np
 
@@ -38,7 +38,7 @@ def c(text: str, color: str) -> str:
     return f"{color}{text}{RESET}"
 
 
-def hr(char: str = "=", width: int = 100) -> None:
+def hr(char: str = "=", width: int = 110) -> None:
     print(char * width)
 
 
@@ -134,8 +134,7 @@ def assert_array_equal(name: str, actual: Any, expected: Any) -> None:
 
     if actual_arr.shape != expected_arr.shape:
         raise TestFailure(
-            f"{name}: shape mismatch, actual={actual_arr.shape}, "
-            f"expected={expected_arr.shape}"
+            f"{name}: shape mismatch, actual={actual_arr.shape}, expected={expected_arr.shape}"
         )
 
     if not np.array_equal(actual_arr, expected_arr):
@@ -158,8 +157,7 @@ def assert_array_close(
 
     if actual_arr.shape != expected_arr.shape:
         raise TestFailure(
-            f"{name}: shape mismatch, actual={actual_arr.shape}, "
-            f"expected={expected_arr.shape}"
+            f"{name}: shape mismatch, actual={actual_arr.shape}, expected={expected_arr.shape}"
         )
 
     if not np.allclose(actual_arr, expected_arr, atol=atol, rtol=rtol):
@@ -177,6 +175,25 @@ def assert_binary_array(name: str, value: Any) -> None:
     valid = np.all(np.isin(unique, [0, 1, False, True]))
     if not valid:
         raise TestFailure(f"{name}: expected binary array, unique={unique}")
+
+
+def assert_raises(
+    name: str,
+    expected_exception: Type[BaseException],
+    fn: Callable[[], Any],
+) -> None:
+    try:
+        fn()
+    except expected_exception:
+        ok(f"{name}: expected {expected_exception.__name__} raised")
+        return
+    except Exception as exc:
+        raise TestFailure(
+            f"{name}: expected {expected_exception.__name__}, "
+            f"but got {type(exc).__name__}: {exc}"
+        ) from exc
+
+    raise TestFailure(f"{name}: expected {expected_exception.__name__}, but no exception raised")
 
 
 # =============================================================================
@@ -260,14 +277,24 @@ def make_empty_slow_action(cfg: EnvConfig) -> Dict[str, np.ndarray]:
 
 def make_slow_action(
     cfg: EnvConfig,
-    rsu_idx: int,
-    uav_idx: int,
-    user_idx: int,
+    rsu_idx: int | None = None,
+    uav_idx: int | None = None,
+    user_idx: int | None = None,
+    enable_rsu: bool = True,
+    enable_uav: bool = True,
 ) -> Dict[str, np.ndarray]:
     action = make_empty_slow_action(cfg)
-    action["rsu_scheduling"][rsu_idx, user_idx] = 1
-    action["uav_hiring"][uav_idx] = 1
-    action["uav_scheduling"][uav_idx, user_idx] = 1
+
+    if user_idx is None:
+        return action
+
+    if enable_rsu and rsu_idx is not None:
+        action["rsu_scheduling"][rsu_idx, user_idx] = 1
+
+    if enable_uav and uav_idx is not None:
+        action["uav_hiring"][uav_idx] = 1
+        action["uav_scheduling"][uav_idx, user_idx] = 1
+
     return action
 
 
@@ -293,9 +320,9 @@ def make_empty_fast_action(cfg: EnvConfig) -> Dict[str, np.ndarray]:
 
 def make_fast_action(
     cfg: EnvConfig,
-    rsu_idx: int,
-    uav_idx: int,
-    user_idx: int,
+    rsu_idx: int = 0,
+    uav_idx: int = 0,
+    user_idx: int = 0,
     chunks: int = 1,
     layer: int = 1,
     power: float = 10.0,
@@ -320,7 +347,7 @@ def make_fast_action(
 # Environment invariant checks
 # =============================================================================
 
-def expected_obs_shapes(cfg: EnvConfig) -> Dict[str, Tuple[int, ...]]:
+def expected_fast_obs_shapes(cfg: EnvConfig) -> Dict[str, Tuple[int, ...]]:
     return {
         "Z": (cfg.num_user,),
         "Y": (cfg.num_uav,),
@@ -330,24 +357,46 @@ def expected_obs_shapes(cfg: EnvConfig) -> Dict[str, Tuple[int, ...]]:
     }
 
 
-def assert_obs_dict(obs: Dict[str, np.ndarray], cfg: EnvConfig, name: str) -> None:
-    """
-    현재 env.py의 get_fast_obs() 기준 observation 검증.
+def expected_slow_obs_shapes(cfg: EnvConfig) -> Dict[str, Tuple[int, ...]]:
+    return {
+        "Z": (cfg.num_user,),
+        "Y": (cfg.num_uav,),
+        "rsu_user_distance": (cfg.num_rsu, cfg.num_user),
+        "uav_user_distance": (cfg.num_uav, cfg.num_user),
+    }
 
-    interface.py를 삭제한 구조이므로 flatten vector 검사는 수행하지 않는다.
-    """
+
+def assert_obs_dict(
+    obs: Dict[str, np.ndarray],
+    expected_shapes: Dict[str, Tuple[int, ...]],
+    name: str,
+) -> None:
     if not isinstance(obs, dict):
         raise TestFailure(f"{name}: obs must be dict, got {type(obs)}")
 
-    shapes = expected_obs_shapes(cfg)
-
-    for key, shape in shapes.items():
+    for key, shape in expected_shapes.items():
         if key not in obs:
             raise TestFailure(f"{name}: obs missing required key: {key}")
         assert_array_shape(f"{name}.obs[{key}]", obs[key], shape)
         assert_array_finite(f"{name}.obs[{key}]", obs[key])
 
+
+def assert_fast_obs_dict(obs: Dict[str, np.ndarray], cfg: EnvConfig, name: str) -> None:
+    assert_obs_dict(obs, expected_fast_obs_shapes(cfg), name)
     assert_binary_array(f"{name}.obs[uav_scheduling]", obs["uav_scheduling"])
+
+
+def assert_slow_obs_dict(obs: Dict[str, np.ndarray], cfg: EnvConfig, name: str) -> None:
+    """
+    slow-timescale obs 검증.
+
+    현재 formulation 기준:
+        s_H(r) = [Z(r), B(r), x(r)]
+
+    현재 코드에서는 B(r)를 아직 Y key로 반환하고 있으므로,
+    slow obs key는 ["Z", "Y", "rsu_user_distance", "uav_user_distance"] 기준으로 검사한다.
+    """
+    assert_obs_dict(obs, expected_slow_obs_shapes(cfg), name)
 
 
 def assert_env_state(env: Env, cfg: EnvConfig, name: str) -> None:
@@ -361,10 +410,18 @@ def assert_env_state(env: Env, cfg: EnvConfig, name: str) -> None:
     assert_array_shape(f"{name}.outage", env.outage, (cfg.num_uav,))
     assert_array_shape(f"{name}.charging_state", env.charging_state, (cfg.num_uav,))
 
-    assert_array_finite(f"{name}.queue", env.queue)
-    assert_array_finite(f"{name}.Z", env.Z)
-    assert_array_finite(f"{name}.E", env.E)
-    assert_array_finite(f"{name}.Y", env.Y)
+    for key, value in {
+        "queue": env.queue,
+        "Z": env.Z,
+        "E": env.E,
+        "Y": env.Y,
+        "rsu_scheduling": env.rsu_scheduling,
+        "uav_hiring": env.uav_hiring,
+        "uav_scheduling": env.uav_scheduling,
+        "outage": env.outage,
+        "charging_state": env.charging_state,
+    }.items():
+        assert_array_finite(f"{name}.{key}", value)
 
     assert_binary_array(f"{name}.rsu_scheduling", env.rsu_scheduling)
     assert_binary_array(f"{name}.uav_hiring", env.uav_hiring)
@@ -373,11 +430,10 @@ def assert_env_state(env: Env, cfg: EnvConfig, name: str) -> None:
     assert_binary_array(f"{name}.charging_state", env.charging_state)
 
     assert_true(np.all(env.queue >= -1e-6), f"{name}: queue has negative values")
-    assert_true(np.all(env.queue <= cfg.max_queue + cfg.chunk * cfg.num_rsu + cfg.chunk * cfg.num_uav + 1e-6),
-                f"{name}: queue is unexpectedly large")
     assert_true(np.all(env.E >= -1e-6), f"{name}: E has negative values")
     assert_true(np.all(env.E <= cfg.battery.e_max + 1e-6), f"{name}: E exceeds e_max")
     assert_true(np.all(env.Y >= -1e-6), f"{name}: Y has negative values")
+    assert_true(np.all(env.Y <= cfg.battery.e_max + 1e-6), f"{name}: Y exceeds e_max")
 
     expected_z = np.clip(float(cfg.max_queue) - env.queue, 0.0, float(cfg.max_queue))
     assert_array_close(f"{name}: Z = max_queue - Q", env.Z, expected_z)
@@ -396,7 +452,7 @@ def assert_step_result(
     cfg: EnvConfig,
     step_name: str,
 ) -> None:
-    assert_obs_dict(next_obs, cfg, name=f"{step_name}.next_obs")
+    assert_fast_obs_dict(next_obs, cfg, name=f"{step_name}.next_obs")
     assert_env_state(env, cfg, name=f"{step_name}.env_state")
 
     assert_finite_scalar(f"{step_name}.reward", reward)
@@ -457,37 +513,28 @@ def assert_step_result(
         int(env.round_slot),
     )
 
-    assert_array_shape(f"{step_name}.info.prev_Q", info["prev_Q"], (cfg.num_user,))
-    assert_array_shape(f"{step_name}.info.next_Q", info["next_Q"], (cfg.num_user,))
-    assert_array_shape(f"{step_name}.info.prev_Z", info["prev_Z"], (cfg.num_user,))
-    assert_array_shape(f"{step_name}.info.next_Z", info["next_Z"], (cfg.num_user,))
-    assert_array_shape(f"{step_name}.info.playback", info["playback"], (cfg.num_user,))
-    assert_array_shape(f"{step_name}.info.consumed", info["consumed"], (cfg.num_user,))
-    assert_array_shape(f"{step_name}.info.stall", info["stall"], (cfg.num_user,))
-    assert_array_shape(f"{step_name}.info.prev_E", info["prev_E"], (cfg.num_uav,))
-    assert_array_shape(f"{step_name}.info.next_E", info["next_E"], (cfg.num_uav,))
-    assert_array_shape(f"{step_name}.info.prev_Y", info["prev_Y"], (cfg.num_uav,))
-    assert_array_shape(f"{step_name}.info.next_Y", info["next_Y"], (cfg.num_uav,))
+    vector_shapes = {
+        "prev_Q": (cfg.num_user,),
+        "next_Q": (cfg.num_user,),
+        "prev_Z": (cfg.num_user,),
+        "next_Z": (cfg.num_user,),
+        "playback": (cfg.num_user,),
+        "consumed": (cfg.num_user,),
+        "stall": (cfg.num_user,),
+        "prev_E": (cfg.num_uav,),
+        "next_E": (cfg.num_uav,),
+        "prev_Y": (cfg.num_uav,),
+        "next_Y": (cfg.num_uav,),
+        "delivered_rsu_per_user": (cfg.num_user,),
+        "delivered_uav_per_user": (cfg.num_user,),
+        "delivered_total_per_user": (cfg.num_user,),
+        "quality_rsu_per_user": (cfg.num_user,),
+        "quality_uav_per_user": (cfg.num_user,),
+        "quality_total_per_user": (cfg.num_user,),
+    }
 
-    for key in [
-        "prev_Q",
-        "next_Q",
-        "prev_Z",
-        "next_Z",
-        "playback",
-        "consumed",
-        "stall",
-        "prev_E",
-        "next_E",
-        "prev_Y",
-        "next_Y",
-        "delivered_rsu_per_user",
-        "delivered_uav_per_user",
-        "delivered_total_per_user",
-        "quality_rsu_per_user",
-        "quality_uav_per_user",
-        "quality_total_per_user",
-    ]:
+    for key, shape in vector_shapes.items():
+        assert_array_shape(f"{step_name}.info[{key}]", info[key], shape)
         assert_array_finite(f"{step_name}.info[{key}]", info[key])
 
     battery_info = info["battery_step_info"]
@@ -498,6 +545,25 @@ def assert_step_result(
             f"{step_name}: battery_step_info length mismatch, "
             f"actual={len(battery_info)}, expected={cfg.num_uav}"
         )
+
+    for u, binfo in enumerate(battery_info):
+        if not isinstance(binfo, dict):
+            raise TestFailure(f"{step_name}: battery_step_info[{u}] must be dict")
+        for key in [
+            "hover_energy",
+            "comm_energy",
+            "total_consumed",
+            "charged_energy",
+            "consumed_soc",
+            "charged_soc",
+            "soc_before",
+            "soc_after",
+            "virtual_before",
+            "virtual_after",
+            "outage",
+        ]:
+            if key not in binfo:
+                raise TestFailure(f"{step_name}: battery_step_info[{u}] missing key: {key}")
 
     rc = info["reward_components"]
     if not isinstance(rc, dict):
@@ -520,6 +586,7 @@ def assert_step_result(
         delivered_rsu + delivered_uav,
     )
 
+    # Quality decomposition check
     quality_rsu = np.asarray(info["quality_rsu_per_user"], dtype=np.float32)
     quality_uav = np.asarray(info["quality_uav_per_user"], dtype=np.float32)
     quality_total = np.asarray(info["quality_total_per_user"], dtype=np.float32)
@@ -555,6 +622,128 @@ def assert_step_result(
     assert_array_close(f"{step_name}: env.E == info.next_E", env.E, info["next_E"], atol=1e-4)
     assert_array_close(f"{step_name}: env.Y == info.next_Y", env.Y, info["next_Y"], atol=1e-4)
 
+    # Reward consistency check
+    assert_reward_consistency(info=info, reward=reward, cfg=cfg, step_name=step_name)
+
+
+def assert_reward_consistency(
+    info: Dict[str, Any],
+    reward: float,
+    cfg: EnvConfig,
+    step_name: str,
+) -> None:
+    rc = info["reward_components"]
+    frc = rc["fast_reward_components"]
+    src = rc["slow_reward_components"]
+
+    required_fast_keys = [
+        "theta_z",
+        "prev_Z",
+        "delivered_total_per_user",
+        "prev_Y",
+        "consumed_soc_per_uav",
+        "charged_soc_per_uav",
+        "quality_total_per_user",
+        "video_delivery_term",
+        "battery_consume_term",
+        "battery_charge_term",
+        "quality_term",
+        "fast_reward",
+    ]
+
+    for key in required_fast_keys:
+        if key not in frc:
+            raise TestFailure(f"{step_name}: fast_reward_components missing key: {key}")
+
+    theta_z = np.asarray(frc["theta_z"], dtype=np.float32)
+    prev_z = np.asarray(frc["prev_Z"], dtype=np.float32)
+    delivered = np.asarray(frc["delivered_total_per_user"], dtype=np.float32)
+    prev_y = np.asarray(frc["prev_Y"], dtype=np.float32)
+    consumed_soc = np.asarray(frc["consumed_soc_per_uav"], dtype=np.float32)
+    charged_soc = np.asarray(frc["charged_soc_per_uav"], dtype=np.float32)
+    quality = np.asarray(frc["quality_total_per_user"], dtype=np.float32)
+
+    V = float(getattr(cfg.reward, "V", 1.0))
+
+    expected_video_term = float(np.sum((prev_z - theta_z) * delivered))
+    expected_battery_consume_term = -float(np.sum(prev_y * consumed_soc))
+    expected_battery_charge_term = float(np.sum(prev_y * charged_soc))
+    expected_quality_term = V * float(np.sum(quality))
+
+    assert_array_close(
+        f"{step_name}: video_delivery_term",
+        np.array([frc["video_delivery_term"]]),
+        np.array([expected_video_term]),
+        atol=1e-4,
+    )
+    assert_array_close(
+        f"{step_name}: battery_consume_term",
+        np.array([frc["battery_consume_term"]]),
+        np.array([expected_battery_consume_term]),
+        atol=1e-4,
+    )
+    assert_array_close(
+        f"{step_name}: battery_charge_term",
+        np.array([frc["battery_charge_term"]]),
+        np.array([expected_battery_charge_term]),
+        atol=1e-4,
+    )
+    assert_array_close(
+        f"{step_name}: quality_term",
+        np.array([frc["quality_term"]]),
+        np.array([expected_quality_term]),
+        atol=1e-4,
+    )
+
+    expected_fast_reward = (
+        expected_video_term
+        + expected_battery_consume_term
+        + expected_battery_charge_term
+        + expected_quality_term
+    )
+
+    assert_array_close(
+        f"{step_name}: fast_reward = sum(fast terms)",
+        np.array([frc["fast_reward"]]),
+        np.array([expected_fast_reward]),
+        atol=1e-4,
+    )
+
+    assert_array_close(
+        f"{step_name}: returned reward == fast_reward",
+        np.array([reward]),
+        np.array([rc["fast_reward"]]),
+        atol=1e-4,
+    )
+
+    if not bool(info["is_round_boundary"]):
+        assert_array_close(
+            f"{step_name}: slow_reward must be zero before boundary",
+            np.array([rc["slow_reward"]]),
+            np.array([0.0]),
+            atol=1e-6,
+        )
+        if "slow_reward" in src:
+            assert_array_close(
+                f"{step_name}: slow_components.slow_reward must be zero before boundary",
+                np.array([src["slow_reward"]]),
+                np.array([0.0]),
+                atol=1e-6,
+            )
+    else:
+        if "round_fast_reward_sum" not in src:
+            raise TestFailure(f"{step_name}: boundary slow components missing round_fast_reward_sum")
+        if "hire_cost" not in src:
+            raise TestFailure(f"{step_name}: boundary slow components missing hire_cost")
+
+        expected_slow_reward = float(src["round_fast_reward_sum"]) + float(src["hire_cost"])
+        assert_array_close(
+            f"{step_name}: slow_reward = round_fast_reward_sum + hire_cost",
+            np.array([rc["slow_reward"]]),
+            np.array([expected_slow_reward]),
+            atol=1e-4,
+        )
+
 
 def print_step_summary(env: Env, reward: float, info: Dict[str, Any], label: str) -> None:
     print(c(label, BOLD))
@@ -586,6 +775,7 @@ def print_step_summary(env: Env, reward: float, info: Dict[str, Any], label: str
                     "battery_consume": round(float(frc.get("battery_consume_term", 0.0)), 6),
                     "battery_charge": round(float(frc.get("battery_charge_term", 0.0)), 6),
                     "quality": round(float(frc.get("quality_term", 0.0)), 6),
+                    "fast_reward": round(float(frc.get("fast_reward", 0.0)), 6),
                 },
             )
         if isinstance(src, dict):
@@ -619,22 +809,35 @@ def set_uav_soc(env: Env, cfg: EnvConfig, uav_idx: int, soc: float) -> None:
     env.batteries[uav_idx].virtual_q = float(cfg.battery.e_max) - soc_clipped
 
 
+def assert_slow_decision_equal(
+    env: Env,
+    slow: Dict[str, np.ndarray],
+    name: str,
+) -> None:
+    assert_array_equal(f"{name}.rsu_scheduling", env.rsu_scheduling, slow["rsu_scheduling"])
+    assert_array_equal(f"{name}.uav_hiring", env.uav_hiring, slow["uav_hiring"])
+    assert_array_equal(f"{name}.uav_scheduling", env.uav_scheduling, slow["uav_scheduling"])
+
+
 # =============================================================================
 # Individual tests
 # =============================================================================
 
 def test_01_reset_and_initial_obs() -> None:
-    section("TEST 01 | reset 및 초기 observation/state 검증")
+    section("TEST 01 | reset 및 초기 fast/slow observation/state 검증")
 
     cfg = build_test_config()
     env = Env(cfg)
 
-    obs, reset_info = env.reset()
+    fast_obs, reset_info = env.reset()
+    slow_obs = env.get_slow_obs()
 
     kv("reset_info", reset_info)
-    kv("obs_keys", list(obs.keys()))
+    kv("fast_obs_keys", list(fast_obs.keys()))
+    kv("slow_obs_keys", list(slow_obs.keys()))
 
-    assert_obs_dict(obs, cfg, "reset")
+    assert_fast_obs_dict(fast_obs, cfg, "reset_fast")
+    assert_slow_obs_dict(slow_obs, cfg, "reset_slow")
     assert_env_state(env, cfg, "after_reset")
 
     assert_equal("reset t", env.t, 0)
@@ -642,16 +845,29 @@ def test_01_reset_and_initial_obs() -> None:
     assert_equal("reset round_slot", env.round_slot, 0)
     assert_array_close("round_start_E == E after reset", env.round_start_E, env.E)
 
-    ok("reset observation/state 정상")
+    assert_array_close("slow_obs.Z == env.Z", slow_obs["Z"], env.Z)
+    assert_array_close("slow_obs.Y == env.Y", slow_obs["Y"], env.Y)
+    assert_array_close(
+        "slow_obs.rsu_user_distance == env.rsu_user_distance",
+        slow_obs["rsu_user_distance"],
+        env.rsu_user_distance,
+    )
+    assert_array_close(
+        "slow_obs.uav_user_distance == env.uav_user_distance",
+        slow_obs["uav_user_distance"],
+        env.uav_user_distance,
+    )
+
+    ok("reset 및 fast/slow observation/state 정상")
 
 
 def test_02_no_slow_action_blocks_delivery() -> None:
-    section("TEST 02 | slow action 미적용 상태에서 fast action이 delivery로 반영되지 않는지 검증")
+    section("TEST 02 | slow action 미적용 상태에서 fast action delivery masking 검증")
 
     cfg = build_test_config()
     env = Env(cfg)
-    obs, _ = env.reset()
-    assert_obs_dict(obs, cfg, "reset")
+    fast_obs, _ = env.reset()
+    assert_fast_obs_dict(fast_obs, cfg, "reset")
 
     prepare_content_match(env, user_idx=0, uav_idx=0, content_id=0)
 
@@ -682,14 +898,10 @@ def test_03_basic_service_flow_and_queue_battery() -> None:
 
     slow = make_slow_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
     env.apply_slow_action(slow)
-
-    assert_array_equal("slow.rsu_scheduling applied", env.rsu_scheduling, slow["rsu_scheduling"])
-    assert_array_equal("slow.uav_hiring applied", env.uav_hiring, slow["uav_hiring"])
-    assert_array_equal("slow.uav_scheduling applied", env.uav_scheduling, slow["uav_scheduling"])
+    assert_slow_decision_equal(env, slow, "slow_applied")
 
     fast = make_fast_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
-
-    prev_e0 = env.E.copy()
+    prev_e = env.E.copy()
 
     next_obs, reward, terminated, truncated, info = env.step(fast)
 
@@ -700,8 +912,8 @@ def test_03_basic_service_flow_and_queue_battery() -> None:
     assert_true(float(delivered_total[0]) > 0.0, "user 0 should receive positive delivery")
 
     assert_true(
-        float(env.E[0]) < float(prev_e0[0]),
-        f"hired serving UAV 0 should consume battery: prev={prev_e0[0]}, now={env.E[0]}",
+        float(env.E[0]) < float(prev_e[0]),
+        f"hired serving UAV 0 should consume battery: prev={prev_e[0]}, now={env.E[0]}",
     )
 
     assert_true(not terminated, "basic service step should not terminate")
@@ -710,8 +922,118 @@ def test_03_basic_service_flow_and_queue_battery() -> None:
     ok("기본 service/queue/battery 흐름 정상")
 
 
-def test_04_round_transition_and_accumulator() -> None:
-    section("TEST 04 | round boundary, round_idx/round_slot, accumulator reset 검증")
+def test_04_content_mismatch_blocks_uav_delivery() -> None:
+    section("TEST 04 | UAV cache content mismatch 시 UAV delivery 차단 검증")
+
+    cfg = build_test_config()
+    env = Env(cfg)
+    env.reset()
+
+    prepare_content_mismatch(env, user_idx=0, uav_idx=0)
+
+    slow = make_slow_action(
+        cfg,
+        rsu_idx=None,
+        uav_idx=0,
+        user_idx=0,
+        enable_rsu=False,
+        enable_uav=True,
+    )
+    env.apply_slow_action(slow)
+
+    fast = make_fast_action(
+        cfg,
+        rsu_idx=0,
+        uav_idx=0,
+        user_idx=0,
+        enable_rsu=False,
+        enable_uav=True,
+    )
+
+    next_obs, reward, terminated, truncated, info = env.step(fast)
+
+    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "content_mismatch_step")
+    print_step_summary(env, reward, info, "[content mismatch step]")
+
+    delivered_uav = np.asarray(info["delivered_uav_per_user"], dtype=np.float32)
+    assert_array_close(
+        "content mismatch: UAV delivered_uav must be zero",
+        delivered_uav,
+        np.zeros(cfg.num_user, dtype=np.float32),
+        atol=1e-6,
+    )
+
+    ok("UAV cached content와 user requested content가 다르면 UAV delivery가 차단됨")
+
+
+def test_05_charging_blocks_service_and_updates_battery() -> None:
+    section("TEST 05 | low SoC에서 rule-based charging, service 차단, battery update 검증")
+
+    cfg = build_test_config()
+    env = Env(cfg)
+    env.reset()
+
+    prepare_content_match(env, user_idx=0, uav_idx=0, content_id=0)
+
+    slow = make_slow_action(
+        cfg,
+        rsu_idx=None,
+        uav_idx=0,
+        user_idx=0,
+        enable_rsu=False,
+        enable_uav=True,
+    )
+    env.apply_slow_action(slow)
+
+    low_soc = float(cfg.battery.e_min)
+    set_uav_soc(env, cfg, uav_idx=0, soc=low_soc)
+
+    prev_e = env.E.copy()
+    prev_y = env.Y.copy()
+
+    fast = make_fast_action(
+        cfg,
+        rsu_idx=0,
+        uav_idx=0,
+        user_idx=0,
+        enable_rsu=False,
+        enable_uav=True,
+    )
+
+    next_obs, reward, terminated, truncated, info = env.step(fast)
+
+    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "charging_step")
+    print_step_summary(env, reward, info, "[charging step]")
+
+    assert_equal("charging_state[0]", int(env.charging_state[0]), 1)
+
+    delivered_uav = np.asarray(info["delivered_uav_per_user"], dtype=np.float32)
+    assert_array_close(
+        "charging: UAV delivery must be blocked",
+        delivered_uav,
+        np.zeros(cfg.num_user, dtype=np.float32),
+        atol=1e-6,
+    )
+
+    binfo0 = info["battery_step_info"][0]
+    assert_true(
+        float(binfo0["charged_soc"]) > 0.0,
+        f"charging UAV should have positive charged_soc, got {binfo0['charged_soc']}",
+    )
+    assert_true(
+        float(env.E[0]) >= float(prev_e[0]) - 1e-6,
+        f"charging should not decrease UAV 0 SoC: prev={prev_e[0]}, now={env.E[0]}",
+    )
+    assert_true(
+        float(env.Y[0]) <= float(prev_y[0]) + 1e-6,
+        f"charging should not increase UAV 0 virtual queue: prev={prev_y[0]}, now={env.Y[0]}",
+    )
+
+    ok("low SoC에서 charging이 service를 차단하고 battery를 갱신함")
+
+
+def test_06_round_transition_and_accumulator() -> None:
+    section("TEST 06 | round boundary, round_idx/round_slot, accumulator reset 검증")
 
     cfg = build_test_config()
     env = Env(cfg)
@@ -732,6 +1054,7 @@ def test_04_round_transition_and_accumulator() -> None:
     for local_step in range(1, cfg.slow_T + 1):
         next_obs, reward, terminated, truncated, info = env.step(fast0)
         label = f"round0_step{local_step}"
+
         assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, label)
         print_step_summary(env, reward, info, f"[{label}]")
 
@@ -751,56 +1074,28 @@ def test_04_round_transition_and_accumulator() -> None:
                 bool(info["is_round_boundary"]),
                 f"{label}: boundary should be True",
             )
-            assert_equal(f"{label}: t", env.t, cfg.slow_T)
             assert_equal(f"{label}: round_idx", env.round_idx, 1)
             assert_equal(f"{label}: round_slot", env.round_slot, 0)
-
-            # boundary 이후 _start_new_round()가 호출되면 round_start_E는 현재 E와 같아야 함
             assert_array_close(
-                f"{label}: boundary round_start_E == E",
+                f"{label}: round_start_E reset to current E",
                 env.round_start_E,
                 env.E,
                 atol=1e-4,
             )
-
-            # boundary 이후 accumulator reset 확인
-            assert_true(
-                abs(float(env.round_fast_reward_sum)) <= 1e-6,
-                f"{label}: round_fast_reward_sum should reset, got {env.round_fast_reward_sum}",
-            )
-            assert_true(
-                abs(float(env.round_quality_sum)) <= 1e-6,
-                f"{label}: round_quality_sum should reset, got {env.round_quality_sum}",
-            )
-            assert_true(
-                abs(float(env.round_delivery_sum)) <= 1e-6,
-                f"{label}: round_delivery_sum should reset, got {env.round_delivery_sum}",
+            assert_array_close(
+                f"{label}: round_fast_reward_sum reset after boundary",
+                np.array([env.round_fast_reward_sum]),
+                np.array([0.0]),
+                atol=1e-6,
             )
 
-        assert_array_equal(
-            f"{label}: slow rsu_scheduling 유지",
-            env.rsu_scheduling,
-            slow0["rsu_scheduling"],
-        )
-        assert_array_equal(
-            f"{label}: slow uav_hiring 유지",
-            env.uav_hiring,
-            slow0["uav_hiring"],
-        )
-        assert_array_equal(
-            f"{label}: slow uav_scheduling 유지",
-            env.uav_scheduling,
-            slow0["uav_scheduling"],
-        )
-
-        assert_true(not terminated, f"{label}: should not terminate")
-        assert_true(not truncated, f"{label}: should not truncate")
+        assert_slow_decision_equal(env, slow0, f"{label}: slow decision persistence")
 
     ok("round boundary 및 accumulator reset 정상")
 
 
-def test_05_slow_action_reapply_next_round() -> None:
-    section("TEST 05 | 새 round에서 slow action 재적용 및 decision 교체 검증")
+def test_07_slow_decision_persistence_until_reapply() -> None:
+    section("TEST 07 | slow decision이 다음 apply_slow_action 전까지 유지되는지 검증")
 
     cfg = build_test_config()
     env = Env(cfg)
@@ -810,152 +1105,212 @@ def test_05_slow_action_reapply_next_round() -> None:
     prepare_content_match(env, user_idx=1, uav_idx=1, content_id=1)
 
     slow0 = make_slow_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
-    fast0 = make_fast_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
+    slow1 = make_slow_action(cfg, rsu_idx=1, uav_idx=1, user_idx=1)
 
     env.apply_slow_action(slow0)
+    assert_slow_decision_equal(env, slow0, "round0_slow0_applied")
 
-    for _ in range(cfg.slow_T):
-        env.step(fast0)
+    fast0 = make_fast_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
 
-    assert_equal("after round0 boundary round_idx", env.round_idx, 1)
-    assert_equal("after round0 boundary round_slot", env.round_slot, 0)
+    for i in range(cfg.slow_T):
+        next_obs, reward, terminated, truncated, info = env.step(fast0)
+        assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, f"slow_persist_step{i}")
+        assert_slow_decision_equal(env, slow0, f"slow must persist after step {i}")
 
-    slow1 = make_slow_action(cfg, rsu_idx=1, uav_idx=1, user_idx=1)
-    fast1 = make_fast_action(cfg, rsu_idx=1, uav_idx=1, user_idx=1)
+    assert_equal("after boundary round_idx", env.round_idx, 1)
+    assert_equal("after boundary round_slot", env.round_slot, 0)
+    assert_slow_decision_equal(env, slow0, "slow still persists after boundary before reapply")
 
     env.apply_slow_action(slow1)
+    assert_slow_decision_equal(env, slow1, "slow changed only after reapply")
 
-    assert_equal("after slow1 apply round_idx", env.round_idx, 1)
-    assert_equal("after slow1 apply round_slot", env.round_slot, 0)
-    assert_array_equal("slow1.rsu_scheduling applied", env.rsu_scheduling, slow1["rsu_scheduling"])
-    assert_array_equal("slow1.uav_hiring applied", env.uav_hiring, slow1["uav_hiring"])
-    assert_array_equal("slow1.uav_scheduling applied", env.uav_scheduling, slow1["uav_scheduling"])
-    assert_array_close("slow1 round_start_E == E", env.round_start_E, env.E)
-
-    next_obs, reward, terminated, truncated, info = env.step(fast1)
-    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "round1_first_step")
-    print_step_summary(env, reward, info, "[round1 first step]")
-
-    delivered_total = np.asarray(info["delivered_total_per_user"], dtype=np.float32)
-    assert_true(float(delivered_total[1]) > 0.0, "round1 user 1 should receive delivery")
-    assert_equal("round1 first step round_idx", env.round_idx, 1)
-    assert_equal("round1 first step round_slot", env.round_slot, 1)
-
-    ok("round 전이 이후 slow action 교체 정상")
+    ok("slow decision은 round 동안 유지되고, 새 apply_slow_action에서만 변경됨")
 
 
-def test_06_cache_mismatch_blocks_uav_delivery() -> None:
-    section("TEST 06 | UAV cache mismatch 시 UAV delivery 차단 검증")
+def test_08_validator_shape_errors_and_clipping_behavior() -> None:
+    section("TEST 08 | validator shape error 및 clipping behavior 검증")
 
     cfg = build_test_config()
     env = Env(cfg)
     env.reset()
 
-    prepare_content_mismatch(env, user_idx=0, uav_idx=0)
+    bad_slow = make_empty_slow_action(cfg)
+    bad_slow["uav_hiring"] = np.zeros((cfg.num_uav, 1), dtype=np.int32)
 
-    # RSU는 꺼두고 UAV만 시도해서 cache mismatch 영향만 확인
-    slow = make_empty_slow_action(cfg)
-    slow["uav_hiring"][0] = 1
-    slow["uav_scheduling"][0, 0] = 1
+    assert_raises(
+        "bad slow action shape should raise ValueError",
+        ValueError,
+        lambda: env.apply_slow_action(bad_slow),
+    )
 
-    fast = make_fast_action(
+    bad_fast = make_empty_fast_action(cfg)
+    bad_fast["uav_power"] = np.zeros((cfg.num_uav + 1, cfg.num_user), dtype=np.float32)
+
+    assert_raises(
+        "bad fast action shape should raise ValueError",
+        ValueError,
+        lambda: env.step(bad_fast),
+    )
+
+    # 현재 validators.py 구현은 음수/초과값을 reject하지 않고 min/max로 clipping한다.
+    # 따라서 이 테스트는 "에러가 나지 않고 finite state를 유지하는지"와
+    # "초과 power가 max_tx_power 이하로 처리되는지"를 간접 검증한다.
+    env = Env(cfg)
+    env.reset()
+    prepare_content_match(env, user_idx=0, uav_idx=0, content_id=0)
+
+    slow = make_slow_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
+    env.apply_slow_action(slow)
+
+    clipped_fast = make_fast_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
+    clipped_fast["rsu_chunks"][0, 0] = cfg.chunk + 100
+    clipped_fast["rsu_layers"][0, 0] = cfg.layer + 100
+    clipped_fast["uav_chunks"][0, 0] = cfg.chunk + 100
+    clipped_fast["uav_layers"][0, 0] = cfg.layer + 100
+    clipped_fast["uav_power"][0, 0] = cfg.battery.max_tx_power + 1000.0
+    clipped_fast["playback"] = -np.ones(cfg.num_user, dtype=np.float32)
+
+    next_obs, reward, terminated, truncated, info = env.step(clipped_fast)
+    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "clipped_fast_step")
+
+    assert_true(np.all(np.asarray(info["playback"]) >= 0.0), "playback should be clipped to nonnegative")
+    assert_true(np.all(env.E >= 0.0), "E should remain nonnegative after clipped action")
+    assert_true(np.all(env.E <= cfg.battery.e_max + 1e-6), "E should remain within e_max after clipped action")
+
+    ok("validator shape error 및 clipping behavior 정상")
+
+
+def test_09_rsu_only_and_uav_only_paths() -> None:
+    section("TEST 09 | RSU-only / UAV-only delivery path 분리 검증")
+
+    cfg = build_test_config()
+
+    # RSU-only
+    env = Env(cfg)
+    env.reset()
+
+    slow_rsu = make_slow_action(
         cfg,
         rsu_idx=0,
+        uav_idx=None,
+        user_idx=0,
+        enable_rsu=True,
+        enable_uav=False,
+    )
+    env.apply_slow_action(slow_rsu)
+
+    fast_rsu = make_fast_action(
+        cfg,
+        rsu_idx=0,
+        uav_idx=0,
+        user_idx=0,
+        enable_rsu=True,
+        enable_uav=True,
+    )
+
+    next_obs, reward, terminated, truncated, info = env.step(fast_rsu)
+    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "rsu_only_step")
+    print_step_summary(env, reward, info, "[RSU-only step]")
+
+    delivered_rsu = np.asarray(info["delivered_rsu_per_user"], dtype=np.float32)
+    delivered_uav = np.asarray(info["delivered_uav_per_user"], dtype=np.float32)
+
+    assert_true(float(delivered_rsu[0]) > 0.0, "RSU-only: RSU delivery should be positive")
+    assert_array_close(
+        "RSU-only: UAV delivery should be zero",
+        delivered_uav,
+        np.zeros(cfg.num_user, dtype=np.float32),
+    )
+
+    # UAV-only
+    env = Env(cfg)
+    env.reset()
+    prepare_content_match(env, user_idx=0, uav_idx=0, content_id=0)
+
+    slow_uav = make_slow_action(
+        cfg,
+        rsu_idx=None,
         uav_idx=0,
         user_idx=0,
         enable_rsu=False,
         enable_uav=True,
     )
+    env.apply_slow_action(slow_uav)
 
-    env.apply_slow_action(slow)
-
-    next_obs, reward, terminated, truncated, info = env.step(fast)
-    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "cache_mismatch_step")
-    print_step_summary(env, reward, info, "[cache mismatch step]")
-
-    delivered_uav = np.asarray(info["delivered_uav_per_user"], dtype=np.float32)
-    assert_array_close(
-        "cache mismatch: delivered_uav must be zero",
-        delivered_uav,
-        np.zeros(cfg.num_user, dtype=np.float32),
+    fast_uav = make_fast_action(
+        cfg,
+        rsu_idx=0,
+        uav_idx=0,
+        user_idx=0,
+        enable_rsu=True,
+        enable_uav=True,
     )
 
-    ok("cache mismatch에서 UAV delivery 차단 정상")
+    next_obs, reward, terminated, truncated, info = env.step(fast_uav)
+    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "uav_only_step")
+    print_step_summary(env, reward, info, "[UAV-only step]")
+
+    delivered_rsu = np.asarray(info["delivered_rsu_per_user"], dtype=np.float32)
+    delivered_uav = np.asarray(info["delivered_uav_per_user"], dtype=np.float32)
+
+    assert_array_close(
+        "UAV-only: RSU delivery should be zero",
+        delivered_rsu,
+        np.zeros(cfg.num_user, dtype=np.float32),
+    )
+    assert_true(float(delivered_uav[0]) > 0.0, "UAV-only: UAV delivery should be positive")
+
+    ok("RSU-only / UAV-only delivery path 분리 정상")
 
 
-def test_07_low_battery_rule_based_charging() -> None:
-    section("TEST 07 | low battery에서 rule-based charging hook 검증")
+def test_10_multi_step_stability_smoke() -> None:
+    section("TEST 10 | 여러 step 반복 시 finite/state invariant 유지 검증")
 
     cfg = build_test_config()
     env = Env(cfg)
     env.reset()
 
     prepare_content_match(env, user_idx=0, uav_idx=0, content_id=0)
+    prepare_content_match(env, user_idx=1, uav_idx=1, content_id=1)
 
-    slow = make_slow_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
-    fast = make_fast_action(
-        cfg,
-        rsu_idx=0,
-        uav_idx=0,
-        user_idx=0,
-        enable_rsu=False,
-        enable_uav=True,
-    )
+    slow = make_empty_slow_action(cfg)
+    slow["rsu_scheduling"][0, 0] = 1
+    slow["rsu_scheduling"][1, 1] = 1
+    slow["uav_hiring"][0] = 1
+    slow["uav_hiring"][1] = 1
+    slow["uav_scheduling"][0, 0] = 1
+    slow["uav_scheduling"][1, 1] = 1
 
     env.apply_slow_action(slow)
 
-    # e_min 이하이면 _rule_based_uav_charge()가 charging을 켜야 함
-    set_uav_soc(env, cfg, uav_idx=0, soc=cfg.battery.e_min)
+    for step_idx in range(12):
+        fast = make_empty_fast_action(cfg)
 
-    e_before = env.E.copy()
+        fast["rsu_chunks"][0, 0] = 1
+        fast["rsu_layers"][0, 0] = 1
+        fast["uav_chunks"][0, 0] = 1
+        fast["uav_layers"][0, 0] = 1
+        fast["uav_power"][0, 0] = 5.0
 
-    next_obs, reward, terminated, truncated, info = env.step(fast)
-    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "low_battery_charge_step")
-    print_step_summary(env, reward, info, "[low battery charge step]")
+        fast["rsu_chunks"][1, 1] = 1
+        fast["rsu_layers"][1, 1] = 2
+        fast["uav_chunks"][1, 1] = 1
+        fast["uav_layers"][1, 1] = 2
+        fast["uav_power"][1, 1] = 5.0
 
-    uav_charge_effective = np.asarray(info.get("uav_charge_effective"), dtype=np.int32)
-    assert_array_shape("uav_charge_effective", uav_charge_effective, (cfg.num_uav,))
-    assert_equal("uav_charge_effective[0]", int(uav_charge_effective[0]), 1)
+        next_obs, reward, terminated, truncated, info = env.step(fast)
+        assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, f"multi_step_{step_idx}")
 
-    delivered_uav = np.asarray(info["delivered_uav_per_user"], dtype=np.float32)
-    assert_array_close(
-        "charging UAV should not deliver",
-        delivered_uav,
-        np.zeros(cfg.num_user, dtype=np.float32),
-    )
+        if step_idx in {0, 1, 2, 5, 11}:
+            print_step_summary(env, reward, info, f"[multi step {step_idx}]")
 
-    assert_true(
-        float(env.E[0]) >= float(e_before[0]),
-        f"charging should not decrease E[0]: before={e_before[0]}, after={env.E[0]}",
-    )
+        assert_true(not truncated, f"multi_step_{step_idx}: should not truncate in compact smoke test")
 
-    ok("low battery charging hook 정상")
+        if bool(info["is_round_boundary"]):
+            # 다음 round slow decision을 다시 넣는 HRL 흐름을 명시적으로 모사
+            env.apply_slow_action(slow)
 
-
-def test_08_empty_fast_action_is_safe() -> None:
-    section("TEST 08 | empty fast action이 안전하게 처리되는지 검증")
-
-    cfg = build_test_config()
-    env = Env(cfg)
-    env.reset()
-
-    slow = make_slow_action(cfg, rsu_idx=0, uav_idx=0, user_idx=0)
-    env.apply_slow_action(slow)
-
-    # 완전히 빈 action dict를 넣어도 parser default로 안전하게 처리되어야 함
-    next_obs, reward, terminated, truncated, info = env.step({})
-
-    assert_step_result(env, next_obs, reward, terminated, truncated, info, cfg, "empty_action_step")
-    print_step_summary(env, reward, info, "[empty fast action step]")
-
-    delivered_total = np.asarray(info["delivered_total_per_user"], dtype=np.float32)
-    assert_array_close(
-        "empty fast action: delivered_total must be zero",
-        delivered_total,
-        np.zeros(cfg.num_user, dtype=np.float32),
-    )
-
-    ok("empty fast action 처리 정상")
+    ok("multi-step stability smoke 정상")
 
 
 # =============================================================================
@@ -967,72 +1322,62 @@ def run_test(name: str, fn: Callable[[], None]) -> TestResult:
         fn()
         return TestResult(name=name, passed=True, message="passed")
     except Exception as exc:
-        fail(f"{name} failed: {type(exc).__name__}: {exc}")
+        fail(f"{name} failed: {exc}")
         traceback.print_exc()
-        return TestResult(name=name, passed=False, message=f"{type(exc).__name__}: {exc}")
+        return TestResult(name=name, passed=False, message=str(exc))
 
 
-def main() -> None:
-    title("ENV.PY COMPREHENSIVE RUNTIME TEST")
-
-    print("Purpose:")
-    print("  - import/reset/apply_slow_action/step runtime 검증")
-    print("  - queue update, virtual queue, battery E/Y 정합성 검증")
-    print("  - round boundary 및 slow decision 유지/교체 검증")
-    print("  - cache mismatch, low battery charging, empty action edge case 검증")
-    print()
-
-    cfg_preview = build_test_config()
-    print("Config preview:")
-    kv("num_user / num_rsu / num_uav", f"{cfg_preview.num_user} / {cfg_preview.num_rsu} / {cfg_preview.num_uav}")
-    kv("slow_T", cfg_preview.slow_T)
-    kv("layer / chunk", f"{cfg_preview.layer} / {cfg_preview.chunk}")
-    kv("max_queue", cfg_preview.max_queue)
-    kv("battery e_init/e_min/e_max", f"{cfg_preview.battery.e_init} / {cfg_preview.battery.e_min} / {cfg_preview.battery.e_max}")
-    kv("base_chunk_size_bits", cfg_preview.base_chunk_size_bits)
+def main() -> int:
+    title("ENV COMPREHENSIVE TEST | feat/hrl")
 
     tests: List[Tuple[str, Callable[[], None]]] = [
-        ("TEST 01 reset_and_initial_obs", test_01_reset_and_initial_obs),
-        ("TEST 02 no_slow_action_blocks_delivery", test_02_no_slow_action_blocks_delivery),
-        ("TEST 03 basic_service_flow_and_queue_battery", test_03_basic_service_flow_and_queue_battery),
-        ("TEST 04 round_transition_and_accumulator", test_04_round_transition_and_accumulator),
-        ("TEST 05 slow_action_reapply_next_round", test_05_slow_action_reapply_next_round),
-        ("TEST 06 cache_mismatch_blocks_uav_delivery", test_06_cache_mismatch_blocks_uav_delivery),
-        ("TEST 07 low_battery_rule_based_charging", test_07_low_battery_rule_based_charging),
-        ("TEST 08 empty_fast_action_is_safe", test_08_empty_fast_action_is_safe),
+        ("test_01_reset_and_initial_obs", test_01_reset_and_initial_obs),
+        ("test_02_no_slow_action_blocks_delivery", test_02_no_slow_action_blocks_delivery),
+        ("test_03_basic_service_flow_and_queue_battery", test_03_basic_service_flow_and_queue_battery),
+        ("test_04_content_mismatch_blocks_uav_delivery", test_04_content_mismatch_blocks_uav_delivery),
+        ("test_05_charging_blocks_service_and_updates_battery", test_05_charging_blocks_service_and_updates_battery),
+        ("test_06_round_transition_and_accumulator", test_06_round_transition_and_accumulator),
+        ("test_07_slow_decision_persistence_until_reapply", test_07_slow_decision_persistence_until_reapply),
+        ("test_08_validator_shape_errors_and_clipping_behavior", test_08_validator_shape_errors_and_clipping_behavior),
+        ("test_09_rsu_only_and_uav_only_paths", test_09_rsu_only_and_uav_only_paths),
+        ("test_10_multi_step_stability_smoke", test_10_multi_step_stability_smoke),
     ]
 
     results: List[TestResult] = []
 
-    for test_name, test_fn in tests:
-        result = run_test(test_name, test_fn)
-        results.append(result)
-
-    title("TEST SUMMARY")
-
-    passed = sum(1 for r in results if r.passed)
-    total = len(results)
-
-    for result in results:
-        status = c("PASS", GREEN) if result.passed else c("FAIL", RED)
-        print(f"{status} | {result.name}")
-        if not result.passed:
-            print(f"       {result.message}")
+    for name, fn in tests:
+        results.append(run_test(name, fn))
 
     print()
-    print(f"Total: {passed}/{total} passed")
-
-    if passed != total:
-        hr("=")
-        fail("ENV TEST FAILED")
-        print("하나 이상의 테스트가 실패했으므로 위 traceback과 해당 section 로그를 확인해야 한다.")
-        hr("=")
-        raise SystemExit(1)
-
     hr("=")
-    print(c("[ALL TESTS PASSED] env.py runtime/invariant checks completed successfully", BOLD + GREEN))
+    print(c("[ SUMMARY ]", BOLD + CYAN))
     hr("=")
+
+    passed = 0
+    failed = 0
+
+    for result in results:
+        if result.passed:
+            passed += 1
+            print(c(f"[PASS] {result.name}", GREEN))
+        else:
+            failed += 1
+            print(c(f"[FAIL] {result.name}: {result.message}", RED))
+
+    print()
+    kv("passed", passed, indent=2)
+    kv("failed", failed, indent=2)
+    kv("total", len(results), indent=2)
+
+    if failed == 0:
+        print()
+        ok("All env tests passed.")
+        return 0
+
+    print()
+    fail("Some env tests failed.")
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -644,14 +644,10 @@ class Env:
         slow-timescale 상태값을 반환하는 함수
         """
         return {
-            "Q": self.queue.copy(),
             "Z": self.Z.copy(),
-            "E": self.E.copy(),
             "Y": self.Y.copy(),
-            "requested_content": self.requested_content.copy(),
-            "uav_cached_content": self.uav_cached_content.copy(),
-            "outage": self.outage.copy(),
-            "round_idx": np.array([self.round_idx], dtype=np.int32),
+            "rsu_user_distance": self.rsu_user_distance.copy(),
+            "uav_user_distance": self.uav_user_distance.copy(),
         }
 
     def get_fast_obs(self) -> Dict[str, np.ndarray]:
