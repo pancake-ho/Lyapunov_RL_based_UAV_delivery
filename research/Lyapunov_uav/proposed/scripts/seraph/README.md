@@ -55,9 +55,13 @@ export MAX_STEPS=20
 export MAX_UPDATES=2
 export ROLLOUT_STEPS=4
 export DEVICE=auto
+export REWARD_PRESET=balanced
 
 bash Lyapunov_uav/proposed/scripts/seraph/srun_short_hrl_train.sh
 ```
+
+Available reward presets are `balanced`, `conservative_queue`, and `quality_oriented`.
+Use them only to prepare short smoke runs at this stage; do not compare or tune them yet.
 
 Run sanity check after the short train:
 
@@ -71,6 +75,27 @@ Expected final line:
 
 ```text
 PASS short_train_sanity
+```
+
+Create a short report for the run:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/report_short_train.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --checkpoint-dir "$CHECKPOINT_DIR" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_report.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_report.md"
+```
+
+Diagnose reward and DPP term scales without tuning coefficients:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_reward_scale.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.md"
 ```
 
 ## 2. Submit short train with sbatch
@@ -102,9 +127,12 @@ export MAX_STEPS=20
 export MAX_UPDATES=2
 export ROLLOUT_STEPS=4
 export DEVICE=auto
+export REWARD_PRESET=balanced
 
 sbatch Lyapunov_uav/proposed/scripts/seraph/sbatch_short_hrl_train_template.sh
 ```
+
+Available reward presets are `balanced`, `conservative_queue`, and `quality_oriented`.
 
 ## 3. Monitor the job
 
@@ -130,14 +158,184 @@ python3 Lyapunov_uav/proposed/scripts/check_short_train_sanity.py \
   --checkpoint-dir "$CHECKPOINT_DIR"
 ```
 
+Then create a report:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/report_short_train.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --checkpoint-dir "$CHECKPOINT_DIR" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_report.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_report.md"
+```
+
+Then diagnose reward and DPP term scales:
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_reward_scale.py \
+  --log-dir "$LOG_DIR" \
+  --run-name "$RUN_NAME" \
+  --output-json "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.json" \
+  --output-md "$OUTPUT_DIR/${RUN_NAME}_scale_analysis.md"
+```
+
 Check that:
 
 - `$LOG_DIR/${RUN_NAME}.jsonl` exists.
 - `$LOG_DIR/${RUN_NAME}_console.log` exists.
 - `$CHECKPOINT_DIR/${RUN_NAME}_update0001.pt` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_report.json` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_report.md` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_scale_analysis.json` exists.
+- `$OUTPUT_DIR/${RUN_NAME}_scale_analysis.md` exists.
 - Sanity check ends with `PASS short_train_sanity`.
 
-## 4. Failure checklist
+## 4. Sequential preset comparison smoke
+
+After a single-preset short train works, run the candidate presets sequentially with
+the same seed and short horizon. This is only an execution-gate comparison; do not
+select final coefficients from it.
+
+```bash
+export RUN_NAME=reward_preset_compare_smoke
+export MAX_STEPS=20
+export MAX_UPDATES=2
+export ROLLOUT_STEPS=4
+export SEED=2026
+export DEVICE=auto
+
+python3 Lyapunov_uav/proposed/scripts/compare_reward_presets.py \
+  --presets conservative_queue balanced quality_oriented \
+  --seed "$SEED" \
+  --max-steps "$MAX_STEPS" \
+  --max-updates "$MAX_UPDATES" \
+  --rollout-steps "$ROLLOUT_STEPS" \
+  --device "$DEVICE" \
+  --run-name "$RUN_NAME" \
+  --log-dir "$LOG_DIR/preset_compare" \
+  --checkpoint-dir "$CHECKPOINT_DIR/preset_compare" \
+  --output-dir "$OUTPUT_DIR/preset_compare"
+```
+
+Check that `$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.json` and
+`$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.md` exist. Each preset also gets
+its own report and scale-analysis files under `$OUTPUT_DIR/preset_compare/<preset>/`.
+
+Then classify each candidate as `viable`, `caution`, or `reject`. This only filters
+obviously unsuitable presets after short train comparison; it does not select final
+coefficients.
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_preset_comparison.py \
+  --summary-json "$OUTPUT_DIR/preset_compare/${RUN_NAME}_summary.json" \
+  --output-json "$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.json" \
+  --output-md "$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.md"
+```
+
+Check that `$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.json` and
+`$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.md` exist.
+
+## 5. Multi-seed repeat short runs
+
+After the viability analysis, repeat only `viable` and `caution` presets over a
+small seed list. Presets classified as `reject` in the viability JSON are excluded
+automatically. This is still a short-run stability check; do not start long
+training, choose final coefficients, or compare baselines from this output.
+
+```bash
+export REPEAT_RUN_NAME=reward_preset_repeat_smoke
+export REPEAT_SEEDS="0 1 2"
+
+python3 Lyapunov_uav/proposed/scripts/repeat_reward_preset_short_runs.py \
+  --viability-json "$OUTPUT_DIR/preset_compare/${RUN_NAME}_viability.json" \
+  --seeds $REPEAT_SEEDS \
+  --max-steps "$MAX_STEPS" \
+  --max-updates "$MAX_UPDATES" \
+  --rollout-steps "$ROLLOUT_STEPS" \
+  --device "$DEVICE" \
+  --run-name "$REPEAT_RUN_NAME" \
+  --log-dir "$LOG_DIR/preset_repeat" \
+  --checkpoint-dir "$CHECKPOINT_DIR/preset_repeat" \
+  --output-dir "$OUTPUT_DIR/preset_repeat"
+```
+
+Check that:
+
+- `$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_aggregate_summary.json` exists.
+- `$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_aggregate_summary.md` exists.
+- Per-seed comparison and viability files exist under
+  `$OUTPUT_DIR/preset_repeat/seed_<seed>/`.
+- Per-preset logs/checkpoints are separated under
+  `$LOG_DIR/preset_repeat/seed_<seed>/<preset>/` and
+  `$CHECKPOINT_DIR/preset_repeat/seed_<seed>/<preset>/`.
+
+## 6. Long-run candidate analysis
+
+After multi-seed repeat short runs, narrow presets to at most one or two longer-run
+candidates. This uses the aggregate summary plus per-run report/scale artifacts.
+It still does not start long training, tune coefficients, or compare baselines.
+
+```bash
+python3 Lyapunov_uav/proposed/scripts/analyze_repeat_candidates.py \
+  --aggregate-json "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_aggregate_summary.json" \
+  --output-json "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_candidate_analysis.json" \
+  --output-md "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_candidate_analysis.md" \
+  --max-candidates 2
+```
+
+Check the `recommended_long_run_candidates` field in the JSON or markdown report.
+Run at most those one or two presets in the next longer candidate experiment.
+
+## 7. Medium candidate training
+
+Prepare medium-length stability runs for only the recommended long-run candidate
+presets. Medium runs are longer than short smoke runs, but they are still not final
+long training and do not compare baselines.
+
+```bash
+export MEDIUM_RUN_NAME=reward_preset_medium
+export MEDIUM_SEEDS="0 1 2"
+export MEDIUM_MAX_STEPS=1000
+export MEDIUM_MAX_UPDATES=50
+export MEDIUM_ROLLOUT_STEPS=32
+
+python3 Lyapunov_uav/proposed/scripts/prepare_medium_candidate_runs.py \
+  --candidate-report-json "$OUTPUT_DIR/preset_repeat/${REPEAT_RUN_NAME}_candidate_analysis.json" \
+  --seeds $MEDIUM_SEEDS \
+  --run-name "$MEDIUM_RUN_NAME" \
+  --log-dir "$LOG_DIR/preset_medium" \
+  --checkpoint-dir "$CHECKPOINT_DIR/preset_medium" \
+  --output-dir "$OUTPUT_DIR/preset_medium" \
+  --max-steps "$MEDIUM_MAX_STEPS" \
+  --max-updates "$MEDIUM_MAX_UPDATES" \
+  --rollout-steps "$MEDIUM_ROLLOUT_STEPS" \
+  --device auto \
+  --checkpoint-interval 10
+```
+
+Set the Slurm array range in
+`Lyapunov_uav/proposed/scripts/seraph/sbatch_medium_candidate_template.sh` to
+`0-(job_count - 1)` from the manifest. For example, if the manifest has 6 jobs,
+use `#SBATCH --array=0-5`.
+
+```bash
+export MANIFEST_JSON="$OUTPUT_DIR/preset_medium/${MEDIUM_RUN_NAME}_manifest.json"
+
+sbatch Lyapunov_uav/proposed/scripts/seraph/sbatch_medium_candidate_template.sh
+```
+
+Each array task runs one preset-seed pair and writes separated logs, checkpoints,
+reports, sanity output, and scale analysis under:
+
+- `$LOG_DIR/preset_medium/<preset>/seed_<seed>/`
+- `$CHECKPOINT_DIR/preset_medium/<preset>/seed_<seed>/`
+- `$OUTPUT_DIR/preset_medium/<preset>/seed_<seed>/`
+
+After all array jobs finish, inspect each task's report and scale-analysis files.
+Do not treat this as final performance or baseline evidence; this stage only
+checks stability and trend quality before a later long run.
+
+## 8. Failure checklist
 
 Import error:
 

@@ -1,19 +1,31 @@
-from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Dict, Tuple, Optional
+
 
 @dataclass
 class ChannelConfig:
     """
     Channel 및 PHY parameter config 클래스
     """
+
+    # 공통 변수
     distance: float = 20.0
     bandwidth: float = 1e6
-    gamma_db: float = 25.0
-    sigma_db: float = 4.0
-    beta: float = 2.0
-    mu_db: float = 0.0
     min_distance: float = 1.0
     seed: int = 42
+
+    # RSU Rayleigh/shadowing model
+    gamma_db: float = 25.0
+    inr_db: float = 0.0
+    sigma_db: float = 4.0
+    mu_db: float = 0.0
+    beta: float = 2.0
+
+    # UAV LoS free-space model
+    altitude: float = 100.0
+    beta_zero: float = 1.0
+    noise_power: float = 1.0 # sigma^2
+    capacity_gap: float = 1.0 
 
     def __post_init__(self) -> None:
         if self.bandwidth <= 0.0:
@@ -23,13 +35,27 @@ class ChannelConfig:
         if self.distance < self.min_distance:
             self.distance = float(self.min_distance)
 
+        if self.beta <= 0.0:
+            raise ValueError("beta는 양수 값을 가져야 합니다.")
+        if self.sigma_db < 0.0:
+            raise ValueError("sigma_db는 0 이상의 값을 가져야 합니다.")
+        if self.altitude < 0.0:
+            raise ValueError("altitude는 0 이상의 값을 가져야 합니다.")
+        if self.beta_zero <= 0.0:
+            raise ValueError("beta_zero는 양수 값을 가져야 합니다.")
+        if self.noise_power <= 0.0:
+            raise ValueError("noise_power는 양수 값을 가져야 합니다.")
+        if self.capacity_gap <= 0.0:
+            raise ValueError("capacity_gap은 양수 값을 가져야 합니다.")
+
+
 @dataclass
 class BatteryConfig:
     # SoC Actual queue
     e_max: int = 100
     e_init: int = 100
     e_min: float = 10.0
-
+    
     # hovering 에너지 모델
     # e_hover(t) = (p_0 + p_i) * slot_duration
     p_0: float = 80.0 # blade profile power [W]
@@ -49,7 +75,8 @@ class BatteryConfig:
 
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
-    energy_to_soc_factor: Optional[float] = 0.05
+    battery_capacity_energy: float = 3000.0
+    energy_to_soc_factor: Optional[float] = None
 
     # 최대 통신 power bound
     max_tx_power: float = 10.0
@@ -62,7 +89,9 @@ class BatteryConfig:
         if self.target_service_slots_per_round <= 0:
             raise ValueError("target_service_slots_per_round는 양수 값을 가져야 합니다.")
         if self.p_0 < 0.0 or self.p_i < 0.0:
-            raise ValueError(f"p_0와 p_i는 앙수 값을 가져야 합니다. 현재 두 값은 각각 {self.p_0}, {self.p_i}입니다.")
+            raise ValueError(
+                f"p_0와 p_i는 0 이상의 값을 가져야 합니다. 현재 값: {self.p_0}, {self.p_i}"
+            )
         if self.tx_energy_coeff <= 0.0:
             raise ValueError("tx_energy_coeff는 양수 값을 가져야 합니다.")
         if self.charging_rate < 0.0:
@@ -71,11 +100,62 @@ class BatteryConfig:
             raise ValueError("eta_c는 양수 값을 가져야 합니다.")
         if self.max_tx_power <= 0.0:
             raise ValueError("max_tx_power는 양수 값을 가져야 합니다.")
-        
+        if self.battery_capacity_energy <= 0.0:
+            raise ValueError("battery_capacity_energy는 양수 값을 가져야 합니다.")
+
         self.e_init = float(min(max(self.e_init, 0.0), float(self.e_max)))
         self.e_min = float(min(max(self.e_min, 0.0), float(self.e_max)))
 
-        self.energy_to_soc_factor = 100.0 / float(self.e_max)
+        if self.energy_to_soc_factor is None:
+            self.energy_to_soc_factor = 100.0 / float(self.battery_capacity_energy)
+        else:
+            self.energy_to_soc_factor = float(self.energy_to_soc_factor)
+            if self.energy_to_soc_factor <= 0.0:
+                raise ValueError("energy_to_soc_factor는 양수 값을 가져야 합니다.")
+
+
+@dataclass
+class RewardConfig:
+    """
+    Reward / DPP coefficient config.
+
+    현재 연구 기준:
+        Fast reward의 항별 가중치는 따로 두지 않고,
+        Lyapunov-DPP trade-off parameter V만 둔다.
+    """
+    preset_name: str = "balanced"
+    V: float = 1.0
+
+    def __post_init__(self) -> None:
+        if float(self.V) < 0.0:
+            raise ValueError("V는 0 이상의 값을 가져야 합니다.")
+
+    def as_dict(self) -> Dict[str, float | str]:
+        return asdict(self)
+    
+
+REWARD_PRESETS: Dict[str, RewardConfig] = {
+    "balanced": RewardConfig(
+        preset_name="balanced",
+        V=1.0,
+    ),
+    "conservative_queue": RewardConfig(
+        preset_name="conservative_queue",
+        V=0.5,
+    ),
+    "quality_oriented": RewardConfig(
+        preset_name="quality_oriented",
+        V=2.0,
+    ),
+}
+
+
+def make_reward_config(preset_name: str = "balanced") -> RewardConfig:
+    if preset_name not in REWARD_PRESETS:
+        valid = ", ".join(sorted(REWARD_PRESETS))
+        raise ValueError(f"unknown reward preset {preset_name!r}; valid presets: {valid}")
+    preset = REWARD_PRESETS[preset_name]
+    return RewardConfig(**preset.as_dict())
 
 
 @dataclass
@@ -121,13 +201,16 @@ class EnvConfig:
     # delivery (비트 당 청크 사이즈 정의)
     base_chunk_size_bits: float = 2e5
 
+    # UAV hiring cost
+    # 시스템 cost parameter이며 reward coefficient가 아님.
+    # slow reward에서 sum_u mu_u(r) * D_u^hire 형태로 사용.
+    uav_hiring_cost: float = 1.0
+
     # reward 계수
-    # Perturbed Lyapunov / DPP reward hook
+    reward: RewardConfig = field(default_factory=lambda: make_reward_config("balanced"))
+
+    # Perturbed Lyapunov target
     theta_z: Optional[Tuple[float, ...]] = None
-    dpp_video_weight: float = 1.0
-    dpp_quality_weight: float = 1.0
-    dpp_battery_weight: float = 1.0
-    dpp_charging_weight: float = 1.0
 
     # 각 layer에 대한 quality 가중치
     quality_weights: Tuple[float, ...] = (1.0, 2.0, 3.0, 4.0, 5.0)
@@ -189,23 +272,29 @@ class EnvConfig:
         if len(self.quality_weights) != self.layer:
             raise ValueError(f"quality_weights의 len {len(self.quality_weights)}는 layer와 같아야 합니다.")
 
-        if self.theta_z is not None:
+        if self.theta_z is None:
+            # Perturbed Lyapunov target buffer level.
+            # 기본값은 Q_bar의 절반으로 두고, 실험 단계에서 sweep 가능.
+            default_theta = 0.5 * float(self.max_queue)
+            self.theta_z = tuple(default_theta for _ in range(self.num_user))
+        else:
             if len(self.theta_z) != self.num_user:
                 raise ValueError("theta_z가 주어지면 num_user와 같은 길이를 가져야 합니다.")
             self.theta_z = tuple(
                 float(min(max(theta, 0.0), float(self.max_queue)))
                 for theta in self.theta_z
             )
-        if self.dpp_video_weight < 0.0:
-            raise ValueError("dpp_video_weight는 0 이상의 값을 가져야 합니다.")
-        if self.dpp_quality_weight < 0.0:
-            raise ValueError("dpp_quality_weight는 0 이상의 값을 가져야 합니다.")
-        if self.dpp_battery_weight < 0.0:
-            raise ValueError("dpp_battery_weight는 0 이상의 값을 가져야 합니다.")
-        if self.dpp_charging_weight < 0.0:
-            raise ValueError("dpp_charging_weight는 0 이상의 값을 가져야 합니다.")
-        
+
+        if self.uav_hiring_cost < 0.0:
+            raise ValueError("uav_hiring_cost는 0 이상의 값을 가져야 합니다.")
+
         # 하나의 UAV는 coverage region(RSU) 당 한 대 고용될 수 있음
         if self.num_uav != self.num_rsu:
             raise ValueError(f"coverage region 당 하나의 UAV 고용을 가정합니다. 현재는 \
                              NUM_UAV: {self.num_uav}, NUM_RSU: {self.num_rsu}입니다.")
+
+    def set_reward_preset(self, preset_name: str) -> None:
+        self.reward = make_reward_config(preset_name)
+
+    def reward_coefficients(self) -> Dict[str, float | str]:
+        return self.reward.as_dict()

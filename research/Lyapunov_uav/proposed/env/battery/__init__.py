@@ -3,6 +3,7 @@ from .battery_types import (
     BatteryAction,
     BatteryState,
     BatteryStepInfo,
+    UAVBatteryMode,
 )
 from .uav_battery import UAVBattery
 
@@ -11,5 +12,6 @@ __all__ = [
     "BatteryAction",
     "BatteryState",
     "BatteryStepInfo",
+    "UAVBatteryMode",
     "UAVBattery",
 ]
