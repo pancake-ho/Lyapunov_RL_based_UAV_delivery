@@ -176,3 +176,67 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk", type=int, default=None)
 
     return parser.parse_args()
+
+
+def build_env_config(args: argparse.Namespace) -> EnvConfig:
+    """
+    CLI args를 EnvConfig에 반영함.
+    """
+    cfg = EnvConfig(seed=int(args.seed))
+
+    updates: Dict[str, Any] = {}
+
+    if args.num_user is not None:
+        updates["num_user"] = int(args.num_user)
+    if args.num_rsu is not None:
+        updates["num_rsu"] = int(args.num_rsu)
+    if args.num_uav is not None:
+        updates["num_uav"] = int(args.num_uav)
+
+    if args.slow_T is not None:
+        updates["slow_T"] = int(args.slow_T)
+
+    if args.layer is not None:
+        updates["layer"] = int(args.layer)
+    if args.chunk is not None:
+        updates["chunk"] = int(args.chunk)
+
+    if len(updates) > 0:
+        cfg = replace(cfg, **updates)
+
+    return cfg
+
+
+def build_ppo_config(args: argparse.Namespace) -> FastPPOConfig:
+    """
+    CLI args를 FastPPOConfig로 변환함.
+    """
+    return FastPPOConfig(
+        rollout_steps=int(args.rollout_slots),
+        update_epochs=int(args.update_epochs),
+        batch_size=int(args.batch_size),
+        gamma=float(args.gamma),
+        gae_lambda=float(args.gae_lambda),
+        lr=float(args.lr),
+        max_grad_norm=float(args.max_grad_norm),
+        clip_coef=float(args.clip_coef),
+        value_coef=float(args.value_coef),
+        entropy_coef=float(args.entropy_coef),
+        normalize_obs=not bool(args.no_obs_norm),
+        normalize_adv=not bool(args.no_adv_norm),
+        hidden_dims=tuple(int(x) for x in args.hidden_dims),
+        init_log_std=float(args.init_log_std),
+        device=str(args.device),
+    )
+
+
+def make_run_dir(args: argparse.Namespace) -> Path:
+    """
+    실행 결과 저장 directory 생성.
+    """
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    run_name = f"fast_ppo_seed{args.seed}_{timestamp}"
+    run_dir = PROPOSED_ROOT / "runs" / "fast" / run_name
+    ensure_dir(run_dir)
+    ensure_dir(run_dir / "checkpoints")
+    return run_dir
