@@ -33,7 +33,6 @@ def compute_hover_energy(
 def compute_comm_energy(
     config: BatteryConfig,
     links: List[CommLinkInput],
-    bandwidth: Optional[float] = None,
 ) -> float:
     """
     UAV communication energy.
@@ -43,7 +42,6 @@ def compute_comm_energy(
         e_comm(t) = sum_n (p_un(t) * slot_duration)
     """
     total = 0.0
-    bw = float(bandwidth) if bandwidth is not None else 1.0
 
     for link in links:
         if not bool(link.scheduled):
@@ -58,8 +56,9 @@ def compute_comm_energy(
             tx_time = float(config.slot_duration)
         
         tx_power = max(0.0, float(link.tx_power))
-
         total += tx_power * tx_time * float(config.tx_energy_coeff)
+    
+    return float(total)
     
 
 def compute_charge_energy(
@@ -84,7 +83,7 @@ def compute_charge_energy(
     if UAVBatteryMode(mode) != UAVBatteryMode.CHARGE:
         return 0.0
 
-    return float(config.charging_rate) * float(config.slot_duration)
+    return float(config.charging_rate) * float(config.slot_duration) * float(config.eta_c)
 
 
 def compute_total_energy(
@@ -97,8 +96,7 @@ def compute_total_energy(
     현재 시나리오 기준:
         e_u(t) = e_hover(t) + e_comm(t)
     """
-
-    return float(hover_energy + comm_energy)
+    return float(hover_energy) + float(comm_energy)
 
 
 def compute_energy_summary(
@@ -137,7 +135,7 @@ def compute_energy_summary(
     
     if mode == UAVBatteryMode.SERVE:
         hover_e = compute_hover_energy(config, is_hovering=True)
-        comm_e = compute_comm_energy(config, links=links, bandwidth=bandwidth)
+        comm_e = compute_comm_energy(config, links=links)
         total_e = compute_total_energy(hover_e, comm_e)
         charge_e = 0.0
     

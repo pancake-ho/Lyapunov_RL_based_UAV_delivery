@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass, field
 from typing import Dict, Tuple, Optional
 
+
 @dataclass
 class ChannelConfig:
     """
@@ -47,13 +48,14 @@ class ChannelConfig:
         if self.capacity_gap <= 0.0:
             raise ValueError("capacity_gap은 양수 값을 가져야 합니다.")
 
+
 @dataclass
 class BatteryConfig:
     # SoC Actual queue
     e_max: int = 100
     e_init: int = 100
     e_min: float = 10.0
-
+    
     # hovering 에너지 모델
     # e_hover(t) = (p_0 + p_i) * slot_duration
     p_0: float = 80.0 # blade profile power [W]
@@ -116,10 +118,6 @@ class BatteryConfig:
 class RewardConfig:
     """
     Reward / DPP coefficient config.
-
-    The default values preserve the previous perturb-DPP hook behavior:
-    all DPP terms have weight 1, fast reward is unscaled, slow reward and
-    hiring cost do not change the reward surface.
     """
     preset_name: str = "balanced"
     slow_reward_weight: float = 1.0

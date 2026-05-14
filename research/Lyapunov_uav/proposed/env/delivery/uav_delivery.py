@@ -82,7 +82,6 @@ def _clip_int_matrix(
     shape: tuple[int, int],
     low: int,
     high: int,
-    name: str,
 ) -> np.ndarray:
     """
     integer action matrix를 shape에 맞추고 [low, high] 범위로 clipping한다.
@@ -97,7 +96,6 @@ def _clip_float_matrix(
     shape: tuple[int, int],
     low: float,
     high: Optional[float],
-    name: str,
 ) -> np.ndarray:
     """
     float action matrix를 shape에 맞추고 clipping한다.
@@ -166,8 +164,6 @@ def compute_uav_delivery(
     """
     UAV-User delivery 동작 계산 함수
     """
-    generator = rng if rng is not None else np.random.default_rng()
-
     num_uav = int(cfg.num_uav)
     num_user = int(cfg.num_user)
     slot_duration = float(cfg.battery.slot_duration)    
@@ -193,7 +189,7 @@ def compute_uav_delivery(
         fill_value=False,
         strict=False,
     )
-    sched_nask = sched_mask & hire_mask[:, 0]
+    sched_mask = sched_mask & hire_mask[:, None]
 
     # residual user set (RSU-only 이후 UAV-Assisted user 후보)
     residual_mask = _ensure_shape(
@@ -341,7 +337,7 @@ def compute_uav_delivery(
                 bit_budget = cap_bps * slot_duration
                 feasible = int(np.floor(bit_budget / chunk_bits))
             
-            feasible_chunks = max(0, min(int(req_chunks[u, n]), feasible_chunks))
+            feasible_chunks = max(0, min(int(req_chunks[u, n]), feasible))
             potential_chunks[u, n] = feasible_chunks
     
     # UAV별 동시 서비스 가능 user cap 적용

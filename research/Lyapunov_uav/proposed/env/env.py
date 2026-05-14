@@ -69,6 +69,10 @@ class Env:
         # user video queue
         self.queue = np.zeros(self.num_user, dtype=np.float32)
 
+        # default distance states
+        self.rsu_user_distance = self._default_rsu_user_distance()
+        self.uav_user_distance = self._default_uav_user_distance()
+
         # slow-timescale decisions
         # rsu/uav의 스케줄링 및 uav 고용
         self.rsu_scheduling = np.zeros((self.num_rsu, self.num_user), dtype=np.int32)
@@ -94,6 +98,23 @@ class Env:
         self.round_stall_sum = 0.0
         self.round_battery_consume_sum = 0.0
         self.round_battery_charge_sum = 0.0
+
+    # ------------------------------------------------------------------
+    # default distance
+    # ------------------------------------------------------------------
+    def _default_rsu_user_distance(self) -> np.ndarray:
+        return np.full(
+            (self.num_rsu, self.num_user),
+            max(float(self.cfg.rsu_channel.distance), float(self.cfg.rsu_channel.min_distance)),
+            dtype=np.float32,
+        )
+
+    def _default_uav_user_distance(self) -> np.ndarray:
+        return np.full(
+            (self.num_uav, self.num_user),
+            max(float(self.cfg.uav_channel.distance), float(self.cfg.uav_channel.min_distance)),
+            dtype=np.float32,
+        )
     
     def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
@@ -640,7 +661,7 @@ class Env:
             "Z": self.Z.copy(),
             "Y": self.Y.copy(),
             "uav_hiring": self.uav_hiring.copy(),
-            "rsu_user_distance": current_rsu_user_distance,
+            "rsu_user_distance": self.rsu_user_distance.copy(),
             "time": np.array([self.t], dtype=np.int32),
         }
 

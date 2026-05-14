@@ -64,7 +64,7 @@ class UAVBattery:
         self.virtual_q = soc_to_virtual_q(config=self.config, soc=self.soc)
 
         self.round_start_soc = float(self.soc)
-        self.round_horizon = max(1, int(self.config.target_service_slots_per_round))
+        self.round_total_slots = max(1, int(self.config.target_service_slots_per_round))
         self.round_remaining_slots = self.round_total_slots
 
     def start_round(
