@@ -136,21 +136,33 @@ def _normalize_battery_soc(
     default_soc: float,
 ) -> np.ndarray:
     """
-    battery state가 다양한 shape으로 들어와도 (num_uav,) 구조를 맞춰주는 함수로, 이 역시 안전장치로 활용됨.
+    battery state가 다양한 shape으로 들어와도 (num_uav,) 구조를 맞춰주는 함수.
     """
     if battery_state is None:
-        return np.zeros((num_uav,), float(default_soc), dtype=np.float32)
-    
+        return np.full((num_uav,), float(default_soc), dtype=np.float32)
+
     # case 1: battery_state 자체가 soc 속성을 가지는 경우 대비
     soc_attr = _safe_get_attr(battery_state, ["soc"], None)
     if soc_attr is not None:
         arr = np.asarray(soc_attr, dtype=np.float32)
         if arr.ndim == 0:
             return np.full((num_uav,), float(arr.item()), dtype=np.float32)
-        return _ensure_shape(arr, (num_uav,), np.float32, fill_value=default_soc, strict=False)
-    
+        return _ensure_shape(
+            arr,
+            (num_uav,),
+            np.float32,
+            fill_value=default_soc,
+            strict=False,
+        )
+
     # case 2: array-like 직접 전달
-    return _ensure_shape(battery_state, (num_uav,), np.float32, fill_value=default_soc, strict=False,)
+    return _ensure_shape(
+        battery_state,
+        (num_uav,),
+        np.float32,
+        fill_value=default_soc,
+        strict=False,
+    )
             
     
 def compute_uav_delivery(
