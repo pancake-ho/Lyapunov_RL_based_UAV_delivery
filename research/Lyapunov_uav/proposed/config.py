@@ -118,37 +118,33 @@ class BatteryConfig:
 class RewardConfig:
     """
     Reward / DPP coefficient config.
+
+    현재 연구 기준:
+        Fast reward의 항별 가중치는 따로 두지 않고,
+        Lyapunov-DPP trade-off parameter V만 둔다.
     """
     preset_name: str = "balanced"
-    slow_reward_weight: float = 1.0
-
     V: float = 1.0
 
     def __post_init__(self) -> None:
-        for name, value in self.as_dict().items():
-            if name == "preset_name":
-                continue
-            if float(value) < 0.0:
-                raise ValueError(f"{name}는 0 이상의 값을 가져야 합니다.")
+        if float(self.V) < 0.0:
+            raise ValueError("V는 0 이상의 값을 가져야 합니다.")
 
     def as_dict(self) -> Dict[str, float | str]:
         return asdict(self)
-
+    
 
 REWARD_PRESETS: Dict[str, RewardConfig] = {
     "balanced": RewardConfig(
         preset_name="balanced",
-        slow_reward_weight=1.0,
         V=1.0,
     ),
     "conservative_queue": RewardConfig(
         preset_name="conservative_queue",
-        slow_reward_weight=1.0,
         V=0.5,
     ),
     "quality_oriented": RewardConfig(
         preset_name="quality_oriented",
-        slow_reward_weight=1.0,
         V=2.0,
     ),
 }
@@ -208,12 +204,8 @@ class EnvConfig:
     # reward 계수
     reward: RewardConfig = field(default_factory=lambda: make_reward_config("balanced"))
 
-    # Perturbed Lyapunov / DPP reward hook
+    # Perturbed Lyapunov target
     theta_z: Optional[Tuple[float, ...]] = None
-    dpp_video_weight: float = 1.0
-    dpp_quality_weight: float = 1.0
-    dpp_battery_weight: float = 1.0
-    dpp_charging_weight: float = 1.0
 
     # 각 layer에 대한 quality 가중치
     quality_weights: Tuple[float, ...] = (1.0, 2.0, 3.0, 4.0, 5.0)
@@ -282,39 +274,6 @@ class EnvConfig:
                 float(min(max(theta, 0.0), float(self.max_queue)))
                 for theta in self.theta_z
             )
-        legacy_dpp_override = (
-            self.reward.preset_name == "balanced"
-            and (
-                float(self.dpp_video_weight) != float(self.reward.video_delivery_weight)
-                or float(self.dpp_quality_weight) != float(self.reward.quality_weight)
-                or float(self.dpp_battery_weight) != float(self.reward.battery_service_weight)
-                or float(self.dpp_charging_weight) != float(self.reward.charging_weight)
-            )
-        )
-        if legacy_dpp_override:
-            self.reward = RewardConfig(
-                preset_name="custom",
-                video_delivery_weight=float(self.dpp_video_weight),
-                quality_weight=float(self.dpp_quality_weight),
-                battery_service_weight=float(self.dpp_battery_weight),
-                charging_weight=float(self.dpp_charging_weight),
-                slow_reward_weight=float(self.reward.slow_reward_weight),
-                fast_reward_weight=float(self.reward.fast_reward_weight),
-                hiring_cost_weight=float(self.reward.hiring_cost_weight),
-            )
-        else:
-            self.dpp_video_weight = float(self.reward.video_delivery_weight)
-            self.dpp_quality_weight = float(self.reward.quality_weight)
-            self.dpp_battery_weight = float(self.reward.battery_service_weight)
-            self.dpp_charging_weight = float(self.reward.charging_weight)
-        if self.dpp_video_weight < 0.0:
-            raise ValueError("dpp_video_weight는 0 이상의 값을 가져야 합니다.")
-        if self.dpp_quality_weight < 0.0:
-            raise ValueError("dpp_quality_weight는 0 이상의 값을 가져야 합니다.")
-        if self.dpp_battery_weight < 0.0:
-            raise ValueError("dpp_battery_weight는 0 이상의 값을 가져야 합니다.")
-        if self.dpp_charging_weight < 0.0:
-            raise ValueError("dpp_charging_weight는 0 이상의 값을 가져야 합니다.")
 
         # 하나의 UAV는 coverage region(RSU) 당 한 대 고용될 수 있음
         if self.num_uav != self.num_rsu:
@@ -323,10 +282,6 @@ class EnvConfig:
 
     def set_reward_preset(self, preset_name: str) -> None:
         self.reward = make_reward_config(preset_name)
-        self.dpp_video_weight = float(self.reward.video_delivery_weight)
-        self.dpp_quality_weight = float(self.reward.quality_weight)
-        self.dpp_battery_weight = float(self.reward.battery_service_weight)
-        self.dpp_charging_weight = float(self.reward.charging_weight)
 
     def reward_coefficients(self) -> Dict[str, float | str]:
         return self.reward.as_dict()
