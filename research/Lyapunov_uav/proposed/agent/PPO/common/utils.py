@@ -44,7 +44,7 @@ def get_device(device: str | None = None) -> torch.device:
                 "cuda:1"    : cuda:1
     """
     if device is None or device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available else "cpu")
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     if device.startswith("cuda") and not torch.cuda.is_available():
         print("[WARN] CUDA가 요청되었지만 사용 불가 상태입니다. CPU로 동작합니다.")
@@ -82,7 +82,7 @@ def to_numpy(x: Any) -> np.ndarray:
     """
     if isinstance(x, torch.Tensor):
         return x.detach().cpu().numpy()
-    return np.asarray()
+    return np.asarray(x)
 
 
 def explained_var(
@@ -161,7 +161,7 @@ def save_checkpoint(
     }
 
     if optimizer is not None:
-        checkpoint["optimizer_state_dict"] = optimizer.state_dct()
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
     
     if extra is not None:
         checkpoint["extra"] = extra

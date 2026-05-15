@@ -10,10 +10,14 @@ import torch
 @dataclass
 class RolloutBatch:
     """
-    PPO Rollout용 batch 모음 클래스
+    PPO mini-batch Rollout용 컨테이너.
     """
     obs: torch.Tensor
     actions: torch.Tensor
+    old_log_probs: torch.Tensor
+    returns: torch.Tensor
+    advantages: torch.Tensor
+    old_values: torch.Tensor
 
 
 class RolloutBuffer:
@@ -123,12 +127,12 @@ class RolloutBuffer:
                 f"got {action_arr.shape}"
             )
         
-        self.obs[self.ptr] = obs_arr
-        self.actions[self.ptr] = action_arr
-        self.rewards[self.ptr] = reward
-        self.dones[self.ptr] = done
-        self.values[self.ptr] = value
-        self.log_probs[self.ptr] = log_prob
+        self.obs[self.cnt] = obs_arr
+        self.actions[self.cnt] = action_arr
+        self.rewards[self.cnt] = reward
+        self.dones[self.cnt] = done
+        self.values[self.cnt] = value
+        self.log_probs[self.cnt] = log_prob
 
         self.cnt += 1
         if self.cnt >= self.capacity:

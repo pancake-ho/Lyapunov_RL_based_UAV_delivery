@@ -49,8 +49,11 @@ class RunningMeanStd:
         """
         새롭게 들어오는 batch 통계량을 이용해 기존 통계량을 실제 갱신하는 함수.
         """
+        if batch_count <= 0.0:
+            return
+        
         delta = batch_mean - self.mean
-        total_count = batch_count + self.mean
+        total_count = self.count + batch_count
 
         new_mean = self.mean + delta * batch_count / total_count
 

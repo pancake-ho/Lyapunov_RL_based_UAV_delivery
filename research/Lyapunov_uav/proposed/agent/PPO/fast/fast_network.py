@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Sequence, Tuple
+from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -92,16 +92,16 @@ class FastActorCritic(nn.Module):
         self.apply(lambda module: _orthogonal_init(module, gain=1.0))
 
         # actor/critic network의 마지막 hidden layer쪽은 gain을 다르게 적용 (특히 actor)
-        if isinstance(self.actor[-1], nn.Linear):
-            _orthogonal_init(self.actor[-1], gain=0.01)
-        if isinstance(self.critic[-1], nn.Linear):
-            _orthogonal_init(self.critic[-1], gain=1.0)
+        if isinstance(self.actor_network[-1], nn.Linear):
+            _orthogonal_init(self.actor_network[-1], gain=0.01)
+        if isinstance(self.critic_network[-1], nn.Linear):
+            _orthogonal_init(self.critic_network[-1], gain=1.0)
 
     def _distribution(self, obs: torch.Tensor) -> Normal:
         """
         Input으로 주어지는 obs에 대하여 mean/std 계산 후(Actor 통과) Normal Distribution 반환.
         """
-        mean = self.actor(obs)
+        mean = self.actor_network(obs)
         log_std = torch.clamp(self.log_std, min=-5.0, max=2.0)
         std = torch.exp(log_std).expand_as(mean)
         return Normal(mean, std)
@@ -110,7 +110,7 @@ class FastActorCritic(nn.Module):
         """
         Input으로 주어지는 obs에 대하여 Critic Network의 output (value) 반환.
         """
-        return self.critic(obs).squeeze(-1)
+        return self.critic_network(obs).squeeze(-1)
     
     @torch.no_grad()
     def act(

@@ -7,17 +7,32 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from pathlib import Path
+
 from config import EnvConfig
 
-from common import (
-    ObsNormalizer,
-    RolloutBuffer,
-    explained_var,
-    flatten_obs,
-    get_device,
-    save_checkpoint,
-    to_tensor,
-)
+try:
+    from agent.PPO.common import (
+        ObsNormalizer,
+        RolloutBuffer,
+        explained_var,
+        flatten_obs,
+        get_device,
+        load_checkpoint,
+        save_checkpoint,
+        to_tensor,
+    )
+except ModuleNotFoundError:  # package 상대 import fallback
+    from ..common import (
+        ObsNormalizer,
+        RolloutBuffer,
+        explained_var,
+        flatten_obs,
+        get_device,
+        load_checkpoint,
+        save_checkpoint,
+        to_tensor,
+    )
 
 from .fast_action import FastActionCodec
 from .fast_network import FastActorCritic
@@ -137,7 +152,7 @@ class FastPPOAgent:
         """
         실제 Fast Agent가 선택하는 action을 반환 및 env와 호환되게 설정.
         """
-        obs_vec = self.obs_to_vector(
+        obs_vec = self.obs_to_vec(
             obs,
             update_normalizer=update_norm,
         )
@@ -193,7 +208,7 @@ class FastPPOAgent:
         """
         Input으로 주어지는 obs에 대하여 value 계산 후 detach/값 반환.
         """
-        obs_vec = self.obs_to_vector(
+        obs_vec = self.obs_to_vec(
             obs,
             update_normalizer=update_norm,
         )
@@ -291,7 +306,7 @@ class FastPPOAgent:
 
         return logs
     
-    def save(self, path: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    def save(self, path: str | Path, extra: Optional[Dict[str, Any]] = None) -> None:
         """
         학습된 model/optimizer 등 저장용.
         """
@@ -313,3 +328,25 @@ class FastPPOAgent:
             optimizer=self.optimizer,
             extra=merged_extra,
         )
+    
+    def load(
+        self,
+        path: str | Path,
+        strict: bool = True,
+        load_optimizer: bool = False,
+    ) -> Dict[str, Any]:
+        checkpoint = load_checkpoint(
+            path=path,
+            model=self.model,
+            optimizer=self.optimizer if load_optimizer else None,
+            device=self.device,
+            strict=bool(strict),
+        )
+
+        extra = checkpoint.get("extra", {})
+        obs_norm_state = extra.get("obs_normalizer", None)
+
+        if obs_norm_state is not None and self.obs_normalizer is not None:
+            self.obs_normalizer.load_state_dict(obs_norm_state)
+
+        return checkpoint
