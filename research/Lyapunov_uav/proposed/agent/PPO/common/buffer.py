@@ -171,7 +171,7 @@ class RolloutBuffer:
                 non_terminal = next_non_terminal
                 next_val = next_value
             else:
-                non_terminal = 1.0 - self.dones[step + 1]
+                non_terminal = 1.0 - self.dones[step]
                 next_val = self.values[step + 1]
             
             delta = (

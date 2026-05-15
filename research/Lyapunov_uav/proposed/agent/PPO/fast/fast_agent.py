@@ -290,7 +290,7 @@ class FastPPOAgent:
 
         with torch.no_grad():
             _, _, value_after = self.model.evaluate_actions(obs, actions)
-            explained_v = explained_var(y_pred=value_loss.detach().cpu().numpy(), y_true=returns.detach().cpu().numpy())
+            explained_v = explained_var(y_pred=value_after.detach().cpu().numpy(), y_true=returns.detach().cpu().numpy())
         
         logs = {
             "policy_loss": float(np.mean(policy_losses)),
