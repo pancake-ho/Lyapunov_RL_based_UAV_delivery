@@ -138,7 +138,7 @@ class FastActorCritic(nn.Module):
         log_prob = dist.log_prob(action).sum(dim=-1)
         value = self.value(obs)
 
-        return action, log_prob, self.value
+        return action, log_prob, value
     
     def evaluate_actions(
         self,

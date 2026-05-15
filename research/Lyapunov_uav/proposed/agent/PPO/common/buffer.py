@@ -206,7 +206,7 @@ class RolloutBuffer:
         returns = torch.as_tensor(self.returns[:size], dtype=torch.float32, device=self.device)
         advantages = torch.as_tensor(self.advantages[:size], dtype=torch.float32, device=self.device)
 
-        return obs, actions, old_log_probs, old_values, returns, advantages
+        return obs, actions, old_log_probs, returns, advantages, old_values,
     
     def iter_minibatches(
         self,
@@ -236,6 +236,7 @@ class RolloutBuffer:
                 actions=actions[mini_batch_idx],
                 old_log_probs=old_log_probs[mini_batch_idx],
                 returns=returns[mini_batch_idx],
+                advantages=advantages[mini_batch_idx],
                 old_values=old_values[mini_batch_idx],
             )
     

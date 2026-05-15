@@ -154,7 +154,7 @@ class FastPPOAgent:
         """
         obs_vec = self.obs_to_vec(
             obs,
-            update_normalizer=update_norm,
+            update_norm=update_norm,
         )
 
         obs_tensor = to_tensor(obs_vec, device=self.device).unsqueeze(0)
@@ -210,7 +210,7 @@ class FastPPOAgent:
         """
         obs_vec = self.obs_to_vec(
             obs,
-            update_normalizer=update_norm,
+            update_norm=update_norm,
         )
         obs_tensor = to_tensor(obs_vec, device=self.device).unsqueeze(0)
         value = self.model.value(obs_tensor)
