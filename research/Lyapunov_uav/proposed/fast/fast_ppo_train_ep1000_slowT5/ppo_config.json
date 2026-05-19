@@ -1,0 +1,20 @@
+{
+  "rollout_steps": 1024,
+  "update_epochs": 5,
+  "batch_size": 256,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "lr": 0.0003,
+  "max_grad_norm": 0.5,
+  "clip_coef": 0.2,
+  "value_coef": 0.5,
+  "entropy_coef": 0.01,
+  "normalize_obs": true,
+  "normalize_adv": true,
+  "hidden_dims": [
+    256,
+    256
+  ],
+  "init_log_std": -0.5,
+  "device": "cuda"
+}

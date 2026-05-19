@@ -261,7 +261,7 @@ def make_run_dir(args: argparse.Namespace, env_cfg: EnvConfig) -> Path:
     if args.run_name is None:
         run_name = (
             f"fast_ppo_{args.mode}"
-            f"_ep{int(args.num_episode)}"
+            f"_ep{int(args.num_episodes)}"
             f"_slowT{int(env_cfg.slow_T)}"
         )
     else:

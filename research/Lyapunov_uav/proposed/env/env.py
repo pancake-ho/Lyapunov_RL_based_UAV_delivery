@@ -351,7 +351,17 @@ class Env:
         )
 
         # Reward 계산
-        V = float(getattr(self.cfg.reward, "V", 1.0))
+        reward_cfg = getattr(self.cfg, "reward", None)
+        V = float(getattr(reward_cfg, "V", 1.0))
+
+        reward_preset = str(getattr(reward_cfg, "preset_name", "default_fast_dpp"))
+
+        if hasattr(self.cfg, "reward_coefficients") and callable(self.cfg.reward_coefficients):
+            reward_coefficients = self.cfg.reward_coefficients()
+        else:
+            reward_coefficients = {
+                "V": V,
+            }
 
         video_delivery_term = float(np.sum((prev_Z_arr - theta_z) * delivered_arr))
         battery_consume_term = -float(np.sum(prev_Y_arr * consumed_soc_arr))
@@ -366,8 +376,8 @@ class Env:
         )
 
         components: Dict[str, Any] = {
-            "reward_preset": str(self.cfg.reward.preset_name),
-            "reward_coefficients": self.cfg.reward_coefficients(),
+            "reward_preset": reward_preset,
+            "reward_coefficients": reward_coefficients,
             "theta_z": theta_z.copy(),
 
             "prev_Q": prev_Q_arr.copy(),

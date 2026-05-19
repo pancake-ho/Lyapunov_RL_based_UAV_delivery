@@ -137,6 +137,10 @@ class EnvConfig:
     # seed
     seed: int = 2026
 
+    # User video virtual queue target
+    # Z_n(t) = max_queue - Q_n(t)를 theta_z 근처로 유지하기 위한 perturbed target
+    theta_z: Optional[Tuple[float, ...]] = None
+
     def __post_init__(self) -> None:
         if self.num_user <= 0:
             raise ValueError("num_user는 양수 값을 가져야 합니다.")
@@ -191,3 +195,11 @@ class EnvConfig:
         if self.num_uav != self.num_rsu:
             raise ValueError(f"coverage region 당 하나의 UAV 고용을 가정합니다. 현재는 \
                              NUM_UAV: {self.num_uav}, NUM_RSU: {self.num_rsu}입니다.")
+    
+        if self.theta_z is None:
+            self.theta_z = tuple([0.7 * float(self.max_queue)] * self.num_user)
+        elif len(self.theta_z) != self.num_user:
+            raise ValueError(
+                f"theta_z 길이는 num_user={self.num_user}와 같아야 합니다. "
+                f"현재 len(theta_z)={len(self.theta_z)}입니다."
+            )
