@@ -3,12 +3,16 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import csv
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
-import torch
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from config import EnvConfig
 from env.env import Env
@@ -191,6 +195,19 @@ def parse_args() -> argparse.Namespace:
         help="env fast reward의 quality term 계수 V.",
     )
 
+    parser.add_argument(
+        "--plot-every-episodes",
+        type=int,
+        default=50,
+        help="몇 episode마다 reward/metric plot을 저장할지. 0이면 학습 중 plot 저장 비활성화.",
+    )
+    parser.add_argument(
+        "--plot-smooth-window",
+        type=int,
+        default=20,
+        help="reward moving average window size.",
+    )
+
     return parser.parse_args()
 
 
@@ -267,10 +284,11 @@ def make_run_dir(args: argparse.Namespace, env_cfg: EnvConfig) -> Path:
     else:
         run_name = str(args.run_name)
 
-    run_dir = PROPOSED_ROOT/ "fast" / run_name
+    run_dir = PROPOSED_ROOT / "fast" / run_name
     ensure_dir(run_dir)
     ensure_dir(run_dir / "checkpoints")
     ensure_dir(run_dir / "logs")
+    ensure_dir(run_dir / "figs")
 
     return run_dir
 
@@ -461,6 +479,161 @@ def reset_env(
     info["random_uav_links"] = int(np.sum(slow_action["uav_scheduling"]))
 
     return obs, info
+
+
+def _read_scalar_csv(csv_path: Path) -> Dict[str, list[float]]:
+    """
+    ScalarLogger가 저장한 csv를 읽어서 column별 float list로 반환.
+    숫자로 변환 안 되는 값은 건너뜀.
+    """
+    data: Dict[str, list[float]] = {}
+
+    if not csv_path.exists():
+        return data
+
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return data
+
+        for name in reader.fieldnames:
+            data[name] = []
+
+        for row in reader:
+            for key, value in row.items():
+                if key is None:
+                    continue
+                try:
+                    data.setdefault(key, []).append(float(value))
+                except (TypeError, ValueError):
+                    pass
+
+    return data
+
+
+def _moving_average(values: list[float], window: int) -> np.ndarray:
+    """
+    reward curve smoothing용 moving average.
+    window <= 1이면 원본 반환.
+    """
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.size == 0:
+        return arr
+
+    if window <= 1 or arr.size < window:
+        return arr
+
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    return np.convolve(arr, kernel, mode="valid")
+
+
+def save_training_plots(
+    run_dir: Path,
+    smooth_window: int = 20,
+) -> None:
+    """
+    episodes.csv / updates.csv 기반으로 학습 그래프를 png로 저장.
+    """
+    figures_dir = run_dir / "figures"
+    ensure_dir(figures_dir)
+
+    episodes_csv = run_dir / "logs" / "episodes.csv"
+    updates_csv = run_dir / "logs" / "updates.csv"
+
+    ep_data = _read_scalar_csv(episodes_csv)
+    update_data = _read_scalar_csv(updates_csv)
+
+    # 1) Episode reward
+    if "episode" in ep_data and "episode_reward" in ep_data:
+        x = np.asarray(ep_data["episode"], dtype=np.float32)
+        y = np.asarray(ep_data["episode_reward"], dtype=np.float32)
+
+        plt.figure()
+        plt.plot(x, y, label="episode_reward")
+
+        y_ma = _moving_average(ep_data["episode_reward"], smooth_window)
+        if y_ma.size > 0 and y_ma.size <= x.size:
+            x_ma = x[-y_ma.size:]
+            plt.plot(x_ma, y_ma, label=f"moving_avg_{smooth_window}")
+
+        plt.xlabel("Episode")
+        plt.ylabel("Reward")
+        plt.title("Fast PPO Episode Reward")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(figures_dir / "episode_reward.png", dpi=200)
+        plt.close()
+
+    # 2) Episode components
+    component_keys = [
+        "episode_delivery",
+        "episode_quality",
+        "episode_stall",
+        "episode_consumed_soc",
+        "episode_charged_soc",
+        "episode_outage",
+    ]
+
+    if "episode" in ep_data:
+        x = np.asarray(ep_data["episode"], dtype=np.float32)
+
+        plt.figure()
+        plotted = False
+        for key in component_keys:
+            if key not in ep_data:
+                continue
+            y = np.asarray(ep_data[key], dtype=np.float32)
+            if y.size != x.size:
+                continue
+            plt.plot(x, y, label=key)
+            plotted = True
+
+        if plotted:
+            plt.xlabel("Episode")
+            plt.ylabel("Value")
+            plt.title("Fast PPO Episode Metrics")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(figures_dir / "episode_metrics.png", dpi=200)
+
+        plt.close()
+
+    # 3) PPO update losses
+    if "update" in update_data:
+        x = np.asarray(update_data["update"], dtype=np.float32)
+
+        loss_keys = [
+            "policy_loss",
+            "value_loss",
+            "entropy",
+            "approx_kl",
+            "clipfrac",
+            "explained_variance",
+        ]
+
+        plt.figure()
+        plotted = False
+        for key in loss_keys:
+            if key not in update_data:
+                continue
+            y = np.asarray(update_data[key], dtype=np.float32)
+            if y.size != x.size:
+                continue
+            plt.plot(x, y, label=key)
+            plotted = True
+
+        if plotted:
+            plt.xlabel("Update")
+            plt.ylabel("Value")
+            plt.title("Fast PPO Update Metrics")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(figures_dir / "update_metrics.png", dpi=200)
+
+        plt.close()
 
 
 def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
@@ -660,6 +833,19 @@ def train(args: argparse.Namespace) -> None:
         )
 
         if (
+            int(args.plot_every_episodes) > 0
+            and episode_idx % int(args.plot_every_episodes) == 0
+        ):
+            save_training_plots(
+                run_dir=run_dir,
+                smooth_window=int(args.plot_smooth_window),
+            )
+            print(
+                f"[PLOT] saved figures to {run_dir / 'figures'}",
+                flush=True,
+            )
+
+        if (
             int(args.save_every_episodes) > 0
             and episode_idx % int(args.save_every_episodes) == 0
         ):
@@ -723,6 +909,11 @@ def train(args: argparse.Namespace) -> None:
             "run_dir": str(run_dir),
         },
         run_dir / "train_summary.json",
+    )
+
+    save_training_plots(
+        run_dir=run_dir,
+        smooth_window=int(args.plot_smooth_window),
     )
 
     print("=" * 100, flush=True)
