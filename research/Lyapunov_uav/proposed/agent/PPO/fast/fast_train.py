@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -80,6 +80,12 @@ def parse_args() -> argparse.Namespace:
         "--seed",
         type=int,
         default=2026,
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="저장 directory 이름. None이면 자동 생성.",
     )
     parser.add_argument(
         "--num-episodes",
@@ -256,7 +262,7 @@ def make_run_dir(args: argparse.Namespace, env_cfg: EnvConfig) -> Path:
         run_name = (
             f"fast_ppo_{args.mode}"
             f"_ep{int(args.num_episode)}"
-            f"_slowT{int(args.slow_T)}"
+            f"_slowT{int(env_cfg.slow_T)}"
         )
     else:
         run_name = str(args.run_name)
@@ -267,6 +273,112 @@ def make_run_dir(args: argparse.Namespace, env_cfg: EnvConfig) -> Path:
     ensure_dir(run_dir / "logs")
 
     return run_dir
+
+
+def sample_random_slow_action(env: Env, rng: np.random.Generator) -> Dict[str, Any]:
+    """
+    Fast-only PPO 학습용 random slow-timescale action 생성.
+    """
+    cfg = env.cfg
+
+    m = int(cfg.num_rsu)
+    n = int(cfg.num_user)
+    u = int(cfg.num_uav)
+
+    if m <= 0 or n <= 0 or u <= 0:
+        raise ValueError(
+            f"유효하지 않은 숫자입니다: num_rsu={m}, num_uav={u}, num_user={n}"
+        )
+
+    # 고정 random 확률
+    rsu_user_prob = 0.7
+    uav_hire_prob = 0.5
+    uav_user_prob = 0.7
+
+    rsu_scheduling = np.zeros((m, n), dtype=np.int32)
+    uav_hiring = np.zeros(u, dtype=np.int32)
+    uav_scheduling = np.zeros((u, n), dtype=np.int32)
+
+    for user_idx in range(n):
+        if rng.random() < rsu_user_prob:
+            rsu_idx = int(rng.integers(low=0, high=m))
+            rsu_scheduling[rsu_idx, user_idx] = 1
+    
+    # RSU-USER
+    rsu_served_user = (rsu_scheduling.sum(axis=0) > 0)
+
+    requested_content = np.asarray(env.requested_content, dtype=np.int32)
+    uav_cached_content = np.asarray(env.uav_cached_content, dtype=np.int32)
+
+    if requested_content.shape != (n,):
+        raise ValueError(
+            f"requested_content shape mismatch: expected {(n,)}, got {requested_content.shape}"
+        )
+    if uav_cached_content.shape != (u,):
+        raise ValueError(
+            f"uav_cached_content shape mismatch: expected {(u,)}, got {uav_cached_content.shape}"
+        )
+
+    uav_user_cap = int(getattr(cfg, "uav_user_cap", n))
+    uav_user_cap = max(1, min(uav_user_cap, n))
+
+    # UAV / UAV-USER
+    for uav_idx in range(u):
+        if rng.random() >= uav_hire_prob:
+            continue
+
+         # residual user 중심:
+        # RSU에 scheduling되지 않은 user만 UAV candidate로 둔다.
+        residual_mask = ~rsu_served_user
+
+        # UAV는 하나의 content를 caching하고,
+        # 같은 content를 요청하는 user만 지원 가능하다고 둔다.
+        cache_match_mask = requested_content == uav_cached_content[uav_idx]
+
+        candidate_mask = residual_mask & cache_match_mask
+        candidate_users = np.flatnonzero(candidate_mask)
+
+        # content/cache까지 맞추면 후보가 너무 적을 수 있으므로,
+        # 후보가 없으면 residual user 중에서라도 random candidate를 만든다.
+        if candidate_users.size == 0:
+            candidate_users = np.flatnonzero(residual_mask)
+
+        # 그래도 후보가 없으면 이 UAV는 고용하지 않는다.
+        if candidate_users.size == 0:
+            continue
+
+        selected_mask = rng.random(candidate_users.size) < uav_user_prob
+        selected_users = candidate_users[selected_mask]
+
+        # 확률 샘플링 결과가 비면 candidate 중 1명은 강제로 선택.
+        if selected_users.size == 0:
+            selected_users = np.asarray(
+                [int(rng.choice(candidate_users))],
+                dtype=np.int64,
+            )
+
+        # UAV 1대당 candidate user 수 제한.
+        if selected_users.size > uav_user_cap:
+            selected_users = rng.choice(
+                selected_users,
+                size=uav_user_cap,
+                replace=False,
+            )
+
+        uav_hiring[uav_idx] = 1
+        uav_scheduling[uav_idx, np.asarray(selected_users, dtype=np.int64)] = 1
+
+    # scheduling 대상이 없는 UAV는 hiring 제거.
+    active_hire = (uav_scheduling.sum(axis=1) > 0).astype(np.int32)
+    uav_hiring = uav_hiring * active_hire
+    uav_scheduling = uav_scheduling * uav_hiring[:, None]
+
+    return {
+        "rsu_scheduling": rsu_scheduling.astype(np.int32),
+        "uav_hiring": uav_hiring.astype(np.int32),
+        "uav_scheduling": uav_scheduling.astype(np.int32),
+    }
+
 
 
 def attach_existing_slow_context(env: Env, obs: Dict[str, Any]) -> Dict[str, Any]:
@@ -316,13 +428,40 @@ def save_configs(
     )
 
 
-def reset_env(env: Env) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def reset_env(
+    env: Env,
+    slow_rng: np.random.Generator,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     env.reset() 결과를 Gymnasium/Gym 호환 형태로 정리.
+
+    fast-only PPO에서는 매 episode를 하나의 slow-timescale round로 보고,
+    reset 직후 random slow action을 무조건 생성해서 env에 주입한다.
     """
     obs, info = split_env_reset(env.reset())
+
+    slow_action = sample_random_slow_action(
+        env=env,
+        rng=slow_rng,
+    )
+    env.apply_slow_action(slow_action)
+
+    # apply_slow_action 이후 slow context가 갱신되므로 fast obs를 다시 가져온다.
+    obs = env.get_fast_obs()
     obs = attach_existing_slow_context(env, obs)
+
+    info = dict(info)
+    info["random_slow_action"] = {
+        "rsu_scheduling": np.asarray(slow_action["rsu_scheduling"], dtype=np.int32).copy(),
+        "uav_hiring": np.asarray(slow_action["uav_hiring"], dtype=np.int32).copy(),
+        "uav_scheduling": np.asarray(slow_action["uav_scheduling"], dtype=np.int32).copy(),
+    }
+    info["random_rsu_links"] = int(np.sum(slow_action["rsu_scheduling"]))
+    info["random_hired_uav"] = int(np.sum(slow_action["uav_hiring"]))
+    info["random_uav_links"] = int(np.sum(slow_action["uav_scheduling"]))
+
     return obs, info
+
 
 def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
     """
@@ -355,8 +494,10 @@ def train(args: argparse.Namespace) -> None:
     env_cfg = build_env_config(args)
     ppo_cfg = build_ppo_config(args)
 
+    slow_rng = np.random.default_rng(int(args.seed) + 10007)
+
     env = Env(env_cfg)
-    obs, reset_info = reset_env(env)
+    obs, reset_info = reset_env(env, slow_rng=slow_rng)
 
     obs_dim = infer_flat_dim(obs)
     agent = FastPPOAgent(
@@ -407,7 +548,7 @@ def train(args: argparse.Namespace) -> None:
     last_done = False
 
     while episode_idx < int(args.num_episodes):
-        obs, _ = reset_env(env)
+        obs, reset_info = reset_env(env, slow_rng=slow_rng)
 
         ep_reward = 0.0
         ep_delivery = 0.0
@@ -596,8 +737,10 @@ def evaluate(args: argparse.Namespace) -> None:
     env_cfg = build_env_config(args)
     ppo_cfg = build_ppo_config(args)
 
+    slow_rng = np.random.default_rng(int(args.seed) + 20011)
+
     env = Env(env_cfg)
-    obs, reset_info = reset_env(env)
+    obs, reset_info = reset_env(env, slow_rng=slow_rng)
 
     obs_dim = infer_flat_dim(obs)
     agent = FastPPOAgent(
@@ -643,7 +786,7 @@ def evaluate(args: argparse.Namespace) -> None:
     stalls = []
 
     for episode_idx in range(1, int(args.eval_episodes) + 1):
-        obs, _ = reset_env(env)
+        obs, reset_info = reset_env(env, slow_rng=slow_rng)
 
         ep_reward = 0.0
         ep_delivery = 0.0
