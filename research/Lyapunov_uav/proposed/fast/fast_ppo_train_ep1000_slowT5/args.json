@@ -7,9 +7,9 @@
   "num_episodes": 1000,
   "eval_episodes": 20,
   "save_every_episodes": 50,
-  "rollout_slots": 1024,
+  "rollout_slots": 128,
   "update_epochs": 5,
-  "batch_size": 256,
+  "batch_size": 64,
   "gamma": 0.99,
   "gae_lambda": 0.95,
   "lr": 0.0003,
@@ -24,7 +24,7 @@
   ],
   "no_obs_norm": false,
   "no_adv_norm": false,
-  "device": "cuda",
+  "device": "cpu",
   "deterministic_torch": false,
   "num_user": null,
   "num_rsu": null,
@@ -32,5 +32,7 @@
   "slow_T": 5,
   "layer": null,
   "chunk": null,
-  "V": 1.0
+  "V": 1.0,
+  "plot_every_episodes": 5,
+  "plot_smooth_window": 5
 }

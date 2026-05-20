@@ -49,7 +49,8 @@ class BatteryConfig:
 
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
-    energy_to_soc_factor: Optional[float] = 0.05
+    battery_capacity_joule: float = 100000.0
+    energy_to_soc_factor: Optional[float] = None
 
     # 최대 통신 power bound
     max_tx_power: float = 10.0
@@ -71,6 +72,10 @@ class BatteryConfig:
             raise ValueError("eta_c는 양수 값을 가져야 합니다.")
         if self.max_tx_power <= 0.0:
             raise ValueError("max_tx_power는 양수 값을 가져야 합니다.")
+        if self.energy_to_soc_factor is None:
+            self.energy_to_soc_factor = 100.0 / float(self.battery_capacity_joule)
+        else:
+            self.energy_to_soc_factor = float(self.energy_to_soc_factor)
         
         self.e_init = float(min(max(self.e_init, 0.0), float(self.e_max)))
         self.e_min = float(min(max(self.e_min, 0.0), float(self.e_max)))
