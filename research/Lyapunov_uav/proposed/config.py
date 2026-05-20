@@ -73,7 +73,7 @@ class BatteryConfig:
     tx_energy_coeff: float = 1.0
 
     # 충전 모델
-    charging_rate: float = 120.0 # Charging power [W]
+    charging_rate: float = 1500.0 # Charging power [W]
     eta_c: float = 1.0
     enable_charging: bool = True
     allow_charge: bool = True
@@ -159,7 +159,7 @@ class EnvConfig:
             distance=20.0,
             bandwidth=1e6,
             gamma_db=25.0,
-            inr_db=0.0,
+            inr_db=5.0,
             sigma_db=4.0,
             beta=2.0,
             mu_db=0.0,
@@ -279,3 +279,11 @@ class EnvConfig:
                 f"theta_z 길이는 num_user={self.num_user}와 같아야 합니다. "
                 f"현재 len(theta_z)={len(self.theta_z)}입니다."
             )
+        
+        if len(self.chunk_size_bits) != self.layer:
+            raise ValueError(
+                f"chunk_size_bits의 len {len(self.chunk_size_bits)}는 "
+                f"layer={self.layer}와 같아야 합니다."
+            )
+        if any(float(s) <= 0.0 for s in self.chunk_size_bits):
+            raise ValueError("chunk_size_bits의 모든 값은 양수여야 합니다.")

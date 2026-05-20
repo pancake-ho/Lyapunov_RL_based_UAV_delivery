@@ -59,13 +59,25 @@ def _quality_weight(cfg: EnvConfig, layer_idx: int) -> float:
 
 def _chunk_size_bits(cfg: EnvConfig, layer_idx: int) -> float:
     """
-    layer 수에 따른 chunk size [bits] 계산하는 함수로,
-    S(k) = base_chunk_size_bits * k 의 단순 선형 모델을 차용함.
+    layer 수에 따른 chunk size [bits]를 반환한다.
+
+    현재 연구 기준:
+        S(k) = config.chunk_size_bits[k - 1]
+
+    IoTJ2025 설정:
+        [2.621, 5.073, 10.658, 26.496] Kbits
     """
     layer = int(layer_idx)
     if layer <= 0:
         return 0.0
-    return float(cfg.base_chunk_size_bits) * float(layer)
+
+    if layer <= len(cfg.chunk_size_bits):
+        return float(cfg.chunk_size_bits[layer - 1])
+
+    raise ValueError(
+        f"layer_idx={layer}에 대응하는 chunk_size_bits가 없습니다. "
+        f"len(chunk_size_bits)={len(cfg.chunk_size_bits)}"
+    )
 
 
 def _clip_int_matrix(
