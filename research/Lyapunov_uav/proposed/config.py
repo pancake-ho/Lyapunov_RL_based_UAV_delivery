@@ -63,7 +63,10 @@ class BatteryConfig:
         if self.target_service_slots_per_round <= 0:
             raise ValueError("target_service_slots_per_round는 양수 값을 가져야 합니다.")
         if self.p_0 < 0.0 or self.p_i < 0.0:
-            raise ValueError(f"p_0와 p_i는 앙수 값을 가져야 합니다. 현재 두 값은 각각 {self.p_0}, {self.p_i}입니다.")
+            raise ValueError(
+                f"p_0와 p_i는 양수 값을 가져야 합니다. "
+                f"현재 두 값은 각각 {self.p_0}, {self.p_i}입니다."
+            )
         if self.tx_energy_coeff <= 0.0:
             raise ValueError("tx_energy_coeff는 양수 값을 가져야 합니다.")
         if self.charging_rate < 0.0:
@@ -72,15 +75,16 @@ class BatteryConfig:
             raise ValueError("eta_c는 양수 값을 가져야 합니다.")
         if self.max_tx_power <= 0.0:
             raise ValueError("max_tx_power는 양수 값을 가져야 합니다.")
+        if self.battery_capacity_joule <= 0.0:
+            raise ValueError("battery_capacity_joule은 양수 값을 가져야 합니다.")
+
         if self.energy_to_soc_factor is None:
             self.energy_to_soc_factor = 100.0 / float(self.battery_capacity_joule)
         else:
             self.energy_to_soc_factor = float(self.energy_to_soc_factor)
-        
+
         self.e_init = float(min(max(self.e_init, 0.0), float(self.e_max)))
         self.e_min = float(min(max(self.e_min, 0.0), float(self.e_max)))
-
-        self.energy_to_soc_factor = 100.0 / float(self.e_max)
 
 
 @dataclass
