@@ -191,12 +191,6 @@ class EnvConfig:
     # delivery (비트 당 청크 사이즈 정의)
     base_chunk_size_bits: float = 2e5
 
-    # reward 계수
-    # 아직 최적화 산식이 완료되지 않았으므로, 주석 처리.
-    # stall_penalty: float = 4.0
-    # battery_virtual_penalty: float = 0.2
-    # outage_penalty: float = 5.0
-
     # 각 layer에 대한 quality 가중치
     quality_weights: Tuple[float, ...] = (34.0, 36.64, 39.11, 41.64)
     chunk_size_bits: Tuple[float, ...] = (
@@ -216,6 +210,7 @@ class EnvConfig:
     # User video virtual queue target
     # Z_n(t) = max_queue - Q_n(t)를 theta_z 근처로 유지하기 위한 perturbed target
     theta_z: Optional[Tuple[float, ...]] = None
+    V: float = 10.0
 
     def __post_init__(self) -> None:
         if self.num_user <= 0:

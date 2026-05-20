@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import sys
 import time
 import csv
@@ -16,6 +15,8 @@ import matplotlib.pyplot as plt
 
 from config import EnvConfig
 from env.env import Env
+
+from agent.PPO.config import get_fast_ppo_config, FastPPOConfig
 
 from agent.PPO.common import (
     infer_flat_dim,
@@ -56,162 +57,7 @@ if str(PROPOSED_ROOT) not in sys.path:
     sys.path.insert(0, str(PROPOSED_ROOT))
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fast-Timescale PPO Agent Training")
-
-    # mode
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["train", "eval"],
-        default="train",
-        help="train이면 PPO 학습, eval이면 평가만 수행.",
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=None,
-        help="eval mode에서 불러올 checkpoint path."
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="train mode에서 --checkpoint를 불러와 이어서 학습."
-    )
-
-    # experiment
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=2026,
-    )
-    parser.add_argument(
-        "--run-name",
-        type=str,
-        default=None,
-        help="저장 directory 이름. None이면 자동 생성.",
-    )
-    parser.add_argument(
-        "--num-episodes",
-        type=int,
-        default=1000,
-        help=(
-            "train mode에서 학습할 episode 수. "
-            "현재 기준 episode 1개 = slow-timescale round 1개."
-        ),
-    )
-    parser.add_argument(
-        "--eval-episodes",
-        type=int,
-        default=20
-    )
-    parser.add_argument(
-        "--save-every-episodes",
-        type=int,
-        default=50,
-        help="train mode에서 몇 episode마다 checkpoint를 저장할지. 0이면 주기 저장 비활성화.",
-    )
-
-    # PPO rollout/update
-    parser.add_argument(
-        "--rollout-slots",
-        type=int,
-        default=1024,
-        help=(
-            "PPO update 1회 전에 수집할 fast slot transition 수."
-        ),
-    )
-    parser.add_argument(
-        "--update-epochs",
-        type=int,
-        default=5,
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=256,
-    )
-
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--clip-coef", type=float, default=0.2)
-    parser.add_argument("--value-coef", type=float, default=0.5)
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
-    parser.add_argument("--max-grad-norm", type=float, default=0.5)
-    parser.add_argument("--init-log-std", type=float, default=-0.5)
-
-    parser.add_argument(
-        "--hidden-dims",
-        type=int,
-        nargs="+",
-        default=[256, 256],
-        help="Actor/Critic MLP hidden dimensions.",
-    )
-    parser.add_argument(
-        "--no-obs-norm",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--no-adv-norm",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help='auto, cpu, cuda, cuda:0 등.',
-    )
-    parser.add_argument(
-        "--deterministic-torch",
-        action="store_true",
-        help="재현성 우선. CUDA deterministic 옵션을 켠다.",
-    )
-
-    # env
-    parser.add_argument("--num-user", type=int, default=None)
-    parser.add_argument("--num-rsu", type=int, default=None)
-    parser.add_argument("--num-uav", type=int, default=None)
-
-    parser.add_argument(
-        "--slow-T",
-        dest="slow_T",
-        type=int,
-        default=None,
-        help=(
-            "slow-timescale round 길이. "
-            "현재 fast-only 학습에서는 episode 하나의 fast slot 길이와 동일하다."
-        ),
-    )
-
-    parser.add_argument("--layer", type=int, default=None)
-    parser.add_argument("--chunk", type=int, default=None)
-
-    # reward coeffs
-    parser.add_argument(
-        "--V",
-        type=float,
-        default=1.0,
-        help="env fast reward의 quality term 계수 V.",
-    )
-
-    parser.add_argument(
-        "--plot-every-episodes",
-        type=int,
-        default=50,
-        help="몇 episode마다 reward/metric plot을 저장할지. 0이면 학습 중 plot 저장 비활성화.",
-    )
-    parser.add_argument(
-        "--plot-smooth-window",
-        type=int,
-        default=20,
-        help="reward moving average window size.",
-    )
-
-    return parser.parse_args()
-
-
-def build_env_config(args: argparse.Namespace) -> EnvConfig:
+def build_env_config(cfg: argparse.Namespace) -> EnvConfig:
     """
     CLI args를 EnvConfig에 반영함.
     """

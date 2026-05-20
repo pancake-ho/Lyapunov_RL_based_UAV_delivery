@@ -352,9 +352,9 @@ class Env:
 
         # Reward 계산
         reward_cfg = getattr(self.cfg, "reward", None)
-        V = float(getattr(reward_cfg, "V", 1.0))
+        V = float(getattr(self.cfg, "V", 1.0))
 
-        reward_preset = str(getattr(reward_cfg, "preset_name", "default_fast_dpp"))
+        reward_preset = str(getattr(self.cfg, "preset_name", "default_fast_dpp"))
 
         if hasattr(self.cfg, "reward_coefficients") and callable(self.cfg.reward_coefficients):
             reward_coefficients = self.cfg.reward_coefficients()
