@@ -1,7 +1,0 @@
-{
-  "episode": 20,
-  "global_slot": 100,
-  "update_idx": 1,
-  "final_checkpoint": "/home/pancake_ho/uav/winlab/research/Lyapunov_uav/proposed/fast/fast_ppo_train_ep20_slowT5/checkpoints/fast_ppo_final.pt",
-  "run_dir": "/home/pancake_ho/uav/winlab/research/Lyapunov_uav/proposed/fast/fast_ppo_train_ep20_slowT5"
-}

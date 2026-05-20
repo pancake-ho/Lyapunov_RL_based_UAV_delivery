@@ -1,6 +1,0 @@
-{
-  "proposed_root": "/home/pancake_ho/uav/winlab/research/Lyapunov_uav/proposed",
-  "obs_dim": 430,
-  "action_dim": 500,
-  "created_at": "2026-05-20 03:20:13"
-}

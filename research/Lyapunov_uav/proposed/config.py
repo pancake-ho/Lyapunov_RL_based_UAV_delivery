@@ -8,20 +8,55 @@ class ChannelConfig:
     """
     distance: float = 20.0
     bandwidth: float = 1e6
-    gamma_db: float = 25.0
+    gamma_db: float = 35.0
+    inr_db: float = 5.0
     sigma_db: float = 4.0
-    beta: float = 2.0
     mu_db: float = 0.0
+    beta: float = 2.0
     min_distance: float = 1.0
     seed: int = 42
 
+    altitude: float = 100.0
+    beta_zero: float = 1e-3
+    noise_power: float = 1e-13
+    capacity_gap: float = 1.0
+
     def __post_init__(self) -> None:
+        self.distance = float(self.distance)
+        self.bandwidth = float(self.bandwidth)
+        self.gamma_db = float(self.gamma_db)
+        self.inr_db = float(self.inr_db)
+        self.sigma_db = float(self.sigma_db)
+        self.mu_db = float(self.mu_db)
+        self.beta = float(self.beta)
+        self.min_distance = float(self.min_distance)
+
+        self.altitude = float(self.altitude)
+        self.beta_zero = float(self.beta_zero)
+        self.noise_power = float(self.noise_power)
+        self.capacity_gap = float(self.capacity_gap)
+
+        if self.distance < 0.0:
+            raise ValueError(f"distance는 0 이상이어야 합니다. 현재 값: {self.distance}")
         if self.bandwidth <= 0.0:
-            raise ValueError("bandwidth는 양수 값을 가져야 합니다.")
+            raise ValueError(f"bandwidth는 양수 값을 가져야 합니다. 현재 값: {self.bandwidth}")
+        if self.sigma_db < 0.0:
+            raise ValueError(f"sigma_db는 0 이상이어야 합니다. 현재 값: {self.sigma_db}")
+        if self.beta <= 0.0:
+            raise ValueError(f"beta는 양수 값을 가져야 합니다. 현재 값: {self.beta}")
         if self.min_distance <= 0.0:
-            raise ValueError("min_distance는 양수 값을 가져야 합니다.")
-        if self.distance < self.min_distance:
-            self.distance = float(self.min_distance)
+            raise ValueError(f"min_distance는 양수 값을 가져야 합니다. 현재 값: {self.min_distance}")
+
+        if self.altitude < 0.0:
+            raise ValueError(f"altitude는 0 이상이어야 합니다. 현재 값: {self.altitude}")
+        if self.beta_zero <= 0.0:
+            raise ValueError(f"beta_zero는 양수 값을 가져야 합니다. 현재 값: {self.beta_zero}")
+        if self.noise_power <= 0.0:
+            raise ValueError(f"noise_power는 양수 값을 가져야 합니다. 현재 값: {self.noise_power}")
+        if self.capacity_gap <= 0.0:
+            raise ValueError(
+                f"capacity_gap은 양수 값을 가져야 합니다. 현재 값: {self.capacity_gap}"
+            )
 
 @dataclass
 class BatteryConfig:
@@ -32,8 +67,8 @@ class BatteryConfig:
 
     # hovering 에너지 모델
     # e_hover(t) = (p_0 + p_i) * slot_duration
-    p_0: float = 80.0 # blade profile power [W]
-    p_i: float = 70.0 # induced power [W]
+    p_0: float = 580.65 # blade profile power [W]
+    p_i: float = 790.67 # induced power [W]
 
     tx_energy_coeff: float = 1.0
 
@@ -44,7 +79,7 @@ class BatteryConfig:
     allow_charge: bool = True
 
     # time slot
-    slot_duration: float = 1.0
+    slot_duration: float = 0.05
     target_service_slots_per_round: int = 5
 
     # SoC conversion term
@@ -90,18 +125,18 @@ class BatteryConfig:
 @dataclass
 class EnvConfig:
     # 시스템 설정
-    num_user: int = 10
-    num_rsu: int = 10
-    num_uav: int = 10
+    num_user: int = 100
+    num_rsu: int = 63
+    num_uav: int = 63
     uav_user_cap: int = 2 # UAV 1대당 동시 서비스 가능 사용자 수
-    slow_T: int = 5
+    slow_T: int = 25
     N0: int = 3
 
     # 비디오 및 캐싱
     num_video: int = 3
     rsu_caching: int = 2
-    layer: int = 5
-    chunk: int = 5
+    layer: int = 4
+    chunk: int = 9
     rsu_capacity: int = 3
     mbs_capacity: int = 3
     mbs_delay: int = 2
@@ -115,9 +150,35 @@ class EnvConfig:
     depart_amp: float = 0.02
     depart_period: float = 300.0
 
-    # 채널
-    rsu_channel: ChannelConfig = field(default_factory=lambda: ChannelConfig(distance=0.6))
-    uav_channel: ChannelConfig = field(default_factory=lambda: ChannelConfig(distance=0.4))
+    # Channel
+    # HRL video delivery 논문은 user radius R=50 m를 사용.
+    # 여기의 distance는 fallback/default distance일 뿐이며,
+    # 실제 env에서는 rsu_user_distance/uav_user_distance를 meter 단위로 넘기는 것이 원칙.
+    rsu_channel: ChannelConfig = field(
+        default_factory=lambda: ChannelConfig(
+            distance=20.0,
+            bandwidth=1e6,
+            gamma_db=25.0,
+            inr_db=0.0,
+            sigma_db=4.0,
+            beta=2.0,
+            mu_db=0.0,
+            min_distance=1.0,
+            seed=42,
+        )
+    )
+    uav_channel: ChannelConfig = field(
+        default_factory=lambda: ChannelConfig(
+            distance=40.0,
+            bandwidth=1e6,
+            altitude=100.0,
+            beta_zero=1e5,
+            noise_power=1.0,
+            capacity_gap=1.0,
+            min_distance=1.0,
+            seed=42,
+        )
+    )
 
     # 배터리
     battery: BatteryConfig = field(default_factory=BatteryConfig)
@@ -137,7 +198,13 @@ class EnvConfig:
     # outage_penalty: float = 5.0
 
     # 각 layer에 대한 quality 가중치
-    quality_weights: Tuple[float, ...] = (1.0, 2.0, 3.0, 4.0, 5.0)
+    quality_weights: Tuple[float, ...] = (34.0, 36.64, 39.11, 41.64)
+    chunk_size_bits: Tuple[float, ...] = (
+        2.621e3,
+        5.073e3,
+        10.658e3,
+        26.496e3,
+    )
 
     # indicator
     sch_indicator: float = 0.0
