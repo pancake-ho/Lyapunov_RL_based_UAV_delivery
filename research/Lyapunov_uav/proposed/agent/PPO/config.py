@@ -16,7 +16,6 @@ class FastPPOConfig:
     - fast policy는 slot-level decision만 학습한다.
     - slow decision(mu, y, phi)은 fast 학습 시 random/fixed/external condition으로 주입된다.
     """
-
     # ------------------------------------------------------------------
     # 1) 기본 실행 설정
     # ------------------------------------------------------------------
@@ -24,7 +23,7 @@ class FastPPOConfig:
     seed: int = 2026
     device: str = "cuda"
 
-    # Seraph / Ubuntu 22.04 LTS 기준으로 /data/$USER 아래 사용 권장
+    # Seraph / Ubuntu 22.04 LTS 기준으로 /data/$USER 아래
     project_root: Optional[str] = None
     output_root: str = "runs/fast_ppo"
     run_name: str = "fast_ppo_stable_v1"

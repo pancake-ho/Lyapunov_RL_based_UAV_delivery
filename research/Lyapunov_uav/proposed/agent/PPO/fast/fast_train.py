@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import csv
 import sys
 import time
-import csv
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -10,14 +10,14 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import EnvConfig
 from env.env import Env
 
-from agent.PPO.config import get_fast_ppo_config, FastPPOConfig
-
+from agent.PPO.config import get_fast_ppo_config
 from agent.PPO.common import (
     infer_flat_dim,
     split_env_reset,
@@ -27,6 +27,10 @@ from agent.PPO.common import (
 )
 from agent.PPO.common.utils import ScalarLogger, save_json
 from agent.PPO.fast.fast_agent import FastPPOAgent, FastPPOConfig
+
+
+def _cfg_get(cfg: Any, name: str, default: Any) -> Any:
+    return getattr(cfg, name, default)
 
 
 def _find_proposed_root(start: Optional[Path] = None) -> Path:
@@ -57,67 +61,54 @@ if str(PROPOSED_ROOT) not in sys.path:
     sys.path.insert(0, str(PROPOSED_ROOT))
 
 
-def build_env_config(cfg: argparse.Namespace) -> EnvConfig:
+def _to_dict(cfg: Any) -> Dict[str, Any]:
+    if hasattr(cfg, "to_dict") and callable(cfg.to_dict):
+        return dict(cfg.to_dict())
+    try:
+        return asdict(cfg)
+    except TypeError:
+        return dict(vars(cfg))
+
+
+def build_env_config() -> EnvConfig:
     """
-    CLI args를 EnvConfig에 반영함.
+    EnvConfig는 proposed/config.py 기준 그대로 사용한다.
+
+    중요:
+        num_user, num_rsu, num_uav, slow_T, layer, chunk,
+        channel, battery, theta_z, V 등 시스템 상수는 여기서 override하지 않는다.
     """
-    cfg = EnvConfig(seed=int(args.seed))
-
-    updates: Dict[str, Any] = {}
-
-    if args.num_user is not None:
-        updates["num_user"] = int(args.num_user)
-
-    if args.num_rsu is not None and args.num_uav is not None:
-        updates["num_rsu"] = int(args.num_rsu)
-        updates["num_uav"] = int(args.num_uav)
-    elif args.num_rsu is not None:
-        updates["num_rsu"] = int(args.num_rsu)
-        updates["num_uav"] = int(args.num_rsu)
-    elif args.num_uav is not None:
-        updates["num_rsu"] = int(args.num_uav)
-        updates["num_uav"] = int(args.num_uav)
-
-    if args.slow_T is not None:
-        updates["slow_T"] = int(args.slow_T)
-
-    if args.layer is not None:
-        updates["layer"] = int(args.layer)
-        updates["quality_weights"] = tuple(float(i + 1) for i in range(int(args.layer))
-                                           )
-    if args.chunk is not None:
-        updates["chunk"] = int(args.chunk)
-
-    if len(updates) > 0:
-        cfg = replace(cfg, **updates)
-
-    return cfg
+    return EnvConfig()
 
 
-def build_ppo_config(args: argparse.Namespace) -> FastPPOConfig:
+def _build_agent_ppo_config(rl_cfg: Any) -> FastPPOConfig:
     """
     CLI args를 FastPPOConfig로 변환함.
     """
+    hidden_dims = _cfg_get(rl_cfg, "hidden_dims", [256, 256])
+    if hidden_dims is None:
+        hidden_dims = [256, 256]
+
     return FastPPOConfig(
-        rollout_steps=int(args.rollout_slots),
-        update_epochs=int(args.update_epochs),
-        batch_size=int(args.batch_size),
-        gamma=float(args.gamma),
-        gae_lambda=float(args.gae_lambda),
-        lr=float(args.lr),
-        max_grad_norm=float(args.max_grad_norm),
-        clip_coef=float(args.clip_coef),
-        value_coef=float(args.value_coef),
-        entropy_coef=float(args.entropy_coef),
-        normalize_obs=not bool(args.no_obs_norm),
-        normalize_adv=not bool(args.no_adv_norm),
-        hidden_dims=tuple(int(x) for x in args.hidden_dims),
-        init_log_std=float(args.init_log_std),
-        device=str(args.device),
+        rollout_steps=int(_cfg_get(rl_cfg, "rollout_slots", 2048)),
+        update_epochs=int(_cfg_get(rl_cfg, "update_epochs", 2)),
+        batch_size=int(_cfg_get(rl_cfg, "batch_size", 256)),
+        gamma=float(_cfg_get(rl_cfg, "gamma", 0.90)),
+        gae_lambda=float(_cfg_get(rl_cfg, "gae_lambda", 0.85)),
+        lr=float(_cfg_get(rl_cfg, "lr", 3e-5)),
+        max_grad_norm=float(_cfg_get(rl_cfg, "max_grad_norm", 0.5)),
+        clip_coef=float(_cfg_get(rl_cfg, "clip_coef", 0.12)),
+        value_coef=float(_cfg_get(rl_cfg, "value_coef", 0.05)),
+        entropy_coef=float(_cfg_get(rl_cfg, "entropy_coef", 1e-5)),
+        normalize_obs=bool(_cfg_get(rl_cfg, "obs_norm", True)),
+        normalize_adv=bool(_cfg_get(rl_cfg, "adv_norm", True)),
+        hidden_dims=tuple(int(x) for x in hidden_dims),
+        init_log_std=float(_cfg_get(rl_cfg, "init_log_std", -1.5)),
+        device=str(_cfg_get(rl_cfg, "device", "cuda")),
     )
 
 
-def make_run_dir(args: argparse.Namespace, env_cfg: EnvConfig) -> Path:
+def make_run_dir(rl_cfg: Any) -> Path:
     """
     실행 결과를 저장하는 directory를 생성함.
     """

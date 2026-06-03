@@ -6,17 +6,19 @@ class ChannelConfig:
     """
     Channel 및 PHY parameter config 클래스
     """
-    distance: float = 20.0
+    distance: float = 20.0 # random (범위: 5 ~ 25 - uniform)
     bandwidth: float = 1e6
+
     gamma_db: float = 35.0
     inr_db: float = 5.0
     sigma_db: float = 4.0
     mu_db: float = 0.0
+
     beta: float = 2.0
     min_distance: float = 1.0
     seed: int = 42
 
-    altitude: float = 100.0
+    altitude: float = 100.0 # 감소
     beta_zero: float = 1e-3
     noise_power: float = 1e-13
     capacity_gap: float = 1.0
@@ -84,7 +86,8 @@ class BatteryConfig:
 
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
-    battery_capacity_joule: float = 100000.0
+    # SAC/DDPG도 추가적으로 고려
+    battery_capacity_joule: float = 100000.0 # 감소
     energy_to_soc_factor: Optional[float] = None
 
     # 최대 통신 power bound
@@ -128,7 +131,7 @@ class EnvConfig:
     num_user: int = 100
     num_rsu: int = 63
     num_uav: int = 63
-    uav_user_cap: int = 2 # UAV 1대당 동시 서비스 가능 사용자 수
+    uav_user_cap: int = 2
     slow_T: int = 25
     N0: int = 3
 
@@ -138,8 +141,6 @@ class EnvConfig:
     layer: int = 4
     chunk: int = 9
     rsu_capacity: int = 3
-    mbs_capacity: int = 3
-    mbs_delay: int = 2
     zipf_alpha: float = 1.1
 
     # 사용자 이동 패턴
