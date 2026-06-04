@@ -8,7 +8,7 @@ class ChannelConfig:
     """
     distance: float = 15.0 # random (범위: 5 ~ 25 - uniform)
 
-    # sampling
+    # uniform sampling
     distance_min: float = 5.0
     distance_max: float = 25.0
     distance_sampling: str = "uniform"
@@ -138,6 +138,7 @@ class BatteryConfig:
 @dataclass
 class EnvConfig:
     # 시스템 설정
+    # user/rsu/uav 수 수정
     num_user: int = 20
     num_rsu: int = 10
     num_uav: int = 10
@@ -167,7 +168,10 @@ class EnvConfig:
     # 실제 env에서는 rsu_user_distance/uav_user_distance를 meter 단위로 넘기는 것이 원칙.
     rsu_channel: ChannelConfig = field(
         default_factory=lambda: ChannelConfig(
-            distance=20.0,
+            distance=15.0,
+            distance_min=5.0,
+            distance_max=25.0,
+            distance_sampling="uniform",
             bandwidth=1e6,
             gamma_db=25.0,
             inr_db=5.0,
@@ -180,11 +184,14 @@ class EnvConfig:
     )
     uav_channel: ChannelConfig = field(
         default_factory=lambda: ChannelConfig(
-            distance=40.0,
+            distance=15.0,
+            distance_min=5.0,
+            distance_max=25.0,
+            distance_sampling="uniform",
             bandwidth=1e6,
-            altitude=100.0,
-            beta_zero=1e5,
-            noise_power=1.0,
+            altitude=20.0,
+            beta_zero=2e-9,
+            noise_power=1e-13,
             capacity_gap=1.0,
             min_distance=1.0,
             seed=42,
@@ -244,11 +251,9 @@ class EnvConfig:
                              \n현재 num_video 값은 {self.num_video}, rsu_caching 값은 {self.rsu_caching}입니다.")
         if self.layer <= 0 or self.chunk <= 0:
             raise ValueError(f"layer와 chunk는 모두 양수 값을 가져야 합니다. 현재 두 값은 각각 {self.layer}, {self.chunk}입니다.")
-        if self.rsu_capacity <= 0 or self.mbs_capacity <= 0:
+        if self.rsu_capacity <= 0:
             raise ValueError(f"rsu_capacity와 mbs_capacity는 모두 양수 값을 가져야 합니다. \
-                             현재 두 값은 각각 {self.rsu_capacity}, {self.mbs_capacity}입니다.")
-        if self.mbs_delay < 0:
-            raise ValueError("mbs_delay는 0 이상의 값을 가져야 합니다.")
+                             현재 값: {self.rsu_capacity}")
         if self.zipf_alpha <= 0.0:
             raise ValueError("zipf_alpha는 양수 값을 가져야 합니다.")
         

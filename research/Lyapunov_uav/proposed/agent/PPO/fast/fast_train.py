@@ -3,21 +3,20 @@ from __future__ import annotations
 import csv
 import sys
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import EnvConfig
 from env.env import Env
 
-from agent.PPO.config import get_fast_ppo_config
+from agent.PPO.config import FastTrainConfig, get_fast_ppo_config
 from agent.PPO.common import (
     infer_flat_dim,
     split_env_reset,
@@ -26,7 +25,7 @@ from agent.PPO.common import (
     ensure_dir,
 )
 from agent.PPO.common.utils import ScalarLogger, save_json
-from agent.PPO.fast.fast_agent import FastPPOAgent, FastPPOConfig
+from agent.PPO.fast.fast_agent import FastPPOAgent, FastPPOConfig as AgentPPOConfig
 
 
 def _cfg_get(cfg: Any, name: str, default: Any) -> Any:
@@ -73,67 +72,71 @@ def _to_dict(cfg: Any) -> Dict[str, Any]:
 def build_env_config() -> EnvConfig:
     """
     EnvConfig는 proposed/config.py 기준 그대로 사용한다.
-
-    중요:
-        num_user, num_rsu, num_uav, slow_T, layer, chunk,
-        channel, battery, theta_z, V 등 시스템 상수는 여기서 override하지 않는다.
+    fast_train.py에서는 시스템 상수를 override하지 않는다.
     """
     return EnvConfig()
 
 
-def _build_agent_ppo_config(rl_cfg: Any) -> FastPPOConfig:
-    """
-    CLI args를 FastPPOConfig로 변환함.
-    """
-    hidden_dims = _cfg_get(rl_cfg, "hidden_dims", [256, 256])
+def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
+    hidden_dims = train_cfg.hidden_dims
     if hidden_dims is None:
         hidden_dims = [256, 256]
 
-    return FastPPOConfig(
-        rollout_steps=int(_cfg_get(rl_cfg, "rollout_slots", 2048)),
-        update_epochs=int(_cfg_get(rl_cfg, "update_epochs", 2)),
-        batch_size=int(_cfg_get(rl_cfg, "batch_size", 256)),
-        gamma=float(_cfg_get(rl_cfg, "gamma", 0.90)),
-        gae_lambda=float(_cfg_get(rl_cfg, "gae_lambda", 0.85)),
-        lr=float(_cfg_get(rl_cfg, "lr", 3e-5)),
-        max_grad_norm=float(_cfg_get(rl_cfg, "max_grad_norm", 0.5)),
-        clip_coef=float(_cfg_get(rl_cfg, "clip_coef", 0.12)),
-        value_coef=float(_cfg_get(rl_cfg, "value_coef", 0.05)),
-        entropy_coef=float(_cfg_get(rl_cfg, "entropy_coef", 1e-5)),
-        normalize_obs=bool(_cfg_get(rl_cfg, "obs_norm", True)),
-        normalize_adv=bool(_cfg_get(rl_cfg, "adv_norm", True)),
+    return AgentPPOConfig(
+        rollout_steps=int(train_cfg.rollout_slots),
+        update_epochs=int(train_cfg.update_epochs),
+        batch_size=int(train_cfg.batch_size),
+        gamma=float(train_cfg.gamma),
+        gae_lambda=float(train_cfg.gae_lambda),
+        lr=float(train_cfg.lr),
+        max_grad_norm=float(train_cfg.max_grad_norm),
+        clip_coef=float(train_cfg.clip_coef),
+        value_coef=float(train_cfg.value_coef),
+        entropy_coef=float(train_cfg.entropy_coef),
+        normalize_obs=bool(train_cfg.obs_norm),
+        normalize_adv=bool(train_cfg.adv_norm),
         hidden_dims=tuple(int(x) for x in hidden_dims),
-        init_log_std=float(_cfg_get(rl_cfg, "init_log_std", -1.5)),
-        device=str(_cfg_get(rl_cfg, "device", "cuda")),
+        init_log_std=float(train_cfg.init_log_std),
+        device=str(train_cfg.device),
     )
 
 
-def make_run_dir(rl_cfg: Any) -> Path:
-    """
-    실행 결과를 저장하는 directory를 생성함.
-    """
-    if args.run_name is None:
+def make_run_dir(train_cfg: FastTrainConfig, env_cfg: EnvConfig) -> Path:
+    if train_cfg.run_name is None:
         run_name = (
-            f"fast_ppo_{args.mode}"
-            f"_ep{int(args.num_episodes)}"
+            f"fast_ppo_{train_cfg.mode}"
+            f"_ep{int(train_cfg.num_episodes)}"
             f"_slowT{int(env_cfg.slow_T)}"
         )
     else:
-        run_name = str(args.run_name)
+        run_name = str(train_cfg.run_name)
 
-    run_dir = PROPOSED_ROOT / "fast" / run_name
+    output_root = Path(train_cfg.output_root)
+    if not output_root.is_absolute():
+        output_root = PROPOSED_ROOT / output_root
+
+    run_dir = output_root / run_name
+
     ensure_dir(run_dir)
     ensure_dir(run_dir / "checkpoints")
     ensure_dir(run_dir / "logs")
-    ensure_dir(run_dir / "figs")
+    ensure_dir(run_dir / "figures")
 
     return run_dir
 
 
-def sample_random_slow_action(env: Env, rng: np.random.Generator) -> Dict[str, Any]:
+def sample_random_slow_action(
+    env: Env,
+    rng: np.random.Generator,
+    train_cfg: FastTrainConfig,
+) -> Dict[str, Any]:
     """
     Fast-only PPO 학습용 random slow-timescale action 생성.
+    slow policy는 아직 학습하지 않고, PPO/config.py의 확률값으로 round마다 slow condition을 샘플링한다.
     """
+    if train_cfg.slow_decision_mode != "random":
+        raise ValueError("현재 fast-only 학습에서는 slow_decision_mode='random'만 지원합니다.")
+
     cfg = env.cfg
 
     m = int(cfg.num_rsu)
@@ -145,10 +148,9 @@ def sample_random_slow_action(env: Env, rng: np.random.Generator) -> Dict[str, A
             f"유효하지 않은 숫자입니다: num_rsu={m}, num_uav={u}, num_user={n}"
         )
 
-    # 고정 random 확률
-    rsu_user_prob = 0.7
-    uav_hire_prob = 0.5
-    uav_user_prob = 0.7
+    rsu_user_prob = float(train_cfg.random_rsu_user_prob)
+    uav_hire_prob = float(train_cfg.random_uav_hire_prob)
+    uav_user_prob = float(train_cfg.random_uav_user_prob)
 
     rsu_scheduling = np.zeros((m, n), dtype=np.int32)
     uav_hiring = np.zeros(u, dtype=np.int32)
@@ -158,8 +160,7 @@ def sample_random_slow_action(env: Env, rng: np.random.Generator) -> Dict[str, A
         if rng.random() < rsu_user_prob:
             rsu_idx = int(rng.integers(low=0, high=m))
             rsu_scheduling[rsu_idx, user_idx] = 1
-    
-    # RSU-USER
+
     rsu_served_user = (rsu_scheduling.sum(axis=0) > 0)
 
     requested_content = np.asarray(env.requested_content, dtype=np.int32)
@@ -177,42 +178,32 @@ def sample_random_slow_action(env: Env, rng: np.random.Generator) -> Dict[str, A
     uav_user_cap = int(getattr(cfg, "uav_user_cap", n))
     uav_user_cap = max(1, min(uav_user_cap, n))
 
-    # UAV / UAV-USER
     for uav_idx in range(u):
         if rng.random() >= uav_hire_prob:
             continue
 
-         # residual user 중심:
-        # RSU에 scheduling되지 않은 user만 UAV candidate로 둔다.
         residual_mask = ~rsu_served_user
-
-        # UAV는 하나의 content를 caching하고,
-        # 같은 content를 요청하는 user만 지원 가능하다고 둔다.
         cache_match_mask = requested_content == uav_cached_content[uav_idx]
 
         candidate_mask = residual_mask & cache_match_mask
         candidate_users = np.flatnonzero(candidate_mask)
 
-        # content/cache까지 맞추면 후보가 너무 적을 수 있으므로,
-        # 후보가 없으면 residual user 중에서라도 random candidate를 만든다.
+        # cache까지 맞는 후보가 없으면 residual user 중에서 fallback
         if candidate_users.size == 0:
             candidate_users = np.flatnonzero(residual_mask)
 
-        # 그래도 후보가 없으면 이 UAV는 고용하지 않는다.
         if candidate_users.size == 0:
             continue
 
         selected_mask = rng.random(candidate_users.size) < uav_user_prob
         selected_users = candidate_users[selected_mask]
 
-        # 확률 샘플링 결과가 비면 candidate 중 1명은 강제로 선택.
         if selected_users.size == 0:
             selected_users = np.asarray(
                 [int(rng.choice(candidate_users))],
                 dtype=np.int64,
             )
 
-        # UAV 1대당 candidate user 수 제한.
         if selected_users.size > uav_user_cap:
             selected_users = rng.choice(
                 selected_users,
@@ -223,7 +214,7 @@ def sample_random_slow_action(env: Env, rng: np.random.Generator) -> Dict[str, A
         uav_hiring[uav_idx] = 1
         uav_scheduling[uav_idx, np.asarray(selected_users, dtype=np.int64)] = 1
 
-    # scheduling 대상이 없는 UAV는 hiring 제거.
+    # scheduling 대상이 없는 UAV는 hiring 제거
     active_hire = (uav_scheduling.sum(axis=1) > 0).astype(np.int32)
     uav_hiring = uav_hiring * active_hire
     uav_scheduling = uav_scheduling * uav_hiring[:, None]
@@ -233,7 +224,6 @@ def sample_random_slow_action(env: Env, rng: np.random.Generator) -> Dict[str, A
         "uav_hiring": uav_hiring.astype(np.int32),
         "uav_scheduling": uav_scheduling.astype(np.int32),
     }
-
 
 
 def attach_existing_slow_context(env: Env, obs: Dict[str, Any]) -> Dict[str, Any]:
@@ -260,16 +250,13 @@ def attach_existing_slow_context(env: Env, obs: Dict[str, Any]) -> Dict[str, Any
 
 def save_configs(
     run_dir: Path,
-    args: argparse.Namespace,
+    train_cfg: FastTrainConfig,
     env_cfg: EnvConfig,
-    ppo_cfg: FastPPOConfig,
+    ppo_cfg: AgentPPOConfig,
     obs_dim: int,
     action_dim: int,
 ) -> None:
-    """
-    실행 설정 저장.
-    """
-    save_json(vars(args), run_dir / "args.json")
+    save_json(train_cfg.to_dict(), run_dir / "train_config.json")
     save_json(asdict(env_cfg), run_dir / "env_config.json")
     save_json(asdict(ppo_cfg), run_dir / "ppo_config.json")
     save_json(
@@ -281,27 +268,22 @@ def save_configs(
         },
         run_dir / "run_info.json",
     )
-
+    
 
 def reset_env(
     env: Env,
     slow_rng: np.random.Generator,
+    train_cfg: FastTrainConfig,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    env.reset() 결과를 Gymnasium/Gym 호환 형태로 정리.
-
-    fast-only PPO에서는 매 episode를 하나의 slow-timescale round로 보고,
-    reset 직후 random slow action을 무조건 생성해서 env에 주입한다.
-    """
     obs, info = split_env_reset(env.reset())
 
     slow_action = sample_random_slow_action(
         env=env,
         rng=slow_rng,
+        train_cfg=train_cfg,
     )
     env.apply_slow_action(slow_action)
 
-    # apply_slow_action 이후 slow context가 갱신되므로 fast obs를 다시 가져온다.
     obs = env.get_fast_obs()
     obs = attach_existing_slow_context(env, obs)
 
@@ -497,17 +479,23 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
         "stall_sum": stall_sum,
     }
 
+def train(train_cfg: FastTrainConfig) -> None:
+    set_seed(
+        int(train_cfg.seed),
+        deterministic=bool(train_cfg.deterministic_torch),
+    )
 
-def train(args: argparse.Namespace) -> None:
-    set_seed(int(args.seed), deterministic=bool(args.deterministic_torch))
+    env_cfg = build_env_config()
+    ppo_cfg = build_agent_ppo_config(train_cfg)
 
-    env_cfg = build_env_config(args)
-    ppo_cfg = build_ppo_config(args)
-
-    slow_rng = np.random.default_rng(int(args.seed) + 10007)
+    slow_rng = np.random.default_rng(int(train_cfg.seed) + 10007)
 
     env = Env(env_cfg)
-    obs, reset_info = reset_env(env, slow_rng=slow_rng)
+    obs, reset_info = reset_env(
+        env=env,
+        slow_rng=slow_rng,
+        train_cfg=train_cfg,
+    )
 
     obs_dim = infer_flat_dim(obs)
     agent = FastPPOAgent(
@@ -516,19 +504,20 @@ def train(args: argparse.Namespace) -> None:
         ppo_cfg=ppo_cfg,
     )
 
-    if args.resume:
-        if args.checkpoint is None:
-            raise ValueError("--resume 사용 시 --checkpoint가 필요합니다.")
+    if train_cfg.resume:
+        if train_cfg.checkpoint is None:
+            raise ValueError("resume=True 사용 시 checkpoint가 필요합니다.")
         agent.load(
-            path=args.checkpoint,
+            path=train_cfg.checkpoint,
             strict=True,
             load_optimizer=True,
         )
 
-    run_dir = make_run_dir(args, env_cfg)
+    run_dir = make_run_dir(train_cfg, env_cfg)
+
     save_configs(
         run_dir=run_dir,
-        args=args,
+        train_cfg=train_cfg,
         env_cfg=env_cfg,
         ppo_cfg=ppo_cfg,
         obs_dim=obs_dim,
@@ -557,8 +546,12 @@ def train(args: argparse.Namespace) -> None:
     last_obs = obs
     last_done = False
 
-    while episode_idx < int(args.num_episodes):
-        obs, reset_info = reset_env(env, slow_rng=slow_rng)
+    while episode_idx < int(train_cfg.num_episodes):
+        obs, reset_info = reset_env(
+            env=env,
+            slow_rng=slow_rng,
+            train_cfg=train_cfg,
+        )
 
         ep_reward = 0.0
         ep_delivery = 0.0
@@ -617,13 +610,14 @@ def train(args: argparse.Namespace) -> None:
                 update_logs = agent.update()
                 update_idx += 1
 
-                update_row = {
-                    "update": update_idx,
-                    "global_slot": global_slot,
-                    "episode": episode_idx + 1,
-                    **update_logs,
-                }
-                update_logger.write(update_row)
+                update_logger.write(
+                    {
+                        "update": update_idx,
+                        "global_slot": global_slot,
+                        "episode": episode_idx + 1,
+                        **update_logs,
+                    }
+                )
 
                 print(
                     "[UPDATE] "
@@ -644,23 +638,24 @@ def train(args: argparse.Namespace) -> None:
 
         episode_idx += 1
 
-        episode_row = {
-            "episode": episode_idx,
-            "global_slot": global_slot,
-            "episode_steps": ep_steps,
-            "episode_reward": ep_reward,
-            "episode_delivery": ep_delivery,
-            "episode_quality": ep_quality,
-            "episode_stall": ep_stall,
-            "episode_consumed_soc": ep_consumed_soc,
-            "episode_charged_soc": ep_charged_soc,
-            "episode_outage": ep_outage,
-        }
-        episode_logger.write(episode_row)
+        episode_logger.write(
+            {
+                "episode": episode_idx,
+                "global_slot": global_slot,
+                "episode_steps": ep_steps,
+                "episode_reward": ep_reward,
+                "episode_delivery": ep_delivery,
+                "episode_quality": ep_quality,
+                "episode_stall": ep_stall,
+                "episode_consumed_soc": ep_consumed_soc,
+                "episode_charged_soc": ep_charged_soc,
+                "episode_outage": ep_outage,
+            }
+        )
 
         print(
             "[EPISODE] "
-            f"ep={episode_idx}/{args.num_episodes} "
+            f"ep={episode_idx}/{train_cfg.num_episodes} "
             f"steps={ep_steps} "
             f"reward={ep_reward:.4f} "
             f"delivery={ep_delivery:.4f} "
@@ -670,21 +665,18 @@ def train(args: argparse.Namespace) -> None:
         )
 
         if (
-            int(args.plot_every_episodes) > 0
-            and episode_idx % int(args.plot_every_episodes) == 0
+            int(train_cfg.plot_every_episodes) > 0
+            and episode_idx % int(train_cfg.plot_every_episodes) == 0
         ):
             save_training_plots(
                 run_dir=run_dir,
-                smooth_window=int(args.plot_smooth_window),
+                smooth_window=int(train_cfg.plot_smooth_window),
             )
-            print(
-                f"[PLOT] saved figures to {run_dir / 'figures'}",
-                flush=True,
-            )
+            print(f"[PLOT] saved figures to {run_dir / 'figures'}", flush=True)
 
         if (
-            int(args.save_every_episodes) > 0
-            and episode_idx % int(args.save_every_episodes) == 0
+            int(train_cfg.save_every_episodes) > 0
+            and episode_idx % int(train_cfg.save_every_episodes) == 0
         ):
             ckpt_path = run_dir / "checkpoints" / f"fast_ppo_ep{episode_idx}.pt"
             agent.save(
@@ -694,6 +686,7 @@ def train(args: argparse.Namespace) -> None:
                     "global_slot": global_slot,
                     "update_idx": update_idx,
                     "env_config": asdict(env_cfg),
+                    "train_config": train_cfg.to_dict(),
                     "ppo_config": asdict(ppo_cfg),
                 },
             )
@@ -733,6 +726,7 @@ def train(args: argparse.Namespace) -> None:
             "global_slot": global_slot,
             "update_idx": update_idx,
             "env_config": asdict(env_cfg),
+            "train_config": train_cfg.to_dict(),
             "ppo_config": asdict(ppo_cfg),
         },
     )
@@ -750,7 +744,7 @@ def train(args: argparse.Namespace) -> None:
 
     save_training_plots(
         run_dir=run_dir,
-        smooth_window=int(args.plot_smooth_window),
+        smooth_window=int(train_cfg.plot_smooth_window),
     )
 
     print("=" * 100, flush=True)
@@ -759,16 +753,20 @@ def train(args: argparse.Namespace) -> None:
     print("=" * 100, flush=True)
 
 
-def evaluate(args: argparse.Namespace) -> None:
-    set_seed(int(args.seed), deterministic=True)
+def evaluate(train_cfg: FastTrainConfig) -> None:
+    set_seed(int(train_cfg.seed), deterministic=True)
 
-    env_cfg = build_env_config(args)
-    ppo_cfg = build_ppo_config(args)
+    env_cfg = build_env_config()
+    ppo_cfg = build_agent_ppo_config(train_cfg)
 
-    slow_rng = np.random.default_rng(int(args.seed) + 20011)
+    slow_rng = np.random.default_rng(int(train_cfg.seed) + 20011)
 
     env = Env(env_cfg)
-    obs, reset_info = reset_env(env, slow_rng=slow_rng)
+    obs, reset_info = reset_env(
+        env=env,
+        slow_rng=slow_rng,
+        train_cfg=train_cfg,
+    )
 
     obs_dim = infer_flat_dim(obs)
     agent = FastPPOAgent(
@@ -777,17 +775,18 @@ def evaluate(args: argparse.Namespace) -> None:
         ppo_cfg=ppo_cfg,
     )
 
-    if args.checkpoint is not None:
+    if train_cfg.checkpoint is not None:
         agent.load(
-            path=args.checkpoint,
+            path=train_cfg.checkpoint,
             strict=True,
             load_optimizer=False,
         )
 
-    run_dir = make_run_dir(args, env_cfg)
+    run_dir = make_run_dir(train_cfg, env_cfg)
+
     save_configs(
         run_dir=run_dir,
-        args=args,
+        train_cfg=train_cfg,
         env_cfg=env_cfg,
         ppo_cfg=ppo_cfg,
         obs_dim=obs_dim,
@@ -804,7 +803,7 @@ def evaluate(args: argparse.Namespace) -> None:
     print(f"obs_dim       : {obs_dim}", flush=True)
     print(f"action_dim    : {agent.action_dim}", flush=True)
     print(f"slow_T        : {env_cfg.slow_T}", flush=True)
-    print(f"checkpoint    : {args.checkpoint}", flush=True)
+    print(f"checkpoint    : {train_cfg.checkpoint}", flush=True)
     print(f"reset_info    : {reset_info}", flush=True)
     print("=" * 100, flush=True)
 
@@ -813,8 +812,12 @@ def evaluate(args: argparse.Namespace) -> None:
     qualities = []
     stalls = []
 
-    for episode_idx in range(1, int(args.eval_episodes) + 1):
-        obs, reset_info = reset_env(env, slow_rng=slow_rng)
+    for episode_idx in range(1, int(train_cfg.eval_episodes) + 1):
+        obs, reset_info = reset_env(
+            env=env,
+            slow_rng=slow_rng,
+            train_cfg=train_cfg,
+        )
 
         ep_reward = 0.0
         ep_delivery = 0.0
@@ -881,7 +884,7 @@ def evaluate(args: argparse.Namespace) -> None:
 
         print(
             "[EVAL] "
-            f"ep={episode_idx}/{args.eval_episodes} "
+            f"ep={episode_idx}/{train_cfg.eval_episodes} "
             f"steps={ep_steps} "
             f"reward={ep_reward:.4f} "
             f"delivery={ep_delivery:.4f} "
@@ -896,7 +899,7 @@ def evaluate(args: argparse.Namespace) -> None:
         "delivery_mean": float(np.mean(deliveries)) if deliveries else 0.0,
         "quality_mean": float(np.mean(qualities)) if qualities else 0.0,
         "stall_mean": float(np.mean(stalls)) if stalls else 0.0,
-        "checkpoint": args.checkpoint,
+        "checkpoint": train_cfg.checkpoint,
         "run_dir": str(run_dir),
     }
 
@@ -915,25 +918,14 @@ def evaluate(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    args = parse_args()
+    train_cfg = get_fast_ppo_config()
 
-    if int(args.num_episodes) <= 0:
-        raise ValueError("--num-episodes는 양수여야 합니다.")
-    if int(args.eval_episodes) <= 0:
-        raise ValueError("--eval-episodes는 양수여야 합니다.")
-    if int(args.rollout_slots) <= 0:
-        raise ValueError("--rollout-slots는 양수여야 합니다.")
-    if int(args.batch_size) <= 0:
-        raise ValueError("--batch-size는 양수여야 합니다.")
-    if int(args.update_epochs) <= 0:
-        raise ValueError("--update-epochs는 양수여야 합니다.")
-
-    if args.mode == "train":
-        train(args)
-    elif args.mode == "eval":
-        evaluate(args)
+    if train_cfg.mode == "train":
+        train(train_cfg)
+    elif train_cfg.mode == "eval":
+        evaluate(train_cfg)
     else:
-        raise ValueError(f"지원하지 않는 mode입니다: {args.mode}")
+        raise ValueError(f"지원하지 않는 mode입니다: {train_cfg.mode}")
 
 
 if __name__ == "__main__":
