@@ -6,22 +6,31 @@ class ChannelConfig:
     """
     Channel 및 PHY parameter config 클래스
     """
-    distance: float = 20.0 # random (범위: 5 ~ 25 - uniform)
+    distance: float = 15.0 # random (범위: 5 ~ 25 - uniform)
+
+    # sampling
+    distance_min: float = 5.0
+    distance_max: float = 25.0
+    distance_sampling: str = "uniform"
+
+    # common params
+    min_distance: float = 1.0
+    seed: int = 42
     bandwidth: float = 1e6
 
+    # RSU Channel Params
     gamma_db: float = 35.0
     inr_db: float = 5.0
     sigma_db: float = 4.0
     mu_db: float = 0.0
-
     beta: float = 2.0
-    min_distance: float = 1.0
-    seed: int = 42
-
-    altitude: float = 100.0 # 감소
-    beta_zero: float = 1e-3
+    
+    # UAV LoS Channel Params
+    altitude: float = 20.0 # 100m에서 20m로 감소
+    beta_zero: float = 2e-9
     noise_power: float = 1e-13
     capacity_gap: float = 1.0
+
 
     def __post_init__(self) -> None:
         self.distance = float(self.distance)
@@ -60,6 +69,7 @@ class ChannelConfig:
                 f"capacity_gap은 양수 값을 가져야 합니다. 현재 값: {self.capacity_gap}"
             )
 
+
 @dataclass
 class BatteryConfig:
     # SoC Actual queue
@@ -72,7 +82,7 @@ class BatteryConfig:
     p_0: float = 580.65 # blade profile power [W]
     p_i: float = 790.67 # induced power [W]
 
-    tx_energy_coeff: float = 1.0
+    tx_energy_coeff: float = 100.0
 
     # 충전 모델
     charging_rate: float = 1500.0 # Charging power [W]
@@ -128,9 +138,9 @@ class BatteryConfig:
 @dataclass
 class EnvConfig:
     # 시스템 설정
-    num_user: int = 100
-    num_rsu: int = 63
-    num_uav: int = 63
+    num_user: int = 20
+    num_rsu: int = 10
+    num_uav: int = 10
     uav_user_cap: int = 2
     slow_T: int = 25
     N0: int = 3

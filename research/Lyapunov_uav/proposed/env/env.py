@@ -116,6 +116,47 @@ class Env:
             dtype=np.float32,
         )
     
+    def _sample_distance_matrix(
+        self,
+        channel_cfg,
+        shape: tuple[int, int],
+    ) -> np.ndarray:
+        """
+        slot-level link distance state 샘플링.
+
+        distance_sampling="uniform"이면 U(distance_min, distance_max)에서 샘플링.
+        distance_sampling="fixed"이면 fallback distance를 사용.
+        """
+        sampling = str(getattr(channel_cfg, "distance_sampling", "fixed")).lower().strip()
+
+        if sampling == "uniform":
+            low = float(getattr(channel_cfg, "distance_min", channel_cfg.distance))
+            high = float(getattr(channel_cfg, "distance_max", channel_cfg.distance))
+            min_distance = float(getattr(channel_cfg, "min_distance", 1.0))
+
+            sampled = self.rng.uniform(low=low, high=high, size=shape)
+            sampled = np.maximum(sampled, min_distance)
+            return sampled.astype(np.float32)
+
+        return np.full(
+            shape,
+            max(float(channel_cfg.distance), float(channel_cfg.min_distance)),
+            dtype=np.float32,
+        )
+
+    def _refresh_link_distances(self) -> None:
+        """
+        다음 slot에서 관측/사용할 RSU-user, UAV-user distance state 갱신.
+        """
+        self.rsu_user_distance = self._sample_distance_matrix(
+            self.cfg.rsu_channel,
+            (self.num_rsu, self.num_user),
+        )
+        self.uav_user_distance = self._sample_distance_matrix(
+            self.cfg.uav_channel,
+            (self.num_uav, self.num_user),
+        )
+
     def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
         에피소드 초기화 수행 함수로
@@ -142,6 +183,9 @@ class Env:
         # content 초기화
         self.requested_content = self._sample_requested_content()
         self.uav_cached_content = self._sample_uav_cached_content()
+
+        # slot 0에서 policy가 관측할 link distance state
+        self._refresh_link_distances()
 
         # battery 초기화
         for battery in self.batteries:
@@ -687,6 +731,11 @@ class Env:
         """
         fast_act = parse_fast_action(action, self.cfg)
 
+        # distance는 action이 아니라 현재 slot state이므로,
+        # action parser가 만든/default distance를 무시하고 env state를 강제로 사용한다.
+        fast_act.rsu_user_distance = self.rsu_user_distance.copy()
+        fast_act.uav_user_distance = self.uav_user_distance.copy()
+
         fast_act.uav_charge = self._rule_based_uav_charge()
         self._clear_charging_service_actions(fast_act)
 
@@ -898,6 +947,9 @@ class Env:
             self.round_idx = int(next_round_idx)
             self.round_slot = int(next_round_slot)
 
+        # 다음 slot observation에 들어갈 link distance state를 미리 갱신한다.
+        self._refresh_link_distances()
+        
         obs = self.get_fast_obs()
 
         return obs, float(reward), terminated, truncated, info
