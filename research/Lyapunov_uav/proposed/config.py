@@ -155,6 +155,7 @@ class EnvConfig:
     uav_user_cap: int = 2
     
     slow_T: int = 3600
+    episode_slots = 24 * 3600
     N0: int = 3
 
     # 비디오 및 캐싱
@@ -223,6 +224,12 @@ class EnvConfig:
         10.658e3,
         26.496e3,
     )
+
+    # scaled Lyapunov queue coefficients
+    # alpha_Z = 1.0 설정
+    # alpha_B = 30.0 설정
+    alpha_Z: float = 1.0
+    alpha_B: float = 30.0
 
     # slow-timescale decision에 반영
     # 추후 scale에 따라 수정 필요
@@ -294,6 +301,11 @@ class EnvConfig:
             raise ValueError("quality_weights는 모두 0 이상이어야 합니다.")
         if any(float(v) <= 0.0 for v in self.chunk_size_bits):
             raise ValueError("chunk_size_bits는 모두 양수여야 합니다.")
+        
+        if self.alpha_Z <= 0.0:
+            raise ValueError("alpha_Z는 양수여야 합니다.")
+        if self.alpha_B <= 0.0:
+            raise ValueError("alpha_B는 양수여야 합니다.")
 
         if self.uav_hiring_cost < 0.0:
             raise ValueError("uav_hiring_cost는 0 이상이어야 합니다.")
@@ -304,6 +316,8 @@ class EnvConfig:
 
     def reward_coefficients(self) -> Dict[str, float]:
         return {
+            "alpha_Z": float(self.alpha_Z),
+            "alpha_B": float(self.alpha_B),
             "V": float(self.V),
             "hire_weight": float(self.hire_weight),
         }

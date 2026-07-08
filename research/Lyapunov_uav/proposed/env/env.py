@@ -23,7 +23,7 @@ from .battery.queue_model import check_outage, update_soc_virtual_q
 
 class Env:
     """
-    Modified Joint Lyapunov Optimization Scenario용 전체 환경 클래스
+    Two-Timescale RSU-UAV-user video delivery environment.
 
     Slow-timescale (round level):
         1) RSU scheduling y_mn(r)
@@ -104,22 +104,6 @@ class Env:
         self.round_battery_consume_sum = 0.0
         self.round_battery_charge_sum = 0.0
     
-    def _hire_cost(self) -> np.ndarray:
-        """
-        UAV 1대 고용에 따라 발생하는 비용을 array shape으로 반환해 주는 함수
-        """
-        value = getattr(self.cfg, "uav_hiring_cost", None)
-        if value is None:
-            return AttributeError("config.py 내 EnvConfig class에 uav_hiring_cost 변수가 필요합니다.")
-        
-        arr = np.asarray(value, dtype=np.float32)
-        if arr.ndim == 0:
-            return np.full(self.num_uav, float(arr), dtype=np.float32)
-        if arr.shape != (self.num_uav,):
-            raise ValueError(
-                f"uav_hiring_cost 변수는 ({self.num_uav},) shape을 가져야 합니다. 현재: {arr.shape}"
-            )
-        return arr.astype(np.float32)
 
     @property
     def E(self) -> np.ndarray:
@@ -145,6 +129,23 @@ class Env:
             0.0,
             float(self.cfg.max_queue),
         ).astype(np.float32)
+    
+    def _hire_cost(self) -> np.ndarray:
+        """
+        UAV 1대 고용에 따라 발생하는 비용을 array shape으로 반환해 주는 함수
+        """
+        value = getattr(self.cfg, "uav_hiring_cost", None)
+        if value is None:
+            return AttributeError("config.py 내 EnvConfig class에 uav_hiring_cost 변수가 필요합니다.")
+        
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.ndim == 0:
+            return np.full(self.num_uav, float(arr), dtype=np.float32)
+        if arr.shape != (self.num_uav,):
+            raise ValueError(
+                f"uav_hiring_cost 변수는 ({self.num_uav},) shape을 가져야 합니다. 현재: {arr.shape}"
+            )
+        return arr.astype(np.float32)
     
     def _sample_requested_content(self) -> np.ndarray:
         """
@@ -245,7 +246,7 @@ class Env:
         FSMC에 따른 user 위치 영역을 업데이트하는 함수.
         다음과 같은 동작 수행.
         
-            1) 매 slot마다 각 user는 move_prob 확률로 왼쪽 region으로 이동.
+            1) 매 slot마다 각 user는 move_prob 확률로 왼쪽 region으로 이동한다.
             2) region 0에서 user 이동이 발생하면 해당 user가 오른쪽 끝 region으로 재진입.
             3) 새로 진입한 user는 queue와 requested content를 새로 초기화.
         """
@@ -270,15 +271,15 @@ class Env:
                 entered_mask[n] = 1
         
         return {
-            "직전 user_region": prev_region.astype(np.int32),
-            "현 user_region": self.user_region.copy().astype(np.int32),
-            "이동 여부": move_mask.astype(np.int32),
-            "전체 이동 여부": entered_mask.astype(np.int32),
+            "prev_user_region": prev_region.astype(np.int32),
+            "next_user_region": self.user_region.copy().astype(np.int32),
+            "move_mask": move_mask.astype(np.int32),
+            "entered_mask": entered_mask.astype(np.int32),
         }
     
     def _region_mask_rsu(self) -> np.ndarray:
         """
-        RSU m이 user n을 같은 coverage region에서만 서비스하도록 하는 mask.
+        RSU m이 user n을 같은 coverage region에서만 서비스하도록 하는 함수
         """
         rsu_idx = np.arange(self.num_rsu, dtype=np.int32)[:, None]
         user_region = self.user_region[None, :]
@@ -286,12 +287,96 @@ class Env:
 
     def _region_mask_uav(self) -> np.ndarray:
         """
-        UAV u가 해당 coverage region user만 서비스하도록 하는 mask.
+        UAV u가 해당 coverage region user만 서비스하도록 하는 함수
         현재 num_uav == num_rsu이므로 uav index를 region index로 사용한다.
         """
         uav_idx = np.arange(self.num_uav, dtype=np.int32)[:, None]
         user_region = self.user_region[None, :]
         return (uav_idx == user_region).astype(np.int32)
+    
+    def _get_effective_rsu_connection_matrix(self) -> np.ndarray:
+        """
+        현재 region constraint가 반영된 RSU-user connection matrix.
+        """
+        return (self.rsu_scheduling * self._region_mask_rsu()).astype(np.int32)
+
+    def _get_effective_uav_connection_matrix(self) -> np.ndarray:
+        """
+        현재 region constraint 및 UAV hiring이 반영된 UAV-user connection matrix.
+        """
+        return (
+            self.uav_scheduling
+            * self.uav_hiring[:, None]
+            * self._region_mask_uav()
+        ).astype(np.int32)
+
+    def _get_user_node_connection_state(self) -> Dict[str, np.ndarray]:
+        """
+        fast-timescale policy에 제공할 user별 node connection state를 만든다.
+
+        반환값:
+            rsu_connection:
+                shape = (M, N)
+                rsu_connection[m, n] = 1이면 user n이 RSU m과 연결됨.
+
+            uav_connection:
+                shape = (U, N)
+                uav_connection[u, n] = 1이면 user n이 UAV u와 연결됨.
+
+            connected_rsu:
+                shape = (N,)
+                user n이 연결된 RSU index. 없으면 -1.
+
+            connected_uav:
+                shape = (N,)
+                user n이 연결된 UAV index. 없으면 -1.
+
+            connection_type:
+                shape = (N,)
+                0 = no connection
+                1 = RSU only
+                2 = UAV only
+                3 = both RSU and UAV candidate connection
+
+        주의:
+            현재 slow action validator가 user별 단일 연결을 강제하지 않을 수 있으므로,
+            matrix 형태를 함께 제공한다. connected_rsu/connected_uav는 첫 번째 연결 index만 제공한다.
+        """
+        rsu_connection = self._get_effective_rsu_connection_matrix()
+        uav_connection = self._get_effective_uav_connection_matrix()
+
+        connected_rsu = np.full(self.num_user, -1, dtype=np.int32)
+        connected_uav = np.full(self.num_user, -1, dtype=np.int32)
+        connection_type = np.zeros(self.num_user, dtype=np.int32)
+
+        for n in range(self.num_user):
+            rsu_candidates = np.flatnonzero(rsu_connection[:, n] > 0)
+            uav_candidates = np.flatnonzero(uav_connection[:, n] > 0)
+
+            has_rsu = len(rsu_candidates) > 0
+            has_uav = len(uav_candidates) > 0
+
+            if has_rsu:
+                connected_rsu[n] = int(rsu_candidates[0])
+            if has_uav:
+                connected_uav[n] = int(uav_candidates[0])
+
+            if has_rsu and has_uav:
+                connection_type[n] = 3
+            elif has_rsu:
+                connection_type[n] = 1
+            elif has_uav:
+                connection_type[n] = 2
+            else:
+                connection_type[n] = 0
+
+        return {
+            "rsu_connection": rsu_connection.astype(np.int32),
+            "uav_connection": uav_connection.astype(np.int32),
+            "connected_rsu": connected_rsu.astype(np.int32),
+            "connected_uav": connected_uav.astype(np.int32),
+            "connection_type": connection_type.astype(np.int32),
+        }
 
     def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
@@ -393,6 +478,7 @@ class Env:
         for uav_idx in range(self.num_uav):
             if int(fast_act.uav_charge[uav_idx]) != 1:
                 continue
+
             fast_act.uav_chunks[uav_idx, :] = 0
             fast_act.uav_layers[uav_idx, :] = 0
             fast_act.uav_power[uav_idx, :] = 0.0
@@ -433,10 +519,10 @@ class Env:
         slow-timescale decision과 현재 region constraint를 반영하여
         실제 실행 가능한 fast action으로 projection하는 함수.
         """
-        rsu_region_mask = self._region_mask_rsu()
-        uav_region_mask = self._region_mask_uav()
+        rsu_connection = self._get_effective_rsu_connection_matrix()
+        uav_connection = self._get_effective_uav_connection_matrix()
 
-        residual_users = (self.uav_scheduling.sum(axis=0) > 0).astype(np.int32)
+        residual_users = (uav_connection.sum(axis=0) > 0).astype(np.int32)
 
         effective_rsu_chunks = fast_act.rsu_chunks.copy()
         effective_rsu_layers = fast_act.rsu_layers.copy()
@@ -446,8 +532,8 @@ class Env:
         effective_uav_power = fast_act.uav_power.copy()
 
         # RSU scheduling + region constraint
-        effective_rsu_chunks = effective_rsu_chunks * self.rsu_scheduling * rsu_region_mask
-        effective_rsu_layers = effective_rsu_layers * self.rsu_scheduling * rsu_region_mask
+        effective_rsu_chunks = effective_rsu_chunks * rsu_connection
+        effective_rsu_layers = effective_rsu_layers * rsu_connection
 
         # UAV hiring off이면 service 제거
         inactive_uav_mask = self.uav_hiring <= 0
@@ -458,21 +544,18 @@ class Env:
         # UAV scheduling + residual + region constraint
         effective_uav_chunks = (
             effective_uav_chunks
-            * self.uav_scheduling
+            * uav_connection
             * residual_users[None, :]
-            * uav_region_mask
         )
         effective_uav_layers = (
             effective_uav_layers
-            * self.uav_scheduling
+            * uav_connection
             * residual_users[None, :]
-            * uav_region_mask
         )
         effective_uav_power = (
             effective_uav_power
-            * self.uav_scheduling.astype(np.float32)
+            * uav_connection.astype(np.float32)
             * residual_users[None, :].astype(np.float32)
-            * uav_region_mask.astype(np.float32)
         )
 
         return FastAction(
@@ -567,15 +650,15 @@ class Env:
         battery_step_info: list[Dict[str, Any]],
     ) -> Tuple[float, Dict[str, Any]]:
         """
-        Fast-timescale DPP reward 계산을 수행하는 함수.
+        Scaled Fast-timescale DPP reward 계산을 수행하는 함수.
 
         다음과 같은 산식을 가짐:
 
             R_L(t)
-            = sum_n Z_n(t) d_n(t)
-              - sum_u B_u(t) e_u(t)
-              + sum_u B_u(t) e_c(t)
-              + V sum_n q_n(t)
+            = alpha_Z * sum_n Z_n(t) d_n(t)
+              - alpha_B * sum_u B_u(t) e_u(t)
+              + alpha_B * sum_u B_u(t) e_c(t)
+              + V * sum_n q_n(t)
         """
         prev_Q_arr = np.asarray(prev_Q, dtype=np.float32)
         next_Q_arr = np.asarray(next_Q, dtype=np.float32)
@@ -583,8 +666,8 @@ class Env:
         next_Z_arr = np.asarray(next_Z, dtype=np.float32)
         prev_E_arr = np.asarray(prev_E, dtype=np.float32)
         next_E_arr = np.asarray(next_E, dtype=np.float32)
-        prev_Y_arr = np.asarray(prev_Y, dtype=np.float32)
-        next_Y_arr = np.asarray(next_Y, dtype=np.float32)
+        prev_B_arr = np.asarray(prev_Y, dtype=np.float32)
+        next_B_arr = np.asarray(next_Y, dtype=np.float32)
 
         delivered_arr = np.asarray(delivered_total_per_user, dtype=np.float32)
         quality_arr = np.asarray(quality_total_per_user, dtype=np.float32)
@@ -603,12 +686,20 @@ class Env:
             ],
             dtype=np.float32,
         )
+
+        alpha_Z = float(getattr(self.cfg, "alpha_Z", 1.0))
+        alpha_B = float(getattr(self.cfg, "alpha_B", 30.0))
         V = float(getattr(self.cfg, "V", 1.0))
 
-        video_delivery_term = float(np.sum(prev_Z_arr * delivered_arr))
-        battery_consume_term = -float(np.sum(prev_Y_arr * consumed_soc_arr))
-        battery_charge_term = float(np.sum(prev_Y_arr * charged_soc_arr))
-        quality_term = V * float(np.sum(quality_arr))
+        raw_video_delivery_term = float(np.sum(prev_Z_arr * delivered_arr))
+        raw_battery_consume_term = -float(np.sum(prev_B_arr * consumed_soc_arr))
+        raw_battery_charge_term = float(np.sum(prev_B_arr * charged_soc_arr))
+        raw_quality_term = float(np.sum(quality_arr))
+
+        video_delivery_term = alpha_Z * raw_video_delivery_term
+        battery_consume_term = alpha_B * raw_battery_consume_term
+        battery_charge_term = alpha_B * raw_battery_charge_term
+        quality_term = V * raw_quality_term
 
         fast_reward = (
             video_delivery_term
@@ -621,7 +712,11 @@ class Env:
             "reward_coefficients": (
                 self.cfg.reward_coefficients()
                 if hasattr(self.cfg, "reward_coefficients")
-                else {"V": V}
+                else {
+                    "alpha_Z": alpha_Z,
+                    "alpha_B": alpha_B,
+                    "V": V,
+                }
             ),
 
             "prev_Q": prev_Q_arr.copy(),
@@ -631,14 +726,19 @@ class Env:
 
             "prev_E": prev_E_arr.copy(),
             "next_E": next_E_arr.copy(),
-            "prev_Y": prev_Y_arr.copy(),
-            "next_Y": next_Y_arr.copy(),
+            "prev_B": prev_B_arr.copy(),
+            "next_B": next_B_arr.copy(),
 
             "delivered_total_per_user": delivered_arr.copy(),
             "quality_total_per_user": quality_arr.copy(),
 
             "consumed_soc_per_uav": consumed_soc_arr.copy(),
             "charged_soc_per_uav": charged_soc_arr.copy(),
+
+            "raw_video_delivery_term": raw_video_delivery_term,
+            "raw_battery_consume_term": raw_battery_consume_term,
+            "raw_battery_charge_term": raw_battery_charge_term,
+            "raw_quality_term": raw_quality_term,
 
             "video_delivery_term": video_delivery_term,
             "battery_consume_term": battery_consume_term,
@@ -792,10 +892,19 @@ class Env:
         """
         fast-timescale 상태값을 반환하는 함수.
         """
+        connection_state = self._get_user_node_connection_state()
+
         return {
             "Z": self.Z.copy(),
             "B": self.Y.copy(),
             "user_region": self.user_region.copy(),
+
+            # user가 어떤 node와 연결돼 있는지 나타내는 fast policy state
+            "connection_type": connection_state["connection_type"].copy(),
+            "connected_rsu": connection_state["connected_rsu"].copy(),
+            "connected_uav": connection_state["connected_uav"].copy(),
+            "rsu_connection": connection_state["rsu_connection"].copy(),
+            "uav_connection": connection_state["uav_connection"].copy(),
         }
 
     def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
@@ -823,9 +932,10 @@ class Env:
         prev_round_slot = int(self.round_slot)
 
         prev_user_region = self.user_region.copy()
+        prev_connection_state = self._get_user_node_connection_state()
 
         prev_E = self.E.copy()
-        prev_Y = self.Y.copy()
+        prev_B = self.Y.copy()
         prev_Q = self.queue.copy()
         prev_Z = self.Z.copy()
 
@@ -920,7 +1030,7 @@ class Env:
         next_t = int(self.t)
 
         terminated = False
-        truncated = False
+        truncated = bool(next_t >= int(self.cfg.episode_slots))
 
         reward, reward_components = self._compute_reward(
             prev_Q=prev_Q,
@@ -929,7 +1039,7 @@ class Env:
             next_Z=self.Z,
             prev_E=prev_E,
             next_E=self.E,
-            prev_Y=prev_Y,
+            prev_Y=prev_B,
             next_Y=self.Y,
             delivered_total_per_user=delivered_total_per_user,
             quality_total_per_user=quality_total_per_user,
@@ -938,6 +1048,7 @@ class Env:
             battery_step_info=battery_step_info,
             is_round_boundary=is_round_boundary,
         )
+
         # round state update
         if is_round_boundary:
             self._start_new_round()
@@ -947,6 +1058,8 @@ class Env:
 
         region_info = self._update_user_region()
         self._refresh_link_distances()
+
+        next_connection_state = self._get_user_node_connection_state()
 
         info: Dict[str, Any] = {
             # transition meta
@@ -969,6 +1082,10 @@ class Env:
             "residual_users": fast_act_eff.residual_users.copy(),
             "uav_charge_effective": fast_act_eff.uav_charge.copy(),
 
+            # connection state
+            "prev_connection_state": prev_connection_state,
+            "next_connection_state": next_connection_state,
+
             # mobility
             "prev_user_region": prev_user_region.copy(),
             "next_user_region": self.user_region.copy(),
@@ -986,7 +1103,9 @@ class Env:
             # battery transition
             "prev_E": prev_E.copy(),
             "next_E": self.E.copy(),
-            "prev_Y": prev_Y.copy(),
+            "prev_B": prev_B.copy(),
+            "next_B": self.Y.copy(),
+            "prev_Y": prev_B.copy(),
             "next_Y": self.Y.copy(),
             "outage": self.outage.copy(),
             "charging_state": self.charging_state.copy(),
