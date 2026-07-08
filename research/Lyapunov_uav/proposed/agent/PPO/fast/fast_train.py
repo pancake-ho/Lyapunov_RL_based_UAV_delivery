@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import sys
 import time
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -18,7 +18,7 @@ from env.env import Env
 
 from agent.PPO.config import FastTrainConfig, get_fast_ppo_config
 from agent.PPO.common import (
-    infer_flat_dim,
+    infer_fast_obs_dim,
     split_env_reset,
     split_env_step,
     set_seed,
@@ -26,10 +26,6 @@ from agent.PPO.common import (
 )
 from agent.PPO.common.utils import ScalarLogger, save_json
 from agent.PPO.fast.fast_agent import FastPPOAgent, FastPPOConfig as AgentPPOConfig
-
-
-def _cfg_get(cfg: Any, name: str, default: Any) -> Any:
-    return getattr(cfg, name, default)
 
 
 def _find_proposed_root(start: Optional[Path] = None) -> Path:
@@ -47,7 +43,7 @@ def _find_proposed_root(start: Optional[Path] = None) -> Path:
         cur = cur.parent
 
     for parent in [cur, *cur.parents]:
-        if (parent / "config.py").exists() and (parent / "env").exists() and (parent / "agent").exists():
+        if ((parent / "config.py").exists() and (parent / "env").exists() and (parent / "agent").exists()):
             return parent
 
     raise RuntimeError(
@@ -56,17 +52,9 @@ def _find_proposed_root(start: Optional[Path] = None) -> Path:
     )
 
 PROPOSED_ROOT = _find_proposed_root()
+
 if str(PROPOSED_ROOT) not in sys.path:
     sys.path.insert(0, str(PROPOSED_ROOT))
-
-
-def _to_dict(cfg: Any) -> Dict[str, Any]:
-    if hasattr(cfg, "to_dict") and callable(cfg.to_dict):
-        return dict(cfg.to_dict())
-    try:
-        return asdict(cfg)
-    except TypeError:
-        return dict(vars(cfg))
 
 
 def build_env_config() -> EnvConfig:
@@ -79,6 +67,7 @@ def build_env_config() -> EnvConfig:
 
 def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
     hidden_dims = train_cfg.hidden_dims
+
     if hidden_dims is None:
         hidden_dims = [256, 256]
 
@@ -86,17 +75,29 @@ def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
         rollout_steps=int(train_cfg.rollout_slots),
         update_epochs=int(train_cfg.update_epochs),
         batch_size=int(train_cfg.batch_size),
+
         gamma=float(train_cfg.gamma),
         gae_lambda=float(train_cfg.gae_lambda),
+
         lr=float(train_cfg.lr),
         max_grad_norm=float(train_cfg.max_grad_norm),
+
         clip_coef=float(train_cfg.clip_coef),
         value_coef=float(train_cfg.value_coef),
         entropy_coef=float(train_cfg.entropy_coef),
+
         normalize_obs=bool(train_cfg.obs_norm),
         normalize_adv=bool(train_cfg.adv_norm),
+
         hidden_dims=tuple(int(x) for x in hidden_dims),
         init_log_std=float(train_cfg.init_log_std),
+
+        use_value_huber_loss=bool(train_cfg.use_value_huber_loss),
+        use_value_clip=bool(train_cfg.use_value_clip),
+        value_clip_coef=float(train_cfg.value_clip_coef),
+
+        fail_on_nan=bool(train_cfg.fail_on_nan),
+
         device=str(train_cfg.device),
     )
 
@@ -112,6 +113,7 @@ def make_run_dir(train_cfg: FastTrainConfig, env_cfg: EnvConfig) -> Path:
         run_name = str(train_cfg.run_name)
 
     output_root = Path(train_cfg.output_root)
+
     if not output_root.is_absolute():
         output_root = PROPOSED_ROOT / output_root
 
@@ -147,6 +149,19 @@ def sample_random_slow_action(
         raise ValueError(
             f"유효하지 않은 숫자입니다: num_rsu={m}, num_uav={u}, num_user={n}"
         )
+    
+    if m != u:
+        raise ValueError(
+            "현재 fast-only random slow action은 num_rsu == num_uav 가정을 사용합니다. "
+            f"num_rsu={m}, num_uav={u}"
+        )
+
+    user_region = np.asarray(env.user_region, dtype=np.int32)
+
+    if user_region.shape != (n,):
+        raise ValueError(
+            f"user_region shape mismatch: expected {(n,)}, got {user_region.shape}"
+        )
 
     rsu_user_prob = float(train_cfg.random_rsu_user_prob)
     uav_hire_prob = float(train_cfg.random_uav_hire_prob)
@@ -156,10 +171,14 @@ def sample_random_slow_action(
     uav_hiring = np.zeros(u, dtype=np.int32)
     uav_scheduling = np.zeros((u, n), dtype=np.int32)
 
+    # 1) RSU scheduling: user의 현재 region RSU만 후보로 사용
     for user_idx in range(n):
+        region_idx = int(user_region[user_idx])
+        if region_idx < 0 or region_idx >= m:
+            continue
+
         if rng.random() < rsu_user_prob:
-            rsu_idx = int(rng.integers(low=0, high=m))
-            rsu_scheduling[rsu_idx, user_idx] = 1
+            rsu_scheduling[region_idx, user_idx] = 1
 
     rsu_served_user = (rsu_scheduling.sum(axis=0) > 0)
 
@@ -178,19 +197,21 @@ def sample_random_slow_action(
     uav_user_cap = int(getattr(cfg, "uav_user_cap", n))
     uav_user_cap = max(1, min(uav_user_cap, n))
 
+    # 2) UAV scheduling: UAV index == region index
     for uav_idx in range(u):
         if rng.random() >= uav_hire_prob:
             continue
 
+        same_region_mask = user_region == uav_idx
         residual_mask = ~rsu_served_user
         cache_match_mask = requested_content == uav_cached_content[uav_idx]
 
-        candidate_mask = residual_mask & cache_match_mask
+        candidate_mask = same_region_mask & residual_mask & cache_match_mask
         candidate_users = np.flatnonzero(candidate_mask)
 
-        # cache까지 맞는 후보가 없으면 residual user 중에서 fallback
+        # cache까지 맞는 후보가 없으면 같은 region residual user로 fallback
         if candidate_users.size == 0:
-            candidate_users = np.flatnonzero(residual_mask)
+            candidate_users = np.flatnonzero(same_region_mask & residual_mask)
 
         if candidate_users.size == 0:
             continue
@@ -214,7 +235,7 @@ def sample_random_slow_action(
         uav_hiring[uav_idx] = 1
         uav_scheduling[uav_idx, np.asarray(selected_users, dtype=np.int64)] = 1
 
-    # scheduling 대상이 없는 UAV는 hiring 제거
+    # scheduling 없는 UAV는 hiring 제거
     active_hire = (uav_scheduling.sum(axis=1) > 0).astype(np.int32)
     uav_hiring = uav_hiring * active_hire
     uav_scheduling = uav_scheduling * uav_hiring[:, None]
@@ -226,28 +247,6 @@ def sample_random_slow_action(
     }
 
 
-def attach_existing_slow_context(env: Env, obs: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    FastActionCodec이 obs에서 slow decision을 읽을 수 있도록,
-    env가 이미 들고 있는 slow-timescale context만 obs에 붙임.
-
-    여기서 slow action을 새로 만들지는 않음.
-    """
-    if not isinstance(obs, dict):
-        raise TypeError(f"obs must be dict, got {type(obs)}")
-
-    merged = dict(obs)
-
-    if hasattr(env, "rsu_scheduling"):
-        merged["rsu_scheduling"] = np.asarray(env.rsu_scheduling, dtype=np.int32).copy()
-    if hasattr(env, "uav_hiring"):
-        merged["uav_hiring"] = np.asarray(env.uav_hiring, dtype=np.int32).copy()
-    if hasattr(env, "uav_scheduling"):
-        merged["uav_scheduling"] = np.asarray(env.uav_scheduling, dtype=np.int32).copy()
-
-    return merged
-
-
 def save_configs(
     run_dir: Path,
     train_cfg: FastTrainConfig,
@@ -257,7 +256,7 @@ def save_configs(
     action_dim: int,
 ) -> None:
     save_json(train_cfg.to_dict(), run_dir / "train_config.json")
-    save_json(asdict(env_cfg), run_dir / "env_config.json")
+    save_json(env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg), run_dir / "env_config.json")
     save_json(asdict(ppo_cfg), run_dir / "ppo_config.json")
     save_json(
         {
@@ -268,13 +267,25 @@ def save_configs(
         },
         run_dir / "run_info.json",
     )
-    
+
 
 def reset_env(
     env: Env,
     slow_rng: np.random.Generator,
     train_cfg: FastTrainConfig,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    fast-only episode reset.
+
+    절차:
+        1) env.reset()
+        2) 현재 user_region/content 기준 random slow action 생성
+        3) env.apply_slow_action()
+        4) env.get_fast_obs() 반환
+
+    반환 obs에는 raw slow scheduling matrix를 붙이지 않는다.
+    get_fast_obs()가 이미 connection state를 제공하기 때문이다.
+    """
     obs, info = split_env_reset(env.reset())
 
     slow_action = sample_random_slow_action(
@@ -282,10 +293,10 @@ def reset_env(
         rng=slow_rng,
         train_cfg=train_cfg,
     )
+
     env.apply_slow_action(slow_action)
 
     obs = env.get_fast_obs()
-    obs = attach_existing_slow_context(env, obs)
 
     info = dict(info)
     info["random_slow_action"] = {
@@ -301,10 +312,6 @@ def reset_env(
 
 
 def _read_scalar_csv(csv_path: Path) -> Dict[str, list[float]]:
-    """
-    ScalarLogger가 저장한 csv를 읽어서 column별 float list로 반환.
-    숫자로 변환 안 되는 값은 건너뜀.
-    """
     data: Dict[str, list[float]] = {}
 
     if not csv_path.exists():
@@ -312,6 +319,7 @@ def _read_scalar_csv(csv_path: Path) -> Dict[str, list[float]]:
 
     with csv_path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+
         if reader.fieldnames is None:
             return data
 
@@ -331,11 +339,8 @@ def _read_scalar_csv(csv_path: Path) -> Dict[str, list[float]]:
 
 
 def _moving_average(values: list[float], window: int) -> np.ndarray:
-    """
-    reward curve smoothing용 moving average.
-    window <= 1이면 원본 반환.
-    """
     arr = np.asarray(values, dtype=np.float32)
+
     if arr.size == 0:
         return arr
 
@@ -350,9 +355,6 @@ def save_training_plots(
     run_dir: Path,
     smooth_window: int = 20,
 ) -> None:
-    """
-    episodes.csv / updates.csv 기반으로 학습 그래프를 png로 저장.
-    """
     figures_dir = run_dir / "figures"
     ensure_dir(figures_dir)
 
@@ -362,7 +364,6 @@ def save_training_plots(
     ep_data = _read_scalar_csv(episodes_csv)
     update_data = _read_scalar_csv(updates_csv)
 
-    # 1) Episode reward
     if "episode" in ep_data and "episode_reward" in ep_data:
         x = np.asarray(ep_data["episode"], dtype=np.float32)
         y = np.asarray(ep_data["episode_reward"], dtype=np.float32)
@@ -384,7 +385,6 @@ def save_training_plots(
         plt.savefig(figures_dir / "episode_reward.png", dpi=200)
         plt.close()
 
-    # 2) Episode components
     component_keys = [
         "episode_delivery",
         "episode_quality",
@@ -399,12 +399,16 @@ def save_training_plots(
 
         plt.figure()
         plotted = False
+
         for key in component_keys:
             if key not in ep_data:
                 continue
+
             y = np.asarray(ep_data[key], dtype=np.float32)
+
             if y.size != x.size:
                 continue
+
             plt.plot(x, y, label=key)
             plotted = True
 
@@ -419,7 +423,6 @@ def save_training_plots(
 
         plt.close()
 
-    # 3) PPO update losses
     if "update" in update_data:
         x = np.asarray(update_data["update"], dtype=np.float32)
 
@@ -434,12 +437,16 @@ def save_training_plots(
 
         plt.figure()
         plotted = False
+
         for key in loss_keys:
             if key not in update_data:
                 continue
+
             y = np.asarray(update_data[key], dtype=np.float32)
+
             if y.size != x.size:
                 continue
+
             plt.plot(x, y, label=key)
             plotted = True
 
@@ -463,6 +470,7 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
     fast_components = reward_components.get("fast_reward_components", {})
 
     stall = info.get("stall", 0.0)
+
     try:
         stall_sum = float(np.sum(np.asarray(stall, dtype=np.float32)))
     except Exception:
@@ -479,6 +487,7 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
         "stall_sum": stall_sum,
     }
 
+
 def train(train_cfg: FastTrainConfig) -> None:
     set_seed(
         int(train_cfg.seed),
@@ -491,13 +500,15 @@ def train(train_cfg: FastTrainConfig) -> None:
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 10007)
 
     env = Env(env_cfg)
+
     obs, reset_info = reset_env(
         env=env,
         slow_rng=slow_rng,
         train_cfg=train_cfg,
     )
 
-    obs_dim = infer_flat_dim(obs)
+    obs_dim = infer_fast_obs_dim(obs)
+
     agent = FastPPOAgent(
         env_cfg=env_cfg,
         obs_dim=obs_dim,
@@ -507,6 +518,7 @@ def train(train_cfg: FastTrainConfig) -> None:
     if train_cfg.resume:
         if train_cfg.checkpoint is None:
             raise ValueError("resume=True 사용 시 checkpoint가 필요합니다.")
+
         agent.load(
             path=train_cfg.checkpoint,
             strict=True,
@@ -572,7 +584,8 @@ def train(train_cfg: FastTrainConfig) -> None:
             next_obs_raw, reward, terminated, truncated, info = split_env_step(
                 env.step(selected["env_action"])
             )
-            next_obs = attach_existing_slow_context(env, next_obs_raw)
+
+            next_obs = next_obs_raw
 
             is_round_boundary = bool(info.get("is_round_boundary", False))
             done = bool(terminated or truncated or is_round_boundary)
@@ -627,6 +640,8 @@ def train(train_cfg: FastTrainConfig) -> None:
                     f"policy_loss={update_logs['policy_loss']:.6f} "
                     f"value_loss={update_logs['value_loss']:.6f} "
                     f"entropy={update_logs['entropy']:.6f} "
+                    f"kl={update_logs['approx_kl']:.6f} "
+                    f"clipfrac={update_logs['clipfrac']:.4f} "
                     f"ev={update_logs['explained_variance']:.4f}",
                     flush=True,
                 )
@@ -685,7 +700,7 @@ def train(train_cfg: FastTrainConfig) -> None:
                     "episode": episode_idx,
                     "global_slot": global_slot,
                     "update_idx": update_idx,
-                    "env_config": asdict(env_cfg),
+                    "env_config": env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg),
                     "train_config": train_cfg.to_dict(),
                     "ppo_config": asdict(ppo_cfg),
                 },
@@ -719,13 +734,14 @@ def train(train_cfg: FastTrainConfig) -> None:
         )
 
     final_ckpt_path = run_dir / "checkpoints" / "fast_ppo_final.pt"
+
     agent.save(
         final_ckpt_path,
         extra={
             "episode": episode_idx,
             "global_slot": global_slot,
             "update_idx": update_idx,
-            "env_config": asdict(env_cfg),
+            "env_config": env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg),
             "train_config": train_cfg.to_dict(),
             "ppo_config": asdict(ppo_cfg),
         },
@@ -762,13 +778,15 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 20011)
 
     env = Env(env_cfg)
+
     obs, reset_info = reset_env(
         env=env,
         slow_rng=slow_rng,
         train_cfg=train_cfg,
     )
 
-    obs_dim = infer_flat_dim(obs)
+    obs_dim = infer_fast_obs_dim(obs)
+
     agent = FastPPOAgent(
         env_cfg=env_cfg,
         obs_dim=obs_dim,
@@ -807,10 +825,10 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
     print(f"reset_info    : {reset_info}", flush=True)
     print("=" * 100, flush=True)
 
-    rewards = []
-    deliveries = []
-    qualities = []
-    stalls = []
+    rewards: list[float] = []
+    deliveries: list[float] = []
+    qualities: list[float] = []
+    stalls: list[float] = []
 
     for episode_idx in range(1, int(train_cfg.eval_episodes) + 1):
         obs, reset_info = reset_env(
@@ -838,7 +856,8 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             next_obs_raw, reward, terminated, truncated, info = split_env_step(
                 env.step(selected["env_action"])
             )
-            next_obs = attach_existing_slow_context(env, next_obs_raw)
+
+            next_obs = next_obs_raw
 
             metrics = extract_info_metrics(info)
 

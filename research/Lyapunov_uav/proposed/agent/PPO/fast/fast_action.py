@@ -21,11 +21,11 @@ class FastActionSpec:
 
     현재 시나리오 기준:
         action vector layout:
-            1) rsu_chunks_raw: shape (M, N)
-            2) rsu_layers_raw: shape (M, N)
-            3) uav_chunks_raw: shape (U, N)
-            4) uav_layers_raw: shape (U, N)
-            5) uav_power_raw: shape (U, N)
+            1) rsu_chunks: shape (M, N)
+            2) rsu_layers: shape (M, N)
+            3) uav_chunks: shape (U, N)
+            4) uav_layers: shape (U, N)
+            5) uav_power: shape (U, N)
         
         Slow decision은 fast action vector에 포함하지 않고,
         obs 또는 env state에서 가져와 조건으로만 사용함.
@@ -118,6 +118,7 @@ class FastActionCodec:
         m = self.spec.num_rsu
         n = self.spec.num_user
         u = self.spec.num_uav
+
         idx = 0
 
         rsu_chunks = action[idx: idx + m * n].reshape(m, n)
@@ -184,70 +185,37 @@ class FastActionCodec:
         scaled = (clipped + 1.0) * 0.5
         value = min_value + scaled * (max_value - min_value)
         return np.clip(value, min_value, max_value).astype(np.float32)
-    
-    def _extract_slow_decision(self, obs: Dict[str, Any]) -> Dict[str, np.ndarray]:
-        """
-        Fast-only 학습에서는 slow decision을 obs에서 가져와 env action에 넣음.
 
-        현재 시나리오 기준:
-            env._get_state()는 다음 key를 포함함:
-                - uav_hiring
-                - rsu_scheduling
-                - uav_scheduling
-            
-            이 값은 fast policy가 새롭게 결정하는 값이 아니라,
-            현재 round 동안 고정된 condition으로 사용함.
+    def decode(self, raw_action: np.ndarray, obs: Dict[str, Any] | None = None) -> Dict[str, Any]:
         """
-        m = self.spec.num_rsu
-        n = self.spec.num_user
-        u = self.spec.num_uav
+        raw PPO action을 env.step()용 fast action dict로 변환한다.
 
-        rsu_scheduling = np.asarray(
-            obs.get("rsu_scheduling", np.zeros((m, n), dtype=np.int32)),
-            dtype=np.int32,
-        )
-        uav_hiring = np.asarray(
-            obs.get("uav_hiring", np.zeros(u, dtype=np.int32)),
-            dtype=np.int32,
-        )
-        uav_scheduling = np.asarray(
-            obs.get("uav_scheduling", np.zeros((u, n), dtype=np.int32)),
-            dtype=np.int32,
-        )
-
-        if rsu_scheduling.shape != (m, n):
-            raise ValueError(
-                f"rsu_scheduling shape mismatch: expected {(m, n)}, "
-                f"got {rsu_scheduling.shape}"
-            )
-        if uav_hiring.shape != (u,):
-            raise ValueError(
-                f"uav_hiring shape mismatch: expected {(u,)}, got {uav_hiring.shape}"
-            )
-        if uav_scheduling.shape != (u, n):
-            raise ValueError(
-                f"uav_scheduling shape mismatch: expected {(u, n)}, "
-                f"got {uav_scheduling.shape}"
-            )
-        
-        return {
-            "rsu_scheduling": (rsu_scheduling > 0).astype(np.int32),
-            "uav_hiring": (uav_hiring > 0).astype(np.int32),
-            "uav_scheduling": (uav_scheduling > 0).astype(np.int32),
-        }
-    
-    def decode(self, raw_action: np.ndarray, obs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        raw PPO Action을 env.step(action)에 넣을 수 있는 EnvAction dict로 변환.
+        obs는 signature compatibility용으로만 받는다.
+        현재 decode에는 slow decision이 필요 없다.
         """
         parts = self._split_raw_action(raw_action)
-        slow = self._extract_slow_decision(obs)
 
-        rsu_chunks = self._scale_to_int(parts["rsu_chunks"], 0, self.spec.max_chunk)
-        rsu_layers = self._scale_to_int(parts["rsu_layers"], 0, self.spec.max_layer)
+        rsu_chunks = self._scale_to_int(
+            parts["rsu_chunks"],
+            0,
+            self.spec.max_chunk,
+        )
+        rsu_layers = self._scale_to_int(
+            parts["rsu_layers"],
+            0,
+            self.spec.max_layer,
+        )
 
-        uav_chunks = self._scale_to_int(parts["uav_chunks"], 0, self.spec.max_chunk)
-        uav_layers = self._scale_to_int(parts["uav_layers"], 0, self.spec.max_layer)
+        uav_chunks = self._scale_to_int(
+            parts["uav_chunks"],
+            0,
+            self.spec.max_chunk,
+        )
+        uav_layers = self._scale_to_int(
+            parts["uav_layers"],
+            0,
+            self.spec.max_layer,
+        )
 
         uav_power = self._scale_to_float(
             parts["uav_power"],
@@ -255,13 +223,7 @@ class FastActionCodec:
             self.spec.max_tx_power,
         )
 
-        action: Dict[str, Any] = {
-            # slow condition
-            "rsu_scheduling": slow["rsu_scheduling"],
-            "uav_hiring": slow["uav_hiring"],
-            "uav_scheduling": slow["uav_scheduling"],
-
-            # fast action
+        return {
             "rsu_chunks": rsu_chunks,
             "rsu_layers": rsu_layers,
             "uav_chunks": uav_chunks,
@@ -269,11 +231,6 @@ class FastActionCodec:
             "uav_power": uav_power,
         }
 
-        return action
-    
-    def zeros_env_action(self, obs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        eval/smoke test용 zero fast action.
-        """
+    def zeros_env_action(self, obs: Dict[str, Any] | None = None) -> Dict[str, Any]:
         raw = np.zeros(self.action_dim, dtype=np.float32)
-        return self.decode(raw, obs)
+        return self.decode(raw, obs=obs)

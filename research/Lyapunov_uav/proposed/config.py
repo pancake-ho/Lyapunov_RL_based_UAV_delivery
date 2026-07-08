@@ -277,8 +277,8 @@ class EnvConfig:
 
         if not (0.0 <= self.move_prob <= 1.0):
             raise ValueError("move_prob는 [0, 1] 범위여야 합니다.")
-        if self.coverage_region_length <= 0.0:
-            raise ValueError("coverage_region_length는 양수여야 합니다.")
+        if self.region_len <= 0.0:
+            raise ValueError("region_len은 양수여야 합니다.")
 
         if self.init_queue < 0.0:
             raise ValueError("init_queue는 0 이상이어야 합니다.")

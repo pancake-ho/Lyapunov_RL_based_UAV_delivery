@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-from pathlib import Path
 
 from config import EnvConfig
 
@@ -16,7 +15,7 @@ try:
         ObsNormalizer,
         RolloutBuffer,
         explained_var,
-        flatten_obs,
+        flatten_fast_obs,
         get_device,
         load_checkpoint,
         save_checkpoint,
@@ -27,7 +26,7 @@ except ModuleNotFoundError:  # package 상대 import fallback
         ObsNormalizer,
         RolloutBuffer,
         explained_var,
-        flatten_obs,
+        flatten_fast_obs,
         get_device,
         load_checkpoint,
         save_checkpoint,
@@ -46,25 +45,31 @@ class FastPPOConfig:
     현재 시나리오 기준:
         수치 최적화 전 단계이므로, 기본값은 안정적인 training을 추구하는 쪽으로 설정함.
     """
-    rollout_steps: int = 1024
-    update_epochs: int = 5
-    batch_size: int = 256
+    rollout_steps: int = 8192
+    update_epochs: int = 4
+    batch_size: int = 1024
 
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
-    lr: float = 3e-4
-    max_grad_norm: float = 0.5
+    lr: float = 3e-5
+    max_grad_norm: float = 0.3
 
-    clip_coef: float = 0.2
-    value_coef: float = 0.5
-    entropy_coef: float = 0.01
+    clip_coef: float = 0.10
+    value_coef: float = 0.05
+    entropy_coef: float = 1e-3
 
     normalize_obs: bool = True
     normalize_adv: bool = True
 
     hidden_dims: Tuple[int, ...] = (256, 256)
-    init_log_std: float = -0.5
+    init_log_std: float = -1.0
+
+    use_value_huber_loss: bool = True
+    use_value_clip: bool = True
+    value_clip_coef: float = 50_000.0
+
+    fail_on_nan: bool = True
 
     device: str = "auto"
 
@@ -113,11 +118,24 @@ class FastPPOAgent:
             gae_lambda=self.ppo_cfg.gae_lambda,
         )
         
-        self.obs_normalizer = Optional[ObsNormalizer]
         if self.ppo_cfg.normalize_obs:
-            self.obs_normalizer = ObsNormalizer(obs_dim=self.obs_dim)
+            self.obs_normalizer: Optional[ObsNormalizer] = ObsNormalizer(obs_dim=self.obs_dim)
         else:
             self.obs_normalizer = None
+        
+    def _check_finite_array(self, name: str, arr: np.ndarray) -> None:
+        if not bool(self.ppo_cfg.fail_on_nan):
+            return
+
+        if not np.all(np.isfinite(arr)):
+            raise RuntimeError(f"{name} contains NaN or Inf.")
+
+    def _check_finite_tensor(self, name: str, tensor: torch.Tensor) -> None:
+        if not bool(self.ppo_cfg.fail_on_nan):
+            return
+
+        if not torch.isfinite(tensor).all():
+            raise RuntimeError(f"{name} contains NaN or Inf.")
 
     def obs_to_vec(
         self,
@@ -125,20 +143,27 @@ class FastPPOAgent:
         update_norm: bool = True,
     ) -> np.ndarray:
         """
-        Input으로 주어지는 obs에 대하여 vector로 변환 및 normalization 수행.
+        fast observation dict를 vector로 변환한다.
+
+        반드시 flatten_fast_obs()를 사용하여 raw slow scheduling key가
+        policy input에 섞이지 않도록 한다.
         """
-        obs_vec = flatten_obs(obs).astype(np.float32)
+        obs_vec = flatten_fast_obs(obs).astype(np.float32)
 
         if obs_vec.shape[0] != self.obs_dim:
             raise ValueError(
                 f"obs dim mismatch: expected {self.obs_dim}, got {obs_vec.shape[0]}"
             )
 
+        self._check_finite_array("obs_vec_before_norm", obs_vec)
+
         if self.obs_normalizer is not None:
             obs_vec = self.obs_normalizer.normalize(
                 obs_vec,
                 update=update_norm,
             )
+
+        self._check_finite_array("obs_vec_after_norm", obs_vec)
 
         return obs_vec.astype(np.float32)
     
@@ -168,6 +193,8 @@ class FastPPOAgent:
         log_prob = float(log_prob_tensor.squeeze(0).detach().cpu().item())
         value = float(value_tensor.squeeze(0).detach().cpu().item())
 
+        self._check_finite_array("raw_action", raw_action)
+
         env_action = self.codec.decode(raw_action, obs)
 
         return {
@@ -188,15 +215,23 @@ class FastPPOAgent:
         log_prob: float,
     ) -> None:
         """
-        RolloutBuffer에 experience를 저장.
+        RolloutBuffer에 transition 저장.
         """
+        if self.ppo_cfg.fail_on_nan:
+            if not np.isfinite(float(reward)):
+                raise RuntimeError(f"reward is NaN or Inf: {reward}")
+            if not np.isfinite(float(value)):
+                raise RuntimeError(f"value is NaN or Inf: {value}")
+            if not np.isfinite(float(log_prob)):
+                raise RuntimeError(f"log_prob is NaN or Inf: {log_prob}")
+
         self.buffer.add(
             obs=obs_vec,
             action=raw_action,
-            reward=reward,
-            done=done,
-            value=value,
-            log_prob=log_prob,
+            reward=float(reward),
+            done=bool(done),
+            value=float(value),
+            log_prob=float(log_prob),
         )
 
     @torch.no_grad()
@@ -214,6 +249,7 @@ class FastPPOAgent:
         )
         obs_tensor = to_tensor(obs_vec, device=self.device).unsqueeze(0)
         value = self.model.value(obs_tensor)
+
         return float(value.squeeze(0).detach().cpu().item())
     
     def finish_rollout(
@@ -238,6 +274,44 @@ class FastPPOAgent:
             normalize_adv=self.ppo_cfg.normalize_adv,
         )
     
+    def _compute_value_loss(
+        self,
+        new_value: torch.Tensor,
+        old_value: torch.Tensor,
+        returns: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        value clipping / huber option을 포함한 critic loss.
+        """
+        if self.ppo_cfg.use_value_clip:
+            value_clipped = old_value + torch.clamp(
+                new_value - old_value,
+                -float(self.ppo_cfg.value_clip_coef),
+                float(self.ppo_cfg.value_clip_coef),
+            )
+
+            if self.ppo_cfg.use_value_huber_loss:
+                value_loss_unclipped = F.smooth_l1_loss(
+                    new_value,
+                    returns,
+                    reduction="none",
+                )
+                value_loss_clipped = F.smooth_l1_loss(
+                    value_clipped,
+                    returns,
+                    reduction="none",
+                )
+            else:
+                value_loss_unclipped = (new_value - returns).pow(2)
+                value_loss_clipped = (value_clipped - returns).pow(2)
+
+            return torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+        if self.ppo_cfg.use_value_huber_loss:
+            return F.smooth_l1_loss(new_value, returns)
+
+        return F.mse_loss(new_value, returns)
+    
     def update(self) -> Dict[str, float]:
         """
         Buffer에서 experience를 꺼내어 Agent 업데이트 및 로그 확인용 정보 반환.
@@ -247,68 +321,106 @@ class FastPPOAgent:
         
         policy_losses: list[float] = []
         value_losses: list[float] = []
-        entropy_losses: list[float] = []
-        approx_kl_divs: list[float] = []
-        clip_fracs: list[float] = []
+        entropy_values: list[float] = []
+        approx_kl_values: list[float] = []
+        clip_frac_values: list[float] = []
 
-        for _ in range(self.ppo_cfg.update_epochs):
+        for _ in range(int(self.ppo_cfg.update_epochs)):
             for batch in self.buffer.iter_minibatches(
-                batch_size=self.ppo_cfg.batch_size,
+                batch_size=int(self.ppo_cfg.batch_size),
                 shuffle=True,
             ):
-                new_log_prob, entropy, new_value = self.model.evaluate_actions(obs=batch.obs, actions=batch.actions)
+                new_log_prob, entropy, new_value = self.model.evaluate_actions(
+                    obs=batch.obs,
+                    actions=batch.actions,
+                )
+
+                self._check_finite_tensor("new_log_prob", new_log_prob)
+                self._check_finite_tensor("entropy", entropy)
+                self._check_finite_tensor("new_value", new_value)
 
                 log_ratio = new_log_prob - batch.old_log_probs
                 ratio = torch.exp(log_ratio)
 
                 with torch.no_grad():
-                    approx_kl_div = ((ratio - 1.0) - log_ratio).mean()
-                    clip_frac = ((torch.abs(ratio - 1.0) > self.ppo_cfg.clip_coef).float().mean())
-                
-                adv = batch.advantages
-                policy_grad_loss_1 = -adv * ratio
-                policy_grad_loss_2 = -adv * torch.clamp(ratio, 1.0 - self.ppo_cfg.clip_coef, 1.0 + self.ppo_cfg.clip_coef)
-                
-                policy_loss = torch.max(policy_grad_loss_1, policy_grad_loss_2).mean()
-                value_loss = F.mse_loss(new_value, batch.returns)
-                entropy_loss = entropy.mean()
+                    approx_kl = ((ratio - 1.0) - log_ratio).mean()
+                    clip_frac = (
+                        torch.abs(ratio - 1.0) > float(self.ppo_cfg.clip_coef)
+                    ).float().mean()
 
-                loss = policy_loss + self.ppo_cfg.value_coef * value_loss - self.ppo_cfg.entropy_coef * entropy_loss
+                adv = batch.advantages
+
+                policy_loss_1 = -adv * ratio
+                policy_loss_2 = -adv * torch.clamp(
+                    ratio,
+                    1.0 - float(self.ppo_cfg.clip_coef),
+                    1.0 + float(self.ppo_cfg.clip_coef),
+                )
+                policy_loss = torch.max(policy_loss_1, policy_loss_2).mean()
+
+                value_loss = self._compute_value_loss(
+                    new_value=new_value,
+                    old_value=batch.old_values,
+                    returns=batch.returns,
+                )
+
+                entropy_mean = entropy.mean()
+
+                loss = (
+                    policy_loss
+                    + float(self.ppo_cfg.value_coef) * value_loss
+                    - float(self.ppo_cfg.entropy_coef) * entropy_mean
+                )
+
+                self._check_finite_tensor("ppo_loss", loss)
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.ppo_cfg.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=float(self.ppo_cfg.max_grad_norm),
+                )
                 self.optimizer.step()
 
                 policy_losses.append(float(policy_loss.detach().cpu().item()))
                 value_losses.append(float(value_loss.detach().cpu().item()))
-                entropy_losses.append(float(entropy_loss.detach().cpu().item()))
-                approx_kl_divs.append(float(approx_kl_div.detach().cpu().item()))
-                clip_fracs.append(float(clip_frac.detach().cpu().item()))
-        
+                entropy_values.append(float(entropy_mean.detach().cpu().item()))
+                approx_kl_values.append(float(approx_kl.detach().cpu().item()))
+                clip_frac_values.append(float(clip_frac.detach().cpu().item()))
+
         obs, actions, old_log_probs, returns, advantages, old_values = self.buffer.get_tensors()
 
         with torch.no_grad():
             _, _, value_after = self.model.evaluate_actions(obs, actions)
-            explained_v = explained_var(y_pred=value_after.detach().cpu().numpy(), y_true=returns.detach().cpu().numpy())
-        
+            explained_v = explained_var(
+                y_pred=value_after.detach().cpu().numpy(),
+                y_true=returns.detach().cpu().numpy(),
+            )
+
+        buffer_summary = self.buffer.summary()
+
         logs = {
-            "policy_loss": float(np.mean(policy_losses)),
-            "value_loss": float(np.mean(value_losses)),
-            "entropy": float(np.mean(entropy_losses)),
-            "approx_kl_divs": float(np.mean(approx_kl_divs)),
-            "clip_fracs": float(np.mean(clip_fracs)),
+            "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
+            "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
+            "entropy": float(np.mean(entropy_values)) if entropy_values else 0.0,
+            "approx_kl": float(np.mean(approx_kl_values)) if approx_kl_values else 0.0,
+            "clipfrac": float(np.mean(clip_frac_values)) if clip_frac_values else 0.0,
             "explained_variance": float(explained_v),
-            "buffer_reward_mean": float(self.buffer.summary()["reward_mean"]),
-            "buffer_reward_std": float(self.buffer.summary()["reward_std"]),
+            "buffer_reward_mean": float(buffer_summary["reward_mean"]),
+            "buffer_reward_std": float(buffer_summary["reward_std"]),
         }
+
         self.buffer.reset()
 
         return logs
-    
-    def save(self, path: str | Path, extra: Optional[Dict[str, Any]] = None) -> None:
+
+    def save(
+        self,
+        path: str | Path,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
-        학습된 model/optimizer 등 저장용.
+        model/optimizer 저장.
         """
         merged_extra: Dict[str, Any] = {
             "fast_ppo_config": asdict(self.ppo_cfg),
@@ -328,7 +440,7 @@ class FastPPOAgent:
             optimizer=self.optimizer,
             extra=merged_extra,
         )
-    
+
     def load(
         self,
         path: str | Path,

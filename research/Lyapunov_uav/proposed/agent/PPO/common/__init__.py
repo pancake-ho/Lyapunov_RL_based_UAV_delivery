@@ -1,5 +1,4 @@
-
-from .buffer import RolloutBuffer
+from .buffer import RolloutBuffer, RolloutBatch
 from .normalizer import RunningMeanStd, ObsNormalizer
 from .utils import (
     set_seed,
@@ -11,19 +10,28 @@ from .utils import (
     count_params,
     to_numpy,
     to_tensor,
-    ScalarLogger
+    ScalarLogger,
 )
 from .hrl_adapter import (
+    FAST_OBS_KEYS,
+    SLOW_OBS_KEYS,
     flatten_obs,
     flatten_obs_with_keys,
+    flatten_fast_obs,
+    flatten_slow_obs,
     infer_flat_dim,
+    infer_fast_obs_dim,
+    infer_slow_obs_dim,
     split_env_reset,
     split_env_step,
     is_round_boundary,
+    get_info_scalar,
+    remove_keys_from_obs,
 )
 
 __all__ = [
     "RolloutBuffer",
+    "RolloutBatch",
     "RunningMeanStd",
     "ObsNormalizer",
     "set_seed",
@@ -35,10 +43,19 @@ __all__ = [
     "count_params",
     "to_numpy",
     "to_tensor",
+    "ScalarLogger",
+    "FAST_OBS_KEYS",
+    "SLOW_OBS_KEYS",
     "flatten_obs",
     "flatten_obs_with_keys",
+    "flatten_fast_obs",
+    "flatten_slow_obs",
     "infer_flat_dim",
+    "infer_fast_obs_dim",
+    "infer_slow_obs_dim",
     "split_env_reset",
     "split_env_step",
     "is_round_boundary",
+    "get_info_scalar",
+    "remove_keys_from_obs",
 ]
