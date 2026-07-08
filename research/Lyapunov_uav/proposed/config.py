@@ -6,15 +6,14 @@ class ChannelConfig:
     """
     Channel 및 PHY parameter config 클래스
     """
-    distance: float = 15.0 # random (범위: 5 ~ 25 - uniform)
-
-    # uniform sampling
+    # distance uniform sampling
+    # USER와 RSU/UAV 사이 거리 (UAV는 고도 추가)
+    distance: float = 15.0
     distance_min: float = 5.0
     distance_max: float = 25.0
     distance_sampling: str = "uniform"
 
     # common params
-    min_distance: float = 1.0
     seed: int = 42
     bandwidth: float = 1e6
 
@@ -26,7 +25,7 @@ class ChannelConfig:
     beta: float = 2.0
     
     # UAV LoS Channel Params
-    altitude: float = 20.0 # 100m에서 20m로 감소
+    altitude: float = 20.0
     beta_zero: float = 2e-9
     noise_power: float = 1e-13
     capacity_gap: float = 1.0
@@ -85,19 +84,19 @@ class BatteryConfig:
     tx_energy_coeff: float = 100.0
 
     # 충전 모델
-    charging_rate: float = 1500.0 # Charging power [W]
+    charging_rate: float = 5000.0 # Charging power [W]
     eta_c: float = 1.0
     enable_charging: bool = True
     allow_charge: bool = True
 
     # time slot
-    slot_duration: float = 0.05
+    slot_duration: float = 1
     target_service_slots_per_round: int = 5
 
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
     # SAC/DDPG도 추가적으로 고려
-    battery_capacity_joule: float = 100000.0 # 감소
+    battery_capacity_joule: float = 5_000_000.0 
     energy_to_soc_factor: Optional[float] = None
 
     # 최대 통신 power bound
@@ -143,7 +142,8 @@ class EnvConfig:
     num_rsu: int = 10
     num_uav: int = 10
     uav_user_cap: int = 2
-    slow_T: int = 25
+    
+    slow_T: int = 3600
     N0: int = 3
 
     # 비디오 및 캐싱
@@ -153,6 +153,11 @@ class EnvConfig:
     chunk: int = 9
     rsu_capacity: int = 3
     zipf_alpha: float = 1.1
+
+    # FSMC mobility
+    # user는 매 slot 확률 p로 왼쪽 region으로 이동
+    # region 0에서 이동이 발생하면 오른쪽 끝 region으로 다른 user 재진입
+    move_prob: float = 0.1
 
     # 사용자 이동 패턴
     spawn_base: float = 0.10
@@ -206,9 +211,6 @@ class EnvConfig:
     playback_rate: float = 1.0 # queue update 산식의 b에 대응
     max_queue: float = 100.0 # Q_bar에 대응
 
-    # delivery (비트 당 청크 사이즈 정의)
-    base_chunk_size_bits: float = 2e5
-
     # 각 layer에 대한 quality 가중치
     quality_weights: Tuple[float, ...] = (34.0, 36.64, 39.11, 41.64)
     chunk_size_bits: Tuple[float, ...] = (
@@ -222,79 +224,9 @@ class EnvConfig:
     sch_indicator: float = 0.0
     hir_indicator: float = 0.0
 
-    # seed
-    seed: int = 2026
+    # slow-timescale decision에 반영
+    # 추후 scale에 따라 수정 필요
+    uav_hiring_cost: float = 5000.0
 
-    # User video virtual queue target
-    # Z_n(t) = max_queue - Q_n(t)를 theta_z 근처로 유지하기 위한 perturbed target
-    theta_z: Optional[Tuple[float, ...]] = None
+    # Lyapunov trade-off parameter
     V: float = 10.0
-
-    def __post_init__(self) -> None:
-        if self.num_user <= 0:
-            raise ValueError("num_user는 양수 값을 가져야 합니다.")
-        if self.num_rsu <= 0:
-            raise ValueError("num_rsu는 양수 값을 가져야 합니다.")
-        if self.num_uav <= 0:
-            raise ValueError("num_uav는 양수 값을 가져야 합니다.")
-        if self.uav_user_cap <= 0:
-            raise ValueError("uav_user_cap은 양수 값을 가져야 합니다.")
-        if self.slow_T <= 0:
-            raise ValueError("slow_T는 양수 값을 가져야 합니다.")
-        if self.N0 < 0:
-            raise ValueError("N0는 0 이상의 값을 가져야 합니다.")
-        
-        if self.num_video <= 0:
-            raise ValueError("num_video는 양수 값을 가져야 합니다.")
-        if not (0 <= self.rsu_caching <= self.num_video):
-            raise ValueError(f"rsu_caching은 [0, num_video] 범위 내의 값을 가져야 합니다. \
-                             \n현재 num_video 값은 {self.num_video}, rsu_caching 값은 {self.rsu_caching}입니다.")
-        if self.layer <= 0 or self.chunk <= 0:
-            raise ValueError(f"layer와 chunk는 모두 양수 값을 가져야 합니다. 현재 두 값은 각각 {self.layer}, {self.chunk}입니다.")
-        if self.rsu_capacity <= 0:
-            raise ValueError(f"rsu_capacity와 mbs_capacity는 모두 양수 값을 가져야 합니다. \
-                             현재 값: {self.rsu_capacity}")
-        if self.zipf_alpha <= 0.0:
-            raise ValueError("zipf_alpha는 양수 값을 가져야 합니다.")
-        
-        if not (0.0 <= self.spawn_base <= 1.0):
-            raise ValueError("spawn_base는 [0, 1] 범위 내의 값을 가져야 합니다.")
-        if not (0.0 <= self.depart_base <= 1.0):
-            raise ValueError("depart_base는 [0, 1] 범위 내의 값을 가져야 합니다.")
-        if self.spawn_amp < 0.0 or self.depart_amp < 0.0:
-            raise ValueError(f"spawn_amp와 depart_map는 모두 양수 값을 가져야 합니다. \
-                             현재 두 값은 각각 {self.spawn_amp}, {self.depart_amp}입니다.")
-        if self.spawn_period < 0.0 or self.depart_period < 0.0:
-            raise ValueError(f"spawn_period와 depart_period는 모두 양수 값을 가져야 합니다. \
-                             현재 두 값은 각각 {self.spawn_period}, {self.depart_period}입니다.")
-        
-        if self.init_queue < 0.0 or self.max_queue <= 0.0:
-            raise ValueError("init_queue는 0 이상의 값을, max_queue는 양수 값을 가져야 합니다.")
-        if self.playback_rate < 0.0:
-            raise ValueError("playback_rate는 0 이상의 값을 가져야 합니다.")
-        if self.base_chunk_size_bits <= 0.0:
-            raise ValueError("base_chunk_size_bits는 양수 값을 가져야 합니다.")
-    
-        if len(self.quality_weights) != self.layer:
-            raise ValueError(f"quality_weights의 len {len(self.quality_weights)}는 layer와 같아야 합니다.")
-        
-        # 하나의 UAV는 coverage region(RSU) 당 한 대 고용될 수 있음
-        if self.num_uav != self.num_rsu:
-            raise ValueError(f"coverage region 당 하나의 UAV 고용을 가정합니다. 현재는 \
-                             NUM_UAV: {self.num_uav}, NUM_RSU: {self.num_rsu}입니다.")
-    
-        if self.theta_z is None:
-            self.theta_z = tuple([0.7 * float(self.max_queue)] * self.num_user)
-        elif len(self.theta_z) != self.num_user:
-            raise ValueError(
-                f"theta_z 길이는 num_user={self.num_user}와 같아야 합니다. "
-                f"현재 len(theta_z)={len(self.theta_z)}입니다."
-            )
-        
-        if len(self.chunk_size_bits) != self.layer:
-            raise ValueError(
-                f"chunk_size_bits의 len {len(self.chunk_size_bits)}는 "
-                f"layer={self.layer}와 같아야 합니다."
-            )
-        if any(float(s) <= 0.0 for s in self.chunk_size_bits):
-            raise ValueError("chunk_size_bits의 모든 값은 양수여야 합니다.")
