@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from dataclasses import dataclass, field, asdict
+from typing import Dict, Tuple, Optional
 
 @dataclass
 class ChannelConfig:
@@ -9,6 +9,8 @@ class ChannelConfig:
     # distance uniform sampling
     # USER와 RSU/UAV 사이 거리 (UAV는 고도 추가)
     distance: float = 15.0
+    min_distance: float = 1.0 
+
     distance_min: float = 5.0
     distance_max: float = 25.0
     distance_sampling: str = "uniform"
@@ -30,16 +32,19 @@ class ChannelConfig:
     noise_power: float = 1e-13
     capacity_gap: float = 1.0
 
-
     def __post_init__(self) -> None:
         self.distance = float(self.distance)
+        self.min_distance = float(self.min_distance)
+        self.distance_min = float(self.distance_min)
+        self.distance_max = float(self.distance_max)
+        self.distance_sampling = str(self.distance_sampling).lower().strip()
+
         self.bandwidth = float(self.bandwidth)
         self.gamma_db = float(self.gamma_db)
         self.inr_db = float(self.inr_db)
         self.sigma_db = float(self.sigma_db)
         self.mu_db = float(self.mu_db)
         self.beta = float(self.beta)
-        self.min_distance = float(self.min_distance)
 
         self.altitude = float(self.altitude)
         self.beta_zero = float(self.beta_zero)
@@ -48,25 +53,30 @@ class ChannelConfig:
 
         if self.distance < 0.0:
             raise ValueError(f"distance는 0 이상이어야 합니다. 현재 값: {self.distance}")
+        if self.min_distance <= 0.0:
+            raise ValueError(f"min_distance는 양수여야 합니다. 현재 값: {self.min_distance}")
+        if self.distance_min < 0.0:
+            raise ValueError(f"distance_min은 0 이상이어야 합니다. 현재 값: {self.distance_min}")
+        if self.distance_max < self.distance_min:
+            raise ValueError(
+                f"distance_max는 distance_min 이상이어야 합니다. "
+                f"현재 distance_min={self.distance_min}, distance_max={self.distance_max}"
+            )
         if self.bandwidth <= 0.0:
-            raise ValueError(f"bandwidth는 양수 값을 가져야 합니다. 현재 값: {self.bandwidth}")
+            raise ValueError(f"bandwidth는 양수여야 합니다. 현재 값: {self.bandwidth}")
         if self.sigma_db < 0.0:
             raise ValueError(f"sigma_db는 0 이상이어야 합니다. 현재 값: {self.sigma_db}")
         if self.beta <= 0.0:
-            raise ValueError(f"beta는 양수 값을 가져야 합니다. 현재 값: {self.beta}")
-        if self.min_distance <= 0.0:
-            raise ValueError(f"min_distance는 양수 값을 가져야 합니다. 현재 값: {self.min_distance}")
+            raise ValueError(f"beta는 양수여야 합니다. 현재 값: {self.beta}")
 
         if self.altitude < 0.0:
             raise ValueError(f"altitude는 0 이상이어야 합니다. 현재 값: {self.altitude}")
         if self.beta_zero <= 0.0:
-            raise ValueError(f"beta_zero는 양수 값을 가져야 합니다. 현재 값: {self.beta_zero}")
+            raise ValueError(f"beta_zero는 양수여야 합니다. 현재 값: {self.beta_zero}")
         if self.noise_power <= 0.0:
-            raise ValueError(f"noise_power는 양수 값을 가져야 합니다. 현재 값: {self.noise_power}")
+            raise ValueError(f"noise_power는 양수여야 합니다. 현재 값: {self.noise_power}")
         if self.capacity_gap <= 0.0:
-            raise ValueError(
-                f"capacity_gap은 양수 값을 가져야 합니다. 현재 값: {self.capacity_gap}"
-            )
+            raise ValueError(f"capacity_gap은 양수여야 합니다. 현재 값: {self.capacity_gap}")
 
 
 @dataclass
@@ -104,35 +114,36 @@ class BatteryConfig:
 
     def __post_init__(self) -> None:
         if self.e_max <= 0:
-            raise ValueError("e_max는 양수 값을 가져야 합니다.")
+            raise ValueError("e_max는 양수여야 합니다.")
         if self.slot_duration <= 0.0:
-            raise ValueError("slot_duration은 양수 값을 가져야 합니다.")
+            raise ValueError("slot_duration은 양수여야 합니다.")
         if self.target_service_slots_per_round <= 0:
-            raise ValueError("target_service_slots_per_round는 양수 값을 가져야 합니다.")
+            raise ValueError("target_service_slots_per_round는 양수여야 합니다.")
         if self.p_0 < 0.0 or self.p_i < 0.0:
             raise ValueError(
-                f"p_0와 p_i는 양수 값을 가져야 합니다. "
-                f"현재 두 값은 각각 {self.p_0}, {self.p_i}입니다."
+                f"p_0와 p_i는 0 이상이어야 합니다. "
+                f"현재 p_0={self.p_0}, p_i={self.p_i}"
             )
         if self.tx_energy_coeff <= 0.0:
-            raise ValueError("tx_energy_coeff는 양수 값을 가져야 합니다.")
+            raise ValueError("tx_energy_coeff는 양수여야 합니다.")
         if self.charging_rate < 0.0:
-            raise ValueError("charging_rate는 0 이상의 값을 가져야 합니다.")
+            raise ValueError("charging_rate는 0 이상이어야 합니다.")
         if self.eta_c <= 0.0:
-            raise ValueError("eta_c는 양수 값을 가져야 합니다.")
+            raise ValueError("eta_c는 양수여야 합니다.")
         if self.max_tx_power <= 0.0:
-            raise ValueError("max_tx_power는 양수 값을 가져야 합니다.")
+            raise ValueError("max_tx_power는 양수여야 합니다.")
         if self.battery_capacity_joule <= 0.0:
-            raise ValueError("battery_capacity_joule은 양수 값을 가져야 합니다.")
+            raise ValueError("battery_capacity_joule은 양수여야 합니다.")
+
+        self.e_init = float(min(max(float(self.e_init), 0.0), float(self.e_max)))
+        self.e_min = float(min(max(float(self.e_min), 0.0), float(self.e_max)))
 
         if self.energy_to_soc_factor is None:
             self.energy_to_soc_factor = 100.0 / float(self.battery_capacity_joule)
         else:
             self.energy_to_soc_factor = float(self.energy_to_soc_factor)
-
-        self.e_init = float(min(max(self.e_init, 0.0), float(self.e_max)))
-        self.e_min = float(min(max(self.e_min, 0.0), float(self.e_max)))
-
+            if self.energy_to_soc_factor <= 0.0:
+                raise ValueError("energy_to_soc_factor는 양수여야 합니다.")
 
 @dataclass
 class EnvConfig:
@@ -158,14 +169,7 @@ class EnvConfig:
     # user는 매 slot 확률 p로 왼쪽 region으로 이동
     # region 0에서 이동이 발생하면 오른쪽 끝 region으로 다른 user 재진입
     move_prob: float = 0.1
-
-    # 사용자 이동 패턴
-    spawn_base: float = 0.10
-    spawn_amp: float = 0.05
-    spawn_period: float = 200.0
-    depart_base: float = 0.05
-    depart_amp: float = 0.02
-    depart_period: float = 300.0
+    region_len: float = 50.0
 
     # Channel
     # HRL video delivery 논문은 user radius R=50 m를 사용.
@@ -174,6 +178,7 @@ class EnvConfig:
     rsu_channel: ChannelConfig = field(
         default_factory=lambda: ChannelConfig(
             distance=15.0,
+            min_distance=1.0,
             distance_min=5.0,
             distance_max=25.0,
             distance_sampling="uniform",
@@ -183,13 +188,13 @@ class EnvConfig:
             sigma_db=4.0,
             beta=2.0,
             mu_db=0.0,
-            min_distance=1.0,
             seed=42,
         )
     )
     uav_channel: ChannelConfig = field(
         default_factory=lambda: ChannelConfig(
             distance=15.0,
+            min_distance=1.0,
             distance_min=5.0,
             distance_max=25.0,
             distance_sampling="uniform",
@@ -198,7 +203,6 @@ class EnvConfig:
             beta_zero=2e-9,
             noise_power=1e-13,
             capacity_gap=1.0,
-            min_distance=1.0,
             seed=42,
         )
     )
@@ -220,13 +224,89 @@ class EnvConfig:
         26.496e3,
     )
 
-    # indicator
-    sch_indicator: float = 0.0
-    hir_indicator: float = 0.0
-
     # slow-timescale decision에 반영
     # 추후 scale에 따라 수정 필요
     uav_hiring_cost: float = 5000.0
+    hire_weight: float = 1.0
 
     # Lyapunov trade-off parameter
     V: float = 10.0
+
+    # seed
+    seed: int = 2026
+
+    def __post_init__(self) -> None:
+        if self.num_user <= 0:
+            raise ValueError("num_user는 양수여야 합니다.")
+        if self.num_rsu <= 0:
+            raise ValueError("num_rsu는 양수여야 합니다.")
+        if self.num_uav <= 0:
+            raise ValueError("num_uav는 양수여야 합니다.")
+        if self.num_uav != self.num_rsu:
+            raise ValueError(
+                "현재 시나리오에서는 coverage region마다 최대 UAV 1대를 가정하므로 "
+                f"num_uav와 num_rsu가 같아야 합니다. "
+                f"현재 num_uav={self.num_uav}, num_rsu={self.num_rsu}"
+            )
+        if self.uav_user_cap <= 0:
+            raise ValueError("uav_user_cap은 양수여야 합니다.")
+        if self.slow_T <= 0:
+            raise ValueError("slow_T는 양수여야 합니다.")
+        if self.episode_slots <= 0:
+            raise ValueError("episode_slots는 양수여야 합니다.")
+
+        if self.num_video <= 0:
+            raise ValueError("num_video는 양수여야 합니다.")
+        if not (0 <= self.rsu_caching <= self.num_video):
+            raise ValueError("rsu_caching은 [0, num_video] 범위여야 합니다.")
+        if self.layer <= 0:
+            raise ValueError("layer는 양수여야 합니다.")
+        if self.chunk <= 0:
+            raise ValueError("chunk는 양수여야 합니다.")
+        if self.rsu_capacity <= 0:
+            raise ValueError("rsu_capacity는 양수여야 합니다.")
+        if self.zipf_alpha <= 0.0:
+            raise ValueError("zipf_alpha는 양수여야 합니다.")
+
+        if not (0.0 <= self.move_prob <= 1.0):
+            raise ValueError("move_prob는 [0, 1] 범위여야 합니다.")
+        if self.coverage_region_length <= 0.0:
+            raise ValueError("coverage_region_length는 양수여야 합니다.")
+
+        if self.init_queue < 0.0:
+            raise ValueError("init_queue는 0 이상이어야 합니다.")
+        if self.playback_rate < 0.0:
+            raise ValueError("playback_rate는 0 이상이어야 합니다.")
+        if self.max_queue <= 0.0:
+            raise ValueError("max_queue는 양수여야 합니다.")
+
+        if len(self.quality_weights) != self.layer:
+            raise ValueError(
+                f"quality_weights 길이는 layer와 같아야 합니다. "
+                f"len={len(self.quality_weights)}, layer={self.layer}"
+            )
+        if len(self.chunk_size_bits) != self.layer:
+            raise ValueError(
+                f"chunk_size_bits 길이는 layer와 같아야 합니다. "
+                f"len={len(self.chunk_size_bits)}, layer={self.layer}"
+            )
+        if any(float(v) < 0.0 for v in self.quality_weights):
+            raise ValueError("quality_weights는 모두 0 이상이어야 합니다.")
+        if any(float(v) <= 0.0 for v in self.chunk_size_bits):
+            raise ValueError("chunk_size_bits는 모두 양수여야 합니다.")
+
+        if self.uav_hiring_cost < 0.0:
+            raise ValueError("uav_hiring_cost는 0 이상이어야 합니다.")
+        if self.hire_weight < 0.0:
+            raise ValueError("hire_weight는 0 이상이어야 합니다.")
+        if self.V < 0.0:
+            raise ValueError("V는 0 이상이어야 합니다.")
+
+    def reward_coefficients(self) -> Dict[str, float]:
+        return {
+            "V": float(self.V),
+            "hire_weight": float(self.hire_weight),
+        }
+
+    def as_dict(self) -> Dict:
+        return asdict(self)
