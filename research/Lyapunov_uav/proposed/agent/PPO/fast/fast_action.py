@@ -14,7 +14,7 @@ except ImportError:
 @dataclass(frozen=True)
 class FastActionSpec:
     """
-    PPO가 출력할 raw action vector의 구조를 정의함.
+    PPO가 출력할 Fast-Timescale raw action vector의 구조를 정의함.
 
     Ray action은 PPO policy가 출력하는 continuous vector로,
     이 vector를 env가 요구하는 dict action으로 decoding 처리.
@@ -48,7 +48,6 @@ class FastActionSpec:
             num_uav=int(cfg.num_uav),
             max_chunk=int(cfg.chunk),
             max_layer=int(cfg.layer),
-            max_tx_power=float(cfg.battery.max_tx_power),
         )
     
     @property
@@ -68,7 +67,7 @@ class FastActionSpec:
     @property
     def action_dim(self) -> int:
         """
-        전체 action의 dim을 반환.
+        Fast-Timescale action의 dim을 반환.
         """
         m = self.num_rsu
         n = self.num_user
@@ -85,7 +84,7 @@ class FastActionSpec:
 
 class FastActionCodec:
     """
-    PPO의 output으로 나온 continuous raw action을 실제 env.step()에 넣을 수 있는 dict 형태로 변환. (호환성)
+    Fast-timescale PPO action codec.
 
     중요한 원칙:
         - PPO는 raw continuous action만 학습함.
