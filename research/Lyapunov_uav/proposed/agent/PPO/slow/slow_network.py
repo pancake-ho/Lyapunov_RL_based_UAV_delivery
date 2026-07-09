@@ -58,7 +58,7 @@ class SlowActorCritic(nn.Module):
         obs_dim: int,
         action_dim: int,
         hidden_dims: Sequence[int] = (256, 256),
-        activation: type[nn.Modue] = nn.Tanh,
+        activation: type[nn.Module] = nn.Tanh,
         init_action_logit: float = 0.0,
         min_logit: float = -20.0,
         max_logit: float = 20.0
@@ -71,7 +71,7 @@ class SlowActorCritic(nn.Module):
             raise ValueError(f"action_dim은 양수 값을 가져야 합니다. 현재 값: {action_dim}")
         if float(min_logit) >= float(max_logit):
             raise ValueError(
-                f"min_logit은 max_logit보다 큰 값을 가져야 합니다, "
+                f"min_logit은 max_logit보다 작은 값을 가져야 합니다, "
                 f"현재 값: min_logit={min_logit}, max_logit={max_logit}"
             )
         

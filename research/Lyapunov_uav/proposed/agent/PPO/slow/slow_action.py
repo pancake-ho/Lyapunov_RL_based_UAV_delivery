@@ -24,7 +24,8 @@ class SlowActionSpec:
     num_rsu: int
     num_user: int
     num_uav: int
-
+    
+    @classmethod
     def from_config(cls, cfg: EnvConfig) -> "SlowActionSpec":
         """
         config로부터 state 반환을 수행.
@@ -87,6 +88,13 @@ class SlowActionCodec:
         """
         return self.spec.action_dim
     
+    @property
+    def hiring_shape(self) -> Tuple[int]:
+        """
+        spec의 hiring action dim을 반환.
+        """
+        return (self.num_uav,)
+    
     def _require_binary_flat_action(self, action: np.ndarray) -> np.ndarray:
         """
         Slow-Timescale PPO actor가 binary action만 뽑게 하는 기능 수행
@@ -131,8 +139,6 @@ class SlowActionCodec:
         u = self.spec.num_uav
 
         idx = 0
-
-        idx += m * n
 
         rsu_scheduling = binary[idx: idx + m * n].reshape(m, n)
         idx += m * n
