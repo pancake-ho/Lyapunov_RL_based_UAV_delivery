@@ -154,8 +154,8 @@ class EnvConfig:
     num_uav: int = 10
     uav_user_cap: int = 2
     
-    slow_T: int = 600
-    episode_slots: int = 20 * 600
+    slow_T: int = 3600
+    episode_slots: Optional[int] = None
     N0: int = 3
 
     # 비디오 및 캐싱
@@ -259,8 +259,8 @@ class EnvConfig:
             raise ValueError("uav_user_cap은 양수여야 합니다.")
         if self.slow_T <= 0:
             raise ValueError("slow_T는 양수여야 합니다.")
-        if self.episode_slots <= 0:
-            raise ValueError("episode_slots는 양수여야 합니다.")
+        if self.episode_slots is not None and self.episode_slots <= 0:
+            raise ValueError("episode_slots는 None 또는 양수여야 합니다.")
 
         if self.num_video <= 0:
             raise ValueError("num_video는 양수여야 합니다.")

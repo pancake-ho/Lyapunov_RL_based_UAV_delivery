@@ -215,10 +215,6 @@ def sample_random_slow_action(
         candidate_mask = same_region_mask & residual_mask & cache_match_mask
         candidate_users = np.flatnonzero(candidate_mask)
 
-        # cache까지 맞는 후보가 없으면 같은 region residual user로 fallback
-        if candidate_users.size == 0:
-            candidate_users = np.flatnonzero(same_region_mask & residual_mask)
-
         if candidate_users.size == 0:
             continue
 

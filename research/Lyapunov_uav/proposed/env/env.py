@@ -1030,7 +1030,10 @@ class Env:
         next_t = int(self.t)
 
         terminated = False
-        truncated = bool(next_t >= int(self.cfg.episode_slots))
+        if self.cfg.episode_slots is None:
+            truncated = False
+        else:
+            truncated = bool(next_t >= int(self.cfg.episode_slots))
 
         reward, reward_components = self._compute_reward(
             prev_Q=prev_Q,
