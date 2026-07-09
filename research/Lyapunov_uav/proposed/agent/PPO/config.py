@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -42,14 +42,14 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 현재 fast-only 학습에서는 episode 하나를 slow_T slot짜리 round 하나로 본다.
     # 즉, num_episodes=50000이면 slow_T slot짜리 round를 50000번 학습한다.
-    num_episodes: int = 100_000
+    num_episodes: int = 5000
     eval_episodes: int = 20
 
     rounds_per_episode: int = 20
     eval_rounds_per_episode: int = 50
 
     # PPO update 1번에 모을 slot 수
-    rollout_slots: int = 8192
+    rollout_slots: int = 4096
 
     # checkpoint / plot 저장 주기
     save_every_episodes: int = 5_000
@@ -59,8 +59,8 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 4) PPO hyperparameters
     # ------------------------------------------------------------------
-    batch_size: int = 1024
-    update_epochs: int = 4
+    batch_size: int = 512
+    update_epochs: int = 2
 
     # Queue/Battery 장기 pressure를 보려면 0.90은 너무 짧다.
     # reward scaling은 하지 않고 horizon만 길게 본다.
@@ -68,24 +68,23 @@ class FastTrainConfig:
     gae_lambda: float = 0.95
 
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
-    lr: float = 3e-5
-
-    clip_coef: float = 0.10
+    lr: float = 5e-6
+    clip_coef: float = 0.05
 
     # raw reward를 그대로 쓰므로 value loss가 커질 수 있다.
     # critic loss가 actor를 압도하지 않도록 value_coef는 낮게 둔다.
-    value_coef: float = 0.05
+    value_coef: float = 0.02
 
     # 기존 1e-5는 action_dim=1000 기준으로 거의 영향이 없다.
-    entropy_coef: float = 1e-3
+    entropy_coef: float = 1e-5
 
-    max_grad_norm: float = 0.3
+    max_grad_norm: float = 0.2
 
-    hidden_dims: Optional[List[int]] = None
+    hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
 
     # 기존 -1.5는 std≈0.22로 탐색이 좁다.
     # raw reward 유지 + large action space에서는 -1.0부터 시작 권장.
-    init_log_std: float = -1.0
+    init_log_std: float = -1.5
 
     # ------------------------------------------------------------------
     # 5) normalization
