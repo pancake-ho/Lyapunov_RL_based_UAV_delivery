@@ -84,7 +84,7 @@ class BatteryConfig:
     # SoC Actual queue
     e_max: int = 100
     e_init: int = 100
-    e_min: float = 10.0
+    e_min: float = 20.0
 
     # hovering 에너지 모델
     # e_hover(t) = (p_0 + p_i) * slot_duration
@@ -100,7 +100,7 @@ class BatteryConfig:
     allow_charge: bool = True
 
     # time slot
-    slot_duration: float = 1
+    slot_duration: float = 1.0
     target_service_slots_per_round: int = 5
 
     # SoC conversion term
@@ -154,8 +154,8 @@ class EnvConfig:
     num_uav: int = 10
     uav_user_cap: int = 2
     
-    slow_T: int = 3600
-    episode_slots = 24 * 3600
+    slow_T: int = 600
+    episode_slots: int = 20 * 600
     N0: int = 3
 
     # 비디오 및 캐싱
@@ -169,7 +169,7 @@ class EnvConfig:
     # FSMC mobility
     # user는 매 slot 확률 p로 왼쪽 region으로 이동
     # region 0에서 이동이 발생하면 오른쪽 끝 region으로 다른 user 재진입
-    move_prob: float = 0.1
+    move_prob: float = 0.0005
     region_len: float = 50.0
 
     # Channel
@@ -212,7 +212,7 @@ class EnvConfig:
     battery: BatteryConfig = field(default_factory=BatteryConfig)
 
     # Queue / Playback model
-    init_queue: float = 0.0
+    init_queue: float = 20.0
     playback_rate: float = 1.0 # queue update 산식의 b에 대응
     max_queue: float = 100.0 # Q_bar에 대응
 

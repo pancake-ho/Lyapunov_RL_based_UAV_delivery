@@ -32,7 +32,7 @@ class FastTrainConfig:
     output_root: str = "fast"
 
     # None이면 fast_train.py에서 자동 이름 생성
-    run_name: Optional[str] = "fast_ppo_stable_config_only_v1"
+    run_name: Optional[str] = "fast_ppo_rs1e4_multiround_v1"
 
     checkpoint: Optional[str] = None
     resume: bool = False
@@ -73,7 +73,7 @@ class FastTrainConfig:
 
     # raw reward를 그대로 쓰므로 value loss가 커질 수 있다.
     # critic loss가 actor를 압도하지 않도록 value_coef는 낮게 둔다.
-    value_coef: float = 0.02
+    value_coef: float = 0.5
 
     # 기존 1e-5는 action_dim=1000 기준으로 거의 영향이 없다.
     entropy_coef: float = 1e-5
@@ -89,7 +89,6 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 5) normalization
     # ------------------------------------------------------------------
-    # reward scaling/normalization은 사용하지 않는다.
     obs_norm: bool = True
     adv_norm: bool = True
     reward_norm: bool = False
@@ -105,8 +104,10 @@ class FastTrainConfig:
     use_value_clip: bool = True
 
     # raw reward 기준 value prediction 변화폭 clipping.
-    # 너무 작게 잡으면 critic이 큰 return을 못 따라가므로 5e4부터 시작.
-    value_clip_coef: float = 50_000.0
+    value_clip_coef: float = 20.0
+
+    # reward scaling 변수
+    ppo_reward_scale: float = 1e-4
 
     # ------------------------------------------------------------------
     # 7) Fast-only 학습용 slow decision 생성 방식
@@ -211,6 +212,8 @@ class FastTrainConfig:
             raise ValueError("현재 설정은 reward clipping을 사용하지 않습니다. reward_clip은 None이어야 합니다.")
         if self.reward_norm:
             raise ValueError("현재 설정은 reward normalization을 사용하지 않습니다. reward_norm은 False여야 합니다.")
+        if self.ppo_reward_scale <= 0.0:
+            raise ValueError("ppo_reward_scale must be positive.")
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)

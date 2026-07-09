@@ -264,7 +264,7 @@ class Env:
             if int(self.user_region[n]) > 0:
                 self.user_region[n] -= 1
             else:
-                print(f"user {n} | region 이탈로 재진입 발생")
+                # print(f"user {n} | region 이탈로 재진입 발생")
                 self.user_region[n] = self.num_rsu - 1
                 self.queue[n] = float(self.cfg.init_queue)
                 self.requested_content[n] = self._sample_user_requested_content()

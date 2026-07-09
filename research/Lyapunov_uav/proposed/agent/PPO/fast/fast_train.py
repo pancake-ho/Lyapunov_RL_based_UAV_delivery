@@ -317,6 +317,40 @@ def reset_env(
     return obs, info
 
 
+def apply_random_slow_action_for_current_round(
+    env: Env,
+    slow_rng: np.random.Generator,
+    train_cfg: FastTrainConfig,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    round boundary에서 random slow-timescale decision을 새로 적용한다.
+
+    현재 fast-only 학습에서는 slow policy를 아직 학습하지 않으므로,
+    각 round마다 random slow condition을 샘플링한다.
+    """
+    slow_action = sample_random_slow_action(
+        env=env,
+        rng=slow_rng,
+        train_cfg=train_cfg,
+    )
+
+    applied_slow_action = env.apply_slow_action(slow_action)
+    obs = env.get_fast_obs()
+
+    info = {
+        "random_slow_action": {
+            "rsu_scheduling": np.asarray(applied_slow_action.rsu_scheduling, dtype=np.int32).copy(),
+            "uav_hiring": np.asarray(applied_slow_action.uav_hiring, dtype=np.int32).copy(),
+            "uav_scheduling": np.asarray(applied_slow_action.uav_scheduling, dtype=np.int32).copy(),
+        },
+        "random_rsu_links": int(np.sum(applied_slow_action.rsu_scheduling)),
+        "random_hired_uav": int(np.sum(applied_slow_action.uav_hiring)),
+        "random_uav_links": int(np.sum(applied_slow_action.uav_scheduling)),
+    }
+
+    return obs, info
+
+
 def _read_scalar_csv(csv_path: Path) -> Dict[str, list[float]]:
     data: Dict[str, list[float]] = {}
 
@@ -398,6 +432,12 @@ def save_training_plots(
         "episode_consumed_soc",
         "episode_charged_soc",
         "episode_outage",
+        "episode_min_soc",
+        "episode_mean_soc",
+        "episode_max_B",
+        "episode_mean_B",
+        "episode_charging_slots",
+        "episode_outage_slots",
     ]
 
     if "episode" in ep_data:
@@ -470,7 +510,7 @@ def save_training_plots(
 
 def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
     """
-    env.step() info에서 로그용 metric만 추출.
+    env.step() info에서 로그용 metric을 추출한다.
     """
     reward_components = info.get("reward_components", {})
     fast_components = reward_components.get("fast_reward_components", {})
@@ -482,6 +522,25 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
     except Exception:
         stall_sum = 0.0
 
+    next_E = np.asarray(info.get("next_E", []), dtype=np.float32)
+    next_B = np.asarray(info.get("next_B", []), dtype=np.float32)
+    charging_state = np.asarray(info.get("charging_state", []), dtype=np.float32)
+    outage = np.asarray(info.get("outage", []), dtype=np.float32)
+
+    if next_E.size > 0:
+        min_soc = float(np.min(next_E))
+        mean_soc = float(np.mean(next_E))
+    else:
+        min_soc = 0.0
+        mean_soc = 0.0
+
+    if next_B.size > 0:
+        max_B = float(np.max(next_B))
+        mean_B = float(np.mean(next_B))
+    else:
+        max_B = 0.0
+        mean_B = 0.0
+
     return {
         "sum_delivery": float(fast_components.get("sum_delivery", 0.0)),
         "sum_quality": float(fast_components.get("sum_quality", 0.0)),
@@ -491,6 +550,12 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
         "num_charging_uav": float(fast_components.get("num_charging_uav", 0.0)),
         "num_outage_uav": float(fast_components.get("num_outage_uav", 0.0)),
         "stall_sum": stall_sum,
+        "min_soc": min_soc,
+        "mean_soc": mean_soc,
+        "max_B": max_B,
+        "mean_B": mean_B,
+        "charging_slots": float(np.sum(charging_state)) if charging_state.size > 0 else 0.0,
+        "outage_slots": float(np.sum(outage)) if outage.size > 0 else 0.0,
     }
 
 
@@ -579,35 +644,42 @@ def train(train_cfg: FastTrainConfig) -> None:
         ep_charged_soc = 0.0
         ep_outage = 0.0
         ep_steps = 0
+        ep_min_soc = float("inf")
+        ep_mean_soc_sum = 0.0
+        ep_max_B = 0.0
+        ep_mean_B_sum = 0.0
+        ep_charging_slots = 0.0
+        ep_outage_slots = 0.0
 
-        for _ in range(int(env_cfg.slow_T)):
-            selected = agent.select_action(
-                obs=obs,
-                deterministic=False,
-                update_norm=True,
-            )
+        ep_horizon = int(env_cfg.slow_T) * int(train_cfg.rounds_per_episode)
+
+        for _ in range(ep_horizon):
+            selected = agent.select_action(obs)
 
             next_obs_raw, reward, terminated, truncated, info = split_env_step(
                 env.step(selected["env_action"])
             )
 
-            next_obs = next_obs_raw
-
             is_round_boundary = bool(info.get("is_round_boundary", False))
-            done = bool(terminated or truncated or is_round_boundary)
+
+            ep_done = bool(terminated or truncated or ep_steps + 1 >= ep_horizon)
+
+            # reward scaling
+            raw_reward = float(reward)
+            ppo_reward = raw_reward * float(train_cfg.ppo_reward_scale)
 
             agent.store_transition(
                 obs_vec=selected["obs_vec"],
                 raw_action=selected["raw_action"],
-                reward=float(reward),
-                done=done,
+                reward=ppo_reward,
+                done=ep_done,
                 value=float(selected["value"]),
                 log_prob=float(selected["log_prob"]),
             )
 
             metrics = extract_info_metrics(info)
 
-            ep_reward += float(reward)
+            ep_reward += raw_reward
             ep_delivery += metrics["sum_delivery"]
             ep_quality += metrics["sum_quality"]
             ep_stall += metrics["stall_sum"]
@@ -615,11 +687,28 @@ def train(train_cfg: FastTrainConfig) -> None:
             ep_charged_soc += metrics["sum_charged_soc"]
             ep_outage += metrics["num_outage_uav"]
 
+            ep_min_soc = min(ep_min_soc, metrics["min_soc"])
+            ep_mean_soc_sum += metrics["mean_soc"]
+            ep_max_B = max(ep_max_B, metrics["max_B"])
+            ep_mean_B_sum += metrics["mean_B"]
+            ep_charging_slots += metrics["charging_slots"]
+            ep_outage_slots += metrics["outage_slots"]
+
             ep_steps += 1
             global_slot += 1
 
+            next_obs = next_obs_raw
+
+            if is_round_boundary and not ep_done:
+                next_obs, slow_info = apply_random_slow_action_for_current_round(
+                    env=env,
+                    slow_rng=slow_rng,
+                    train_cfg=train_cfg,
+                )
+                info["next_random_slow_action"] = slow_info 
+
             last_obs = next_obs
-            last_done = done
+            last_done = ep_done
 
             if agent.buffer.is_full:
                 agent.finish_rollout(
@@ -654,10 +743,20 @@ def train(train_cfg: FastTrainConfig) -> None:
 
             obs = next_obs
 
-            if done:
+            if ep_done:
                 break
 
         episode_idx += 1
+
+        if ep_steps > 0:
+            ep_mean_soc = ep_mean_soc_sum / float(ep_steps)
+            ep_mean_B = ep_mean_B_sum / float(ep_steps)
+        else:
+            ep_mean_soc = 0.0
+            ep_mean_B = 0.0
+
+        if not np.isfinite(ep_min_soc):
+            ep_min_soc = 0.0
 
         episode_logger.write(
             {
@@ -671,6 +770,12 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "episode_consumed_soc": ep_consumed_soc,
                 "episode_charged_soc": ep_charged_soc,
                 "episode_outage": ep_outage,
+                "episode_min_soc": ep_min_soc,
+                "episode_mean_soc": ep_mean_soc,
+                "episode_max_B": ep_max_B,
+                "episode_mean_B": ep_mean_B,
+                "episode_charging_slots": ep_charging_slots,
+                "episode_outage_slots": ep_outage_slots,
             }
         )
 
@@ -682,6 +787,9 @@ def train(train_cfg: FastTrainConfig) -> None:
             f"delivery={ep_delivery:.4f} "
             f"quality={ep_quality:.4f} "
             f"stall={ep_stall:.4f}",
+            f"min_soc={ep_min_soc:.2f} ",
+            f"charging_slots={ep_charging_slots:.0f} ",
+            f"outage_slots={ep_outage_slots:.0f}",
             flush=True,
         )
 
@@ -851,8 +959,18 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ep_charged_soc = 0.0
         ep_outage = 0.0
         ep_steps = 0
+        
+        ep_min_soc = float("inf")
+        ep_mean_soc_sum = 0.0
+        ep_max_B = 0.0
+        ep_mean_B_sum = 0.0
+        ep_charging_slots = 0.0
+        ep_outage_slots = 0.0
+        
 
-        for _ in range(int(env_cfg.slow_T)):
+        ep_horizon = int(env_cfg.slow_T) * int(train_cfg.eval_rounds_per_episode)
+
+        for _ in range(ep_horizon):
             selected = agent.select_action(
                 obs=obs,
                 deterministic=True,
@@ -863,7 +981,23 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 env.step(selected["env_action"])
             )
 
+            is_round_boundary = bool(info.get("is_round_boundary", False))
+
+            ep_done = bool(
+                terminated
+                or truncated
+                or ep_steps + 1 >= ep_horizon
+            )
+
             next_obs = next_obs_raw
+
+            if is_round_boundary and not ep_done:
+                next_obs, slow_info = apply_random_slow_action_for_current_round(
+                    env=env,
+                    slow_rng=slow_rng,
+                    train_cfg=train_cfg,
+                )
+                info["next_random_slow_action"] = slow_info
 
             metrics = extract_info_metrics(info)
 
@@ -875,17 +1009,17 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             ep_charged_soc += metrics["sum_charged_soc"]
             ep_outage += metrics["num_outage_uav"]
 
+            ep_min_soc = min(ep_min_soc, metrics["min_soc"])
+            ep_mean_soc_sum += metrics["mean_soc"]
+            ep_max_B = max(ep_max_B, metrics["max_B"])
+            ep_mean_B_sum += metrics["mean_B"]
+            ep_charging_slots += metrics["charging_slots"]
+            ep_outage_slots += metrics["outage_slots"]
+
             ep_steps += 1
-
-            done = bool(
-                terminated
-                or truncated
-                or bool(info.get("is_round_boundary", False))
-            )
-
             obs = next_obs
 
-            if done:
+            if ep_done:
                 break
 
         rewards.append(ep_reward)
