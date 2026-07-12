@@ -242,6 +242,9 @@ class EnvConfig:
     # seed
     seed: int = 2026
 
+    # quality objective
+    quality_obj: str = "max_quality_degradation"
+
     def __post_init__(self) -> None:
         if self.num_user <= 0:
             raise ValueError("num_user는 양수여야 합니다.")
@@ -313,13 +316,33 @@ class EnvConfig:
             raise ValueError("hire_weight는 0 이상이어야 합니다.")
         if self.V < 0.0:
             raise ValueError("V는 0 이상이어야 합니다.")
+        
+        self.quality_obj = (
+            str(self.quality_obj)
+            .lower()
+            .strip()
+        )
+        if self.quality_obj != "max_quality_degradation":
+            raise ValueError(
+                "현재 formulation 기준 "
+                "'max_quality_degradation' obj만 지원합니다. "
+                f"현재 값: {self.quality_obj}"
+            )
+        
+    @property
+    def P_bar(self) -> float:
+        """
+        최대 quality P_bar
+        """
+        return float(max(self.quality_weights))
 
     def reward_coefficients(self) -> Dict[str, float]:
         return {
             "alpha_Z": float(self.alpha_Z),
             "alpha_B": float(self.alpha_B),
             "V": float(self.V),
-            "hire_weight": float(self.hire_weight),
+            "P_bar": float(self.P_bar),
+            "hire_weight": float(self.hire_weight)
         }
 
     def as_dict(self) -> Dict:

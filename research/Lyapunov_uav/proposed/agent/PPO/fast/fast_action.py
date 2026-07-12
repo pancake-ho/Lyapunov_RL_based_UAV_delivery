@@ -223,6 +223,72 @@ class FastActionCodec:
             self.spec.max_tx_power,
         )
 
+        if obs is not None:
+            mask_parts = self._split_raw_action(
+                self.build_action_mask(obs)
+            )
+
+            rsu_mask = mask_parts[
+                "rsu_chunks"
+            ]
+            uav_mask = mask_parts[
+                "uav_chunks"
+            ]
+
+            rsu_chunks = (
+                rsu_chunks * rsu_mask
+            ).astype(np.int32)
+            rsu_layers = (
+                rsu_layers * rsu_mask
+            ).astype(np.int32)
+
+            uav_chunks = (
+                uav_chunks * uav_mask
+            ).astype(np.int32)
+            uav_layers = (
+                uav_layers * uav_mask
+            ).astype(np.int32)
+            uav_power = (
+                uav_power * uav_mask
+            ).astype(np.float32)
+
+        # chunk/layer 중 하나라도 0이면 실제 전송은 없음
+        rsu_service_mask = (
+            (rsu_chunks > 0)
+            & (rsu_layers > 0)
+        )
+        uav_service_mask = (
+            (uav_chunks > 0)
+            & (uav_layers > 0)
+        )
+
+        rsu_chunks = np.where(
+            rsu_service_mask,
+            rsu_chunks,
+            0,
+        ).astype(np.int32)
+        rsu_layers = np.where(
+            rsu_service_mask,
+            rsu_layers,
+            0,
+        ).astype(np.int32)
+
+        uav_chunks = np.where(
+            uav_service_mask,
+            uav_chunks,
+            0,
+        ).astype(np.int32)
+        uav_layers = np.where(
+            uav_service_mask,
+            uav_layers,
+            0,
+        ).astype(np.int32)
+        uav_power = np.where(
+            uav_service_mask,
+            uav_power,
+            0.0,
+        ).astype(np.float32)
+
         return {
             "rsu_chunks": rsu_chunks,
             "rsu_layers": rsu_layers,
@@ -232,5 +298,120 @@ class FastActionCodec:
         }
 
     def zeros_env_action(self, obs: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        raw = np.zeros(self.action_dim, dtype=np.float32)
-        return self.decode(raw, obs=obs)
+        return {
+            "rsu_chunks": np.zeros(
+                self.spec.rsu_shape,
+                dtype=np.int32,
+            ),
+            "rsu_layers": np.zeros(
+                self.spec.rsu_shape,
+                dtype=np.int32,
+            ),
+            "uav_chunks": np.zeros(
+                self.spec.uav_shape,
+                dtype=np.int32,
+            ),
+            "uav_layers": np.zeros(
+                self.spec.uav_shape,
+                dtype=np.int32,
+            ),
+            "uav_power": np.zeros(
+                self.spec.uav_shape,
+                dtype=np.float32,
+            ),
+        }
+    
+    def build_action_mask(
+        self,
+        obs: Dict[str, Any],
+    ) -> np.ndarray:
+        """
+        현재 slot에서 formulation 상 유효한 Fast action dimension mask 계산.
+        """
+        rsu_connection = np.asarray(
+        obs["rsu_connection"],
+        dtype=np.float32,
+        )
+        uav_connection = np.asarray(
+            obs["uav_connection"],
+            dtype=np.float32,
+        )
+
+        if rsu_connection.shape != self.spec.rsu_shape:
+            raise ValueError(
+                "rsu_connection shape mismatch: "
+                f"expected={self.spec.rsu_shape}, "
+                f"got={rsu_connection.shape}"
+            )
+
+        if uav_connection.shape != self.spec.uav_shape:
+            raise ValueError(
+                "uav_connection shape mismatch: "
+                f"expected={self.spec.uav_shape}, "
+                f"got={uav_connection.shape}"
+            )
+        
+        rsu_mask = (
+            rsu_connection > 0
+        ).astype(np.float32)
+
+        uav_mask = (
+            uav_connection > 0
+        ).astype(np.float32)
+
+        # I_u(t)=1{E_u(t)<=E_u^TH}
+        if (
+            bool(self.cfg.battery.allow_charge)
+            and bool(
+                self.cfg.battery.enable_charging
+            )
+        ):
+            B = np.asarray(
+                obs["B"],
+                dtype=np.float32,
+            )
+
+            if B.shape != (self.spec.num_uav,):
+                raise ValueError(
+                    "B shape mismatch: "
+                    f"expected={(self.spec.num_uav,)}, "
+                    f"got={B.shape}"
+                )
+
+            # B_u(t)=E_bar-E_u(t)
+            current_soc = (
+                float(self.cfg.battery.e_max)
+                - B
+            )
+
+            charging_uav = (
+                current_soc
+                <= float(self.cfg.battery.e_min)
+            ).astype(np.float32)
+
+            uav_mask *= (
+                1.0
+                - charging_uav[:, None]
+            )
+
+        action_mask = np.concatenate(
+            [
+                rsu_mask.reshape(-1),
+                rsu_mask.reshape(-1),
+                uav_mask.reshape(-1),
+                uav_mask.reshape(-1),
+                uav_mask.reshape(-1),
+            ],
+            axis=0,
+        ).astype(np.float32)
+
+        if action_mask.shape != (
+            self.action_dim,
+        ):
+            raise RuntimeError(
+                "Fast action mask dim mismatch: "
+                f"expected={(self.action_dim,)}, "
+                f"got={action_mask.shape}"
+            )
+
+        return action_mask

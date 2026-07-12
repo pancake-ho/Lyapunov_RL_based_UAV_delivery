@@ -32,7 +32,9 @@ class FastTrainConfig:
     output_root: str = "fast"
 
     # None이면 fast_train.py에서 자동 이름 생성
-    run_name: Optional[str] = "fast_ppo_rs1e4_multiround_v1"
+    run_name: Optional[str] = (
+        "fast_ppo_qdeg_mask_v1"
+    )
 
     checkpoint: Optional[str] = None
     resume: bool = False
@@ -60,7 +62,7 @@ class FastTrainConfig:
     # 4) PPO hyperparameters
     # ------------------------------------------------------------------
     batch_size: int = 512
-    update_epochs: int = 2
+    update_epochs: int = 4
 
     # Queue/Battery 장기 pressure를 보려면 0.90은 너무 짧다.
     # reward scaling은 하지 않고 horizon만 길게 본다.
@@ -68,23 +70,23 @@ class FastTrainConfig:
     gae_lambda: float = 0.95
 
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
-    lr: float = 5e-6
-    clip_coef: float = 0.05
+    lr: float = 3e-5
+    clip_coef: float = 0.10
 
     # raw reward를 그대로 쓰므로 value loss가 커질 수 있다.
     # critic loss가 actor를 압도하지 않도록 value_coef는 낮게 둔다.
     value_coef: float = 0.5
 
     # 기존 1e-5는 action_dim=1000 기준으로 거의 영향이 없다.
-    entropy_coef: float = 1e-5
+    entropy_coef: float = 1e-3
 
-    max_grad_norm: float = 0.2
+    max_grad_norm: float = 0.5
 
     hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
 
     # 기존 -1.5는 std≈0.22로 탐색이 좁다.
     # raw reward 유지 + large action space에서는 -1.0부터 시작 권장.
-    init_log_std: float = -1.5
+    init_log_std: float = -1.0
 
     # ------------------------------------------------------------------
     # 5) normalization

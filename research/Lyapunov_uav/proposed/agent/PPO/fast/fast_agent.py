@@ -182,11 +182,15 @@ class FastPPOAgent:
             update_norm=update_norm,
         )
 
+        action_mask = self.codec.build_action_mask(obs)
+
         obs_tensor = to_tensor(obs_vec, device=self.device).unsqueeze(0)
+        mask_tensor = to_tensor(action_mask, device=self.device).unsqueeze(0)
 
         raw_action_tensor, log_prob_tensor, value_tensor = self.model.act(
-            obs_tensor,
+            obs=obs_tensor,
             deterministic=deterministic,
+            action_mask=mask_tensor,
         )
 
         raw_action = raw_action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
@@ -197,18 +201,50 @@ class FastPPOAgent:
 
         env_action = self.codec.decode(raw_action, obs)
 
+        active_action_dims = int(
+            np.sum(action_mask)
+        )
+
+        active_action_ratio = float(
+            np.mean(action_mask)
+        )
+
+        active_values = raw_action[
+            action_mask > 0.0
+        ]
+
+        if active_values.size > 0:
+            action_saturation_ratio = float(
+                np.mean(
+                    np.abs(active_values) >= 1.0
+                )
+            )
+        else:
+            action_saturation_ratio = 0.0
+
         return {
             "obs_vec": obs_vec,
             "raw_action": raw_action,
+            "action_mask": action_mask,
             "env_action": env_action,
             "log_prob": log_prob,
             "value": value,
+            "active_action_dims": (
+                active_action_dims
+            ),
+            "active_action_ratio": (
+                active_action_ratio
+            ),
+            "action_saturation_ratio": (
+                action_saturation_ratio
+            ),
         }
     
     def store_transition(
         self,
         obs_vec: np.ndarray,
         raw_action: np.ndarray,
+        action_mask: np.ndarray,
         reward: float,
         done: bool,
         value: float,
@@ -219,15 +255,23 @@ class FastPPOAgent:
         """
         if self.ppo_cfg.fail_on_nan:
             if not np.isfinite(float(reward)):
-                raise RuntimeError(f"reward is NaN or Inf: {reward}")
+                raise RuntimeError(
+                    f"reward is NaN or Inf: {reward}"
+                )
             if not np.isfinite(float(value)):
-                raise RuntimeError(f"value is NaN or Inf: {value}")
+                raise RuntimeError(
+                    f"value is NaN or Inf: {value}"
+                )
             if not np.isfinite(float(log_prob)):
-                raise RuntimeError(f"log_prob is NaN or Inf: {log_prob}")
+                raise RuntimeError(
+                    "log_prob is NaN or Inf: "
+                    f"{log_prob}"
+                )
 
         self.buffer.add(
             obs=obs_vec,
             action=raw_action,
+            action_mask=action_mask,
             reward=float(reward),
             done=bool(done),
             value=float(value),
@@ -329,10 +373,12 @@ class FastPPOAgent:
             for batch in self.buffer.iter_minibatches(
                 batch_size=int(self.ppo_cfg.batch_size),
                 shuffle=True,
+                include_action_masks=True,
             ):
                 new_log_prob, entropy, new_value = self.model.evaluate_actions(
                     obs=batch.obs,
                     actions=batch.actions,
+                    action_mask=batch.action_masks,
                 )
 
                 self._check_finite_tensor("new_log_prob", new_log_prob)
@@ -389,9 +435,11 @@ class FastPPOAgent:
                 clip_frac_values.append(float(clip_frac.detach().cpu().item()))
 
         obs, actions, old_log_probs, returns, advantages, old_values = self.buffer.get_tensors()
+        action_masks = self.buffer.get_action_masks_tensor()
 
         with torch.no_grad():
-            _, _, value_after = self.model.evaluate_actions(obs, actions)
+            _, _, value_after = self.model.evaluate_actions(obs, actions, action_masks)
+
             explained_v = explained_var(
                 y_pred=value_after.detach().cpu().numpy(),
                 y_true=returns.detach().cpu().numpy(),
@@ -408,6 +456,21 @@ class FastPPOAgent:
             "explained_variance": float(explained_v),
             "buffer_reward_mean": float(buffer_summary["reward_mean"]),
             "buffer_reward_std": float(buffer_summary["reward_std"]),
+            "active_action_dims_mean": float(
+                action_masks
+                .sum(dim=-1)
+                .mean()
+                .detach()
+                .cpu()
+                .item()
+            ),
+            "active_action_ratio_mean": float(
+                action_masks
+                .mean()
+                .detach()
+                .cpu()
+                .item()
+            ),
         }
 
         self.buffer.reset()

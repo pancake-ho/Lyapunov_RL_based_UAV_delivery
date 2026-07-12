@@ -117,6 +117,7 @@ class FastActorCritic(nn.Module):
         self, 
         obs: torch.Tensor, 
         deterministic: bool = False,
+        action_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Input으로 주어지는 obs에 대하여 action, log_prob, value 반환.
@@ -130,12 +131,33 @@ class FastActorCritic(nn.Module):
             obs = obs.unsqueeze(0)
 
         dist = self._distribution(obs)
+
         if deterministic:
             action = dist.mean
         else:
             action = dist.sample()
 
-        log_prob = dist.log_prob(action).sum(dim=-1)
+        mask = self._prepare_action_mask(action_mask, action)
+        if mask is not None:
+            action = torch.where(
+                mask > 0.0,
+                action,
+                torch.zeros_like(action),
+            )
+
+        per_dim_log_prob = (
+            dist.log_prob(action)
+        )
+
+        if mask is None:
+            log_prob = per_dim_log_prob.sum(
+                dim=-1
+            )
+        else:
+            log_prob = (
+                per_dim_log_prob * mask
+            ).sum(dim=-1)
+
         value = self.value(obs)
 
         return action, log_prob, value
@@ -143,19 +165,90 @@ class FastActorCritic(nn.Module):
     def evaluate_actions(
         self,
         obs: torch.Tensor,
-        actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        PPO update를 위해, log_prob/entropy/value를 모두 반환.
-
-        현재 시나리오 기준:
-            log_prob: shape (B,)
-            entropy: shape (B,)
-            value: shape (B,)
-        """
+        actions: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         dist = self._distribution(obs)
-        log_prob = dist.log_prob(actions).sum(dim=-1)
-        entropy = dist.entropy().sum(dim=-1)
+
+        mask = self._prepare_action_mask(
+            action_mask,
+            actions,
+        )
+
+        per_dim_log_prob = (
+            dist.log_prob(actions)
+        )
+        per_dim_entropy = (
+            dist.entropy()
+        )
+
+        if mask is None:
+            log_prob = per_dim_log_prob.sum(
+                dim=-1
+            )
+            entropy = per_dim_entropy.mean(
+                dim=-1
+            )
+        else:
+            active_dims = mask.sum(
+                dim=-1
+            )
+
+            log_prob = (
+                per_dim_log_prob * mask
+            ).sum(dim=-1)
+
+            # 연결 수가 달라져도 entropy scale이 일정하도록 평균 사용
+            entropy = (
+                per_dim_entropy * mask
+            ).sum(dim=-1) / active_dims.clamp_min(
+                1.0
+            )
+
+            # 유효 Fast action이 하나도 없는 slot
+            entropy = torch.where(
+                active_dims > 0.0,
+                entropy,
+                torch.zeros_like(entropy),
+            )
+
         value = self.value(obs)
 
         return log_prob, entropy, value
+    
+    def _prepare_action_mask(
+        self,
+        action_mask: torch.Tensor | None,
+        reference: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """
+        action mask 헬퍼
+        """
+        if action_mask is None:
+            return None
+
+        if action_mask.shape != reference.shape:
+            raise ValueError(
+                "action_mask shape mismatch: "
+                f"expected={tuple(reference.shape)}, "
+                f"got={tuple(action_mask.shape)}"
+            )
+
+        action_mask = action_mask.to(
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+
+        if torch.any(
+            (action_mask != 0.0)
+            & (action_mask != 1.0)
+        ):
+            raise ValueError(
+                "action_mask는 0 또는 1이어야 합니다."
+            )
+
+        return action_mask

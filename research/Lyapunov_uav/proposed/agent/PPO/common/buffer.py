@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterator, Tuple
+from typing import Dict, Iterator, Optional, Tuple
 
 import numpy as np
 import torch
@@ -18,6 +18,7 @@ class RolloutBatch:
     returns: torch.Tensor
     advantages: torch.Tensor
     old_values: torch.Tensor
+    action_masks: Optional[torch.Tensor] = None
 
 
 class RolloutBuffer:
@@ -69,6 +70,10 @@ class RolloutBuffer:
         self.dones = np.zeros(capacity, dtype=np.float32)
         self.values = np.zeros(capacity, dtype=np.float32)
         self.log_probs = np.zeros(capacity, dtype=np.float32)
+        self.action_masks = np.ones(
+            (capacity, action_dim),
+            dtype=np.float32,
+        )
 
         self.advantages = np.zeros(capacity, dtype=np.float32)
         self.returns = np.zeros(capacity, dtype=np.float32)
@@ -106,6 +111,7 @@ class RolloutBuffer:
         done: bool,
         value: float,
         log_prob: float,
+        action_mask: np.ndarray | None = None,
     ) -> None:
         """
         Buffer에 experience push를 수행.
@@ -115,6 +121,35 @@ class RolloutBuffer:
         
         obs_arr = np.asarray(obs, dtype=np.float32).reshape(-1)
         action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+    
+        if action_mask is None:
+            # Slow PPO 및 기존 caller 호환
+            action_mask_arr = np.ones(
+                self.action_dim,
+                dtype=np.float32,
+            )
+        else:
+            action_mask_arr = np.asarray(
+                action_mask,
+                dtype=np.float32,
+            ).reshape(-1)
+
+        if action_mask_arr.shape != (
+            self.action_dim,
+        ):
+            raise ValueError(
+                "action_mask shape mismatch: "
+                f"expected={(self.action_dim,)}, "
+                f"got={action_mask_arr.shape}"
+            )
+
+        if np.any(
+            (action_mask_arr != 0.0)
+            & (action_mask_arr != 1.0)
+        ):
+            raise ValueError(
+                "action_mask는 0 또는 1이어야 합니다."
+            )
 
         if obs_arr.shape[0] != self.obs_dim:
             raise ValueError(
@@ -133,12 +168,30 @@ class RolloutBuffer:
         self.dones[self.cnt] = done
         self.values[self.cnt] = value
         self.log_probs[self.cnt] = log_prob
+        self.action_masks[self.cnt] = action_mask_arr
 
         self.cnt += 1
         if self.cnt >= self.capacity:
             self.full = True
         
         self.advantages_ready = False
+
+    def get_action_masks_tensor(
+        self,
+    ) -> torch.Tensor:
+        if not self.advantages_ready:
+            raise ValueError(
+                "compute_returns_and_advs()를 "
+                "먼저 호출하세요."
+            )
+
+        size = len(self)
+
+        return torch.as_tensor(
+            self.action_masks[:size],
+            dtype=torch.float32,
+            device=self.device,
+        )
 
     def compute_returns_and_advs(
         self,
@@ -212,32 +265,69 @@ class RolloutBuffer:
         self,
         batch_size: int,
         shuffle: bool = True,
+        include_action_masks: bool = False,
     ) -> Iterator[RolloutBuffer]:
         """
         Buffer에 저장된 전체 experience 데이터를 batch_size 단위로 잘라서 하나씩 반환.
         또한 mini-batch를 반복적으로 꺼내기 위해 yield를 사용한 generator 역할을 수행.
         """
         if batch_size <= 0:
-            raise ValueError(f"batch_size는 양수 값을 가져야 합니다. 현재 값: {batch_size}")
-        
-        obs, actions, old_log_probs, returns, advantages, old_values = self.get_tensors()
-        size = obs.shape[0]
+            raise ValueError(
+                "batch_size는 양수여야 합니다."
+            )
 
+        (
+            obs,
+            actions,
+            old_log_probs,
+            returns,
+            advantages,
+            old_values,
+        ) = self.get_tensors()
+
+        action_masks = (
+            self.get_action_masks_tensor()
+            if include_action_masks
+            else None
+        )
+
+        size = obs.shape[0]
         indices = np.arange(size)
+
         if shuffle:
             np.random.shuffle(indices)
-        
-        for start in range(0, size, batch_size):
+
+        for start in range(
+            0,
+            size,
+            batch_size,
+        ):
             end = start + batch_size
-            mini_batch_idx = torch.as_tensor(indices[start:end], dtype=torch.long, device=self.device)
+
+            mini_batch_idx = torch.as_tensor(
+                indices[start:end],
+                dtype=torch.long,
+                device=self.device,
+            )
 
             yield RolloutBatch(
                 obs=obs[mini_batch_idx],
                 actions=actions[mini_batch_idx],
-                old_log_probs=old_log_probs[mini_batch_idx],
+                old_log_probs=(
+                    old_log_probs[mini_batch_idx]
+                ),
                 returns=returns[mini_batch_idx],
-                advantages=advantages[mini_batch_idx],
-                old_values=old_values[mini_batch_idx],
+                advantages=(
+                    advantages[mini_batch_idx]
+                ),
+                old_values=(
+                    old_values[mini_batch_idx]
+                ),
+                action_masks=(
+                    action_masks[mini_batch_idx]
+                    if action_masks is not None
+                    else None
+                ),
             )
     
     def summary(self) -> Dict[str, float]:

@@ -504,54 +504,271 @@ def save_training_plots(
         plt.close()
 
 
-def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
-    """
-    env.step() info에서 로그용 metric을 추출한다.
-    """
-    reward_components = info.get("reward_components", {})
-    fast_components = reward_components.get("fast_reward_components", {})
+def extract_info_metrics(
+    info: Dict[str, Any],
+) -> Dict[str, float]:
+    reward_components = info.get(
+        "reward_components",
+        {},
+    )
+    fast_components = reward_components.get(
+        "fast_reward_components",
+        {},
+    )
 
-    stall = info.get("stall", 0.0)
+    stall_arr = np.asarray(
+        info.get("stall", []),
+        dtype=np.float32,
+    )
+    playback_arr = np.asarray(
+        info.get("playback", []),
+        dtype=np.float32,
+    )
 
-    try:
-        stall_sum = float(np.sum(np.asarray(stall, dtype=np.float32)))
-    except Exception:
-        stall_sum = 0.0
+    stall_sum = (
+        float(np.sum(stall_arr))
+        if stall_arr.size > 0
+        else 0.0
+    )
 
-    next_E = np.asarray(info.get("next_E", []), dtype=np.float32)
-    next_B = np.asarray(info.get("next_B", []), dtype=np.float32)
-    charging_state = np.asarray(info.get("charging_state", []), dtype=np.float32)
-    outage = np.asarray(info.get("outage", []), dtype=np.float32)
+    prev_connection_state = info.get(
+        "prev_connection_state",
+        {},
+    )
+    connection_type = np.asarray(
+        prev_connection_state.get(
+            "connection_type",
+            [],
+        ),
+        dtype=np.int32,
+    )
 
-    if next_E.size > 0:
-        min_soc = float(np.min(next_E))
-        mean_soc = float(np.mean(next_E))
+    if (
+        stall_arr.shape
+        == playback_arr.shape
+        == connection_type.shape
+    ):
+        scheduled_mask = (
+            connection_type > 0
+        )
+        unscheduled_mask = (
+            ~scheduled_mask
+        )
+
+        scheduled_stall = float(
+            np.sum(
+                stall_arr[scheduled_mask]
+            )
+        )
+        scheduled_playback = float(
+            np.sum(
+                playback_arr[scheduled_mask]
+            )
+        )
+
+        unscheduled_stall = float(
+            np.sum(
+                stall_arr[unscheduled_mask]
+            )
+        )
+        unscheduled_playback = float(
+            np.sum(
+                playback_arr[unscheduled_mask]
+            )
+        )
     else:
-        min_soc = 0.0
-        mean_soc = 0.0
+        scheduled_stall = 0.0
+        scheduled_playback = 0.0
+        unscheduled_stall = 0.0
+        unscheduled_playback = 0.0
 
-    if next_B.size > 0:
-        max_B = float(np.max(next_B))
-        mean_B = float(np.mean(next_B))
-    else:
-        max_B = 0.0
-        mean_B = 0.0
+    next_E = np.asarray(
+        info.get("next_E", []),
+        dtype=np.float32,
+    )
+    next_B = np.asarray(
+        info.get("next_B", []),
+        dtype=np.float32,
+    )
+    charging_state = np.asarray(
+        info.get("charging_state", []),
+        dtype=np.float32,
+    )
+    outage = np.asarray(
+        info.get("outage", []),
+        dtype=np.float32,
+    )
 
     return {
-        "sum_delivery": float(fast_components.get("sum_delivery", 0.0)),
-        "sum_quality": float(fast_components.get("sum_quality", 0.0)),
-        "sum_consumed_soc": float(fast_components.get("sum_consumed_soc", 0.0)),
-        "sum_charged_soc": float(fast_components.get("sum_charged_soc", 0.0)),
-        "num_hired_uav": float(fast_components.get("num_hired_uav", 0.0)),
-        "num_charging_uav": float(fast_components.get("num_charging_uav", 0.0)),
-        "num_outage_uav": float(fast_components.get("num_outage_uav", 0.0)),
+        "sum_delivery": float(
+            fast_components.get(
+                "sum_delivery",
+                0.0,
+            )
+        ),
+        "sum_quality": float(
+            fast_components.get(
+                "sum_quality",
+                0.0,
+            )
+        ),
+        "sum_quality_degradation": float(
+            fast_components.get(
+                "sum_quality_degradation",
+                0.0,
+            )
+        ),
+        "quality_per_chunk": float(
+            fast_components.get(
+                "quality_per_chunk",
+                0.0,
+            )
+        ),
+        "quality_degradation_per_chunk": float(
+            fast_components.get(
+                "quality_degradation_per_chunk",
+                0.0,
+            )
+        ),
+
+        "video_delivery_term": float(
+            fast_components.get(
+                "video_delivery_term",
+                0.0,
+            )
+        ),
+        "battery_consume_term": float(
+            fast_components.get(
+                "battery_consume_term",
+                0.0,
+            )
+        ),
+        "battery_charge_term": float(
+            fast_components.get(
+                "battery_charge_term",
+                0.0,
+            )
+        ),
+        "quality_degradation_term": float(
+            fast_components.get(
+                "quality_degradation_term",
+                0.0,
+            )
+        ),
+
+        "delivery_term_share": float(
+            fast_components.get(
+                "delivery_term_share",
+                0.0,
+            )
+        ),
+        "battery_consume_term_share": float(
+            fast_components.get(
+                "battery_consume_term_share",
+                0.0,
+            )
+        ),
+        "battery_charge_term_share": float(
+            fast_components.get(
+                "battery_charge_term_share",
+                0.0,
+            )
+        ),
+        "quality_term_share": float(
+            fast_components.get(
+                "quality_term_share",
+                0.0,
+            )
+        ),
+
+        "sum_consumed_soc": float(
+            fast_components.get(
+                "sum_consumed_soc",
+                0.0,
+            )
+        ),
+        "sum_charged_soc": float(
+            fast_components.get(
+                "sum_charged_soc",
+                0.0,
+            )
+        ),
+
+        "num_hired_uav": float(
+            fast_components.get(
+                "num_hired_uav",
+                0.0,
+            )
+        ),
+        "num_charging_uav": float(
+            fast_components.get(
+                "num_charging_uav",
+                0.0,
+            )
+        ),
+        "num_outage_uav": float(
+            fast_components.get(
+                "num_outage_uav",
+                0.0,
+            )
+        ),
+
         "stall_sum": stall_sum,
-        "min_soc": min_soc,
-        "mean_soc": mean_soc,
-        "max_B": max_B,
-        "mean_B": mean_B,
-        "charging_slots": float(np.sum(charging_state)) if charging_state.size > 0 else 0.0,
-        "outage_slots": float(np.sum(outage)) if outage.size > 0 else 0.0,
+        "scheduled_stall": (
+            scheduled_stall
+        ),
+        "scheduled_playback": (
+            scheduled_playback
+        ),
+        "scheduled_stall_rate": (
+            scheduled_stall
+            / scheduled_playback
+            if scheduled_playback > 0.0
+            else 0.0
+        ),
+        "unscheduled_stall": (
+            unscheduled_stall
+        ),
+        "unscheduled_playback": (
+            unscheduled_playback
+        ),
+        "unscheduled_stall_rate": (
+            unscheduled_stall
+            / unscheduled_playback
+            if unscheduled_playback > 0.0
+            else 0.0
+        ),
+
+        "min_soc": (
+            float(np.min(next_E))
+            if next_E.size > 0
+            else 0.0
+        ),
+        "mean_soc": (
+            float(np.mean(next_E))
+            if next_E.size > 0
+            else 0.0
+        ),
+        "max_B": (
+            float(np.max(next_B))
+            if next_B.size > 0
+            else 0.0
+        ),
+        "mean_B": (
+            float(np.mean(next_B))
+            if next_B.size > 0
+            else 0.0
+        ),
+        "charging_slots": (
+            float(np.sum(charging_state))
+            if charging_state.size > 0
+            else 0.0
+        ),
+        "outage_slots": (
+            float(np.sum(outage))
+            if outage.size > 0
+            else 0.0
+        ),
     }
 
 
@@ -647,6 +864,22 @@ def train(train_cfg: FastTrainConfig) -> None:
         ep_charging_slots = 0.0
         ep_outage_slots = 0.0
 
+        ep_quality_degradation = 0.0
+
+        ep_video_delivery_term = 0.0
+        ep_battery_consume_term = 0.0
+        ep_battery_charge_term = 0.0
+        ep_quality_degradation_term = 0.0
+
+        ep_scheduled_stall = 0.0
+        ep_scheduled_playback = 0.0
+        ep_unscheduled_stall = 0.0
+        ep_unscheduled_playback = 0.0
+
+        ep_active_action_dims = 0.0
+        ep_active_action_ratio = 0.0
+        ep_action_saturation_ratio = 0.0
+
         ep_horizon = int(env_cfg.slow_T) * int(train_cfg.rounds_per_episode)
 
         for _ in range(ep_horizon):
@@ -667,6 +900,7 @@ def train(train_cfg: FastTrainConfig) -> None:
             agent.store_transition(
                 obs_vec=selected["obs_vec"],
                 raw_action=selected["raw_action"],
+                action_mask=selected["action_mask"],
                 reward=ppo_reward,
                 done=ep_done,
                 value=float(selected["value"]),
@@ -689,6 +923,46 @@ def train(train_cfg: FastTrainConfig) -> None:
             ep_mean_B_sum += metrics["mean_B"]
             ep_charging_slots += metrics["charging_slots"]
             ep_outage_slots += metrics["outage_slots"]
+
+            ep_quality_degradation += (
+                metrics["sum_quality_degradation"]
+            )
+
+            ep_video_delivery_term += (
+                metrics["video_delivery_term"]
+            )
+            ep_battery_consume_term += (
+                metrics["battery_consume_term"]
+            )
+            ep_battery_charge_term += (
+                metrics["battery_charge_term"]
+            )
+            ep_quality_degradation_term += (
+                metrics["quality_degradation_term"]
+            )
+
+            ep_scheduled_stall += (
+                metrics["scheduled_stall"]
+            )
+            ep_scheduled_playback += (
+                metrics["scheduled_playback"]
+            )
+            ep_unscheduled_stall += (
+                metrics["unscheduled_stall"]
+            )
+            ep_unscheduled_playback += (
+                metrics["unscheduled_playback"]
+            )
+
+            ep_active_action_dims += float(
+                selected["active_action_dims"]
+            )
+            ep_active_action_ratio += float(
+                selected["active_action_ratio"]
+            )
+            ep_action_saturation_ratio += float(
+                selected["action_saturation_ratio"]
+            )
 
             ep_steps += 1
             global_slot += 1
@@ -744,6 +1018,48 @@ def train(train_cfg: FastTrainConfig) -> None:
 
         episode_idx += 1
 
+        ep_quality_per_chunk = (
+            ep_quality / ep_delivery
+            if ep_delivery > 0.0
+            else 0.0
+        )
+
+        ep_quality_degradation_per_chunk = (
+            ep_quality_degradation
+            / ep_delivery
+            if ep_delivery > 0.0
+            else 0.0
+        )
+
+        ep_scheduled_stall_rate = (
+            ep_scheduled_stall
+            / ep_scheduled_playback
+            if ep_scheduled_playback > 0.0
+            else 0.0
+        )
+
+        ep_unscheduled_stall_rate = (
+            ep_unscheduled_stall
+            / ep_unscheduled_playback
+            if ep_unscheduled_playback > 0.0
+            else 0.0
+        )
+
+        ep_active_action_dims_mean = (
+            ep_active_action_dims
+            / max(ep_steps, 1)
+        )
+
+        ep_active_action_ratio_mean = (
+            ep_active_action_ratio
+            / max(ep_steps, 1)
+        )
+
+        ep_action_saturation_ratio_mean = (
+            ep_action_saturation_ratio
+            / max(ep_steps, 1)
+        )
+
         if ep_steps > 0:
             ep_mean_soc = ep_mean_soc_sum / float(ep_steps)
             ep_mean_B = ep_mean_B_sum / float(ep_steps)
@@ -772,7 +1088,42 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "episode_mean_B": ep_mean_B,
                 "episode_charging_slots": ep_charging_slots,
                 "episode_outage_slots": ep_outage_slots,
-            }
+                "episode_quality_per_chunk":
+                    ep_quality_per_chunk,
+
+                "episode_quality_degradation":
+                    ep_quality_degradation,
+
+                "episode_quality_degradation_per_chunk":
+                    ep_quality_degradation_per_chunk,
+
+                "episode_scheduled_stall_rate":
+                    ep_scheduled_stall_rate,
+
+                "episode_unscheduled_stall_rate":
+                    ep_unscheduled_stall_rate,
+
+                "episode_video_delivery_term":
+                    ep_video_delivery_term,
+
+                "episode_battery_consume_term":
+                    ep_battery_consume_term,
+
+                "episode_battery_charge_term":
+                    ep_battery_charge_term,
+
+                "episode_quality_degradation_term":
+                    ep_quality_degradation_term,
+
+                "episode_active_action_dims_mean":
+                    ep_active_action_dims_mean,
+
+                "episode_active_action_ratio_mean":
+                    ep_active_action_ratio_mean,
+
+                "episode_action_saturation_ratio_mean":
+                    ep_action_saturation_ratio_mean,
+                            }
         )
 
         print(
@@ -962,6 +1313,22 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ep_mean_B_sum = 0.0
         ep_charging_slots = 0.0
         ep_outage_slots = 0.0
+
+        ep_quality_degradation = 0.0
+
+        ep_video_delivery_term = 0.0
+        ep_battery_consume_term = 0.0
+        ep_battery_charge_term = 0.0
+        ep_quality_degradation_term = 0.0
+
+        ep_scheduled_stall = 0.0
+        ep_scheduled_playback = 0.0
+        ep_unscheduled_stall = 0.0
+        ep_unscheduled_playback = 0.0
+
+        ep_active_action_dims = 0.0
+        ep_active_action_ratio = 0.0
+        ep_action_saturation_ratio = 0.0
         
 
         ep_horizon = int(env_cfg.slow_T) * int(train_cfg.eval_rounds_per_episode)
@@ -1011,6 +1378,46 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             ep_mean_B_sum += metrics["mean_B"]
             ep_charging_slots += metrics["charging_slots"]
             ep_outage_slots += metrics["outage_slots"]
+
+            ep_quality_degradation += (
+                metrics["sum_quality_degradation"]
+            )
+
+            ep_video_delivery_term += (
+                metrics["video_delivery_term"]
+            )
+            ep_battery_consume_term += (
+                metrics["battery_consume_term"]
+            )
+            ep_battery_charge_term += (
+                metrics["battery_charge_term"]
+            )
+            ep_quality_degradation_term += (
+                metrics["quality_degradation_term"]
+            )
+
+            ep_scheduled_stall += (
+                metrics["scheduled_stall"]
+            )
+            ep_scheduled_playback += (
+                metrics["scheduled_playback"]
+            )
+            ep_unscheduled_stall += (
+                metrics["unscheduled_stall"]
+            )
+            ep_unscheduled_playback += (
+                metrics["unscheduled_playback"]
+            )
+
+            ep_active_action_dims += float(
+                selected["active_action_dims"]
+            )
+            ep_active_action_ratio += float(
+                selected["active_action_ratio"]
+            )
+            ep_action_saturation_ratio += float(
+                selected["action_saturation_ratio"]
+            )
 
             ep_steps += 1
             obs = next_obs

@@ -25,7 +25,7 @@ class Env:
     """
     Two-Timescale RSU-UAV-user video delivery environment.
 
-    Slow-timescale (round level):
+    Slow-timescale:
         1) RSU scheduling y_mn(r)
         2) UAV hiring mu_m(r)
         3) UAV scheduling phi_un(r)
@@ -33,7 +33,6 @@ class Env:
     Fast-timescale (slot level):
         1) RSU/UAV chunk, layer delivery
         2) UAV power allocation p_un(t)
-        3) UAV charging/service mode I_u(t)
     """
     def __init__(self, config: EnvConfig):
         self.cfg = config
@@ -302,14 +301,45 @@ class Env:
 
     def _get_effective_uav_connection_matrix(self) -> np.ndarray:
         """
-        현재 region constraint 및 UAV hiring이 반영된 UAV-user connection matrix.
+        UAV-user feasible connection link를 생성.
+
+        이때 UAV link가 활성화되려면 다음 조건을 모두 만족해야 함.
+        
+            1) phi_un(r) = 1 (scheduling=1)
+            2) 해당 coverage region의 UAV가 hired 상태
+            3) user와 UAV가 동일한 region에 위치 (안전 장치)
+            4) user가 RSU에 scheduling되지 않은 residual user
+            5) UAV cached content와 requested content가 일치
         """
-        return (
-            self.uav_scheduling
-            * self.uav_hiring[:, None]
-            * self._region_mask_uav()
+        region_mask = self._region_mask_uav().astype(
+            np.int32
+        )
+
+        rsu_connection = (
+            self._get_effective_rsu_connection_matrix()
+        )
+        rsu_served_user = (
+            rsu_connection.sum(axis=0) > 0
+        )
+        residual_user_mask = (
+            ~rsu_served_user
         ).astype(np.int32)
 
+        cache_match = (
+            self.uav_cached_content[:, None]
+            == self.requested_content[None, :]
+        ).astype(np.int32)
+
+        effective_link = (
+            self.uav_scheduling
+            * self.uav_hiring[:, None]
+            * region_mask
+            * residual_user_mask[None, :]
+            * cache_match
+        )
+
+        return effective_link.astype(np.int32)
+    
     def _get_user_node_connection_state(self) -> Dict[str, np.ndarray]:
         """
         fast-timescale policy에 제공할 user별 node connection state를 만든다.
@@ -655,10 +685,10 @@ class Env:
         다음과 같은 산식을 가짐:
 
             R_L(t)
-            = alpha_Z * sum_n Z_n(t) d_n(t)
-              - alpha_B * sum_u B_u(t) e_u(t)
-              + alpha_B * sum_u B_u(t) e_c(t)
-              + V * sum_n q_n(t)
+            = alpha_Z * sum_n Z_n(t)d_n(t)
+                - alpha_B * sum_u B_u(t)e_u(t)
+                + alpha_B * sum_u B_u(t)e_c(t)
+                - V * sum_n[P_bar*d_n(t) - q_n(t)]
         """
         prev_Q_arr = np.asarray(prev_Q, dtype=np.float32)
         next_Q_arr = np.asarray(next_Q, dtype=np.float32)
@@ -687,36 +717,57 @@ class Env:
             dtype=np.float32,
         )
 
-        alpha_Z = float(getattr(self.cfg, "alpha_Z", 1.0))
-        alpha_B = float(getattr(self.cfg, "alpha_B", 30.0))
-        V = float(getattr(self.cfg, "V", 1.0))
+        alpha_Z = float(self.cfg.alpha_Z)
+        alpha_B = float(self.cfg.alpha_B)
+        V = float(self.cfg.V)
+        P_bar = float(max(self.cfg.quality_weights))
 
+        # quality degradation
+        quality_degradation_arr = P_bar * delivered_arr - quality_arr
+
+        # 이론상 항상 0 이상이어야 한다.
+        # 작은 음수는 float 오차로 간주하되, 유의미한 음수는 즉시 중단한다.
+        min_degradation = float(
+            np.min(quality_degradation_arr)
+        )
+
+        if min_degradation < -1e-4:
+            raise RuntimeError(
+                "P_bar*d_n(t)-q_n(t)가 음수입니다. "
+                "delivery/quality 계산 불일치를 확인하세요. "
+                f"min={min_degradation:.8f}, "
+                f"P_bar={P_bar}"
+            )
+        
+        quality_degradation_arr = np.maximum(
+            quality_degradation_arr,
+            0.0,
+        ).astype(np.float32)
+        delivered_sum = float(np.sum(delivered_arr))
+        
+        # raw formulation terms
         raw_video_delivery_term = float(np.sum(prev_Z_arr * delivered_arr))
         raw_battery_consume_term = -float(np.sum(prev_B_arr * consumed_soc_arr))
         raw_battery_charge_term = float(np.sum(prev_B_arr * charged_soc_arr))
         raw_quality_term = float(np.sum(quality_arr))
+        raw_quality_degradation_term = float(np.sum(quality_degradation_arr))
 
+        # scaled reward terms
         video_delivery_term = alpha_Z * raw_video_delivery_term
         battery_consume_term = alpha_B * raw_battery_consume_term
         battery_charge_term = alpha_B * raw_battery_charge_term
-        quality_term = V * raw_quality_term
+        quality_degradation_term = -V * raw_quality_degradation_term
 
         fast_reward = (
             video_delivery_term
             + battery_consume_term
             + battery_charge_term
-            + quality_term
+            + quality_degradation_term
         )
 
         components: Dict[str, Any] = {
             "reward_coefficients": (
                 self.cfg.reward_coefficients()
-                if hasattr(self.cfg, "reward_coefficients")
-                else {
-                    "alpha_Z": alpha_Z,
-                    "alpha_B": alpha_B,
-                    "V": V,
-                }
             ),
 
             "prev_Q": prev_Q_arr.copy(),
@@ -731,6 +782,7 @@ class Env:
 
             "delivered_total_per_user": delivered_arr.copy(),
             "quality_total_per_user": quality_arr.copy(),
+            "quality_degradation_total_per_user": quality_degradation_arr.copy(),
 
             "consumed_soc_per_uav": consumed_soc_arr.copy(),
             "charged_soc_per_uav": charged_soc_arr.copy(),
@@ -739,24 +791,42 @@ class Env:
             "raw_battery_consume_term": raw_battery_consume_term,
             "raw_battery_charge_term": raw_battery_charge_term,
             "raw_quality_term": raw_quality_term,
+            "raw_quality_degradation_term": raw_quality_degradation_term,
 
             "video_delivery_term": video_delivery_term,
             "battery_consume_term": battery_consume_term,
             "battery_charge_term": battery_charge_term,
-            "quality_term": quality_term,
-            "fast_reward": float(fast_reward),
+            "quality_degradation_term": quality_degradation_term,
 
-            "num_hired_uav": int(np.asarray(uav_hiring, dtype=np.int32).sum()),
-            "num_charging_uav": int(np.asarray(charging_state, dtype=np.int32).sum()),
-            "num_outage_uav": int(np.asarray(self.outage, dtype=np.int32).sum()),
+            "fast_reward": fast_reward,
 
-            "sum_delivery": float(np.sum(delivered_arr)),
-            "sum_quality": float(np.sum(quality_arr)),
-            "sum_consumed_soc": float(np.sum(consumed_soc_arr)),
-            "sum_charged_soc": float(np.sum(charged_soc_arr)),
+            "P_bar": P_bar,
+            "sum_delivery": delivered_sum,
+            "sum_quality": raw_quality_term,
+            "sum_quality_degradation": (
+                raw_quality_degradation_term
+            ),
+            "num_hired_uav": int(
+                np.asarray(
+                    uav_hiring,
+                    dtype=np.int32,
+                ).sum()
+            ),
+            "num_charging_uav": int(
+                np.asarray(
+                    charging_state,
+                    dtype=np.int32,
+                ).sum()
+            ),
+            "num_outage_uav": int(
+                np.asarray(
+                    self.outage,
+                    dtype=np.int32,
+                ).sum()
+            ),
         }
 
-        return float(fast_reward), components
+        return fast_reward, components
     
     def _compute_slow_reward(
         self,
