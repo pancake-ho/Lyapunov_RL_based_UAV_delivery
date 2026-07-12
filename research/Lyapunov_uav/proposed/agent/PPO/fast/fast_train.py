@@ -91,6 +91,11 @@ def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
         clip_coef=float(train_cfg.clip_coef),
         value_coef=float(train_cfg.value_coef),
         entropy_coef=float(train_cfg.entropy_coef),
+        target_kl=(
+            None
+            if train_cfg.target_kl is None
+            else float(train_cfg.target_kl)
+        ),
 
         normalize_obs=bool(train_cfg.obs_norm),
         normalize_adv=bool(train_cfg.adv_norm),
@@ -131,6 +136,29 @@ def make_run_dir(train_cfg: FastTrainConfig, env_cfg: EnvConfig) -> Path:
     ensure_dir(run_dir / "figures")
 
     return run_dir
+
+
+def get_episode_move_prob(
+    train_cfg: FastTrainConfig,
+    episode_idx: int,
+) -> float:
+    """
+    1-based episode index에 해당하는 mobility probability를 반환한다.
+    """
+    episode_idx = int(episode_idx)
+
+    selected_prob = float(
+        train_cfg.mobility_curriculum[0][1]
+    )
+
+    for start_episode, move_prob in (
+        train_cfg.mobility_curriculum
+    ):
+        if episode_idx < int(start_episode):
+            break
+        selected_prob = float(move_prob)
+
+    return selected_prob
 
 
 def sample_random_slow_action(
@@ -843,6 +871,19 @@ def train(train_cfg: FastTrainConfig) -> None:
     last_done = False
 
     while episode_idx < int(train_cfg.num_episodes):
+        current_episode = episode_idx + 1
+
+        current_move_prob = (
+            get_episode_move_prob(
+                train_cfg=train_cfg,
+                episode_idx=current_episode,
+            )
+        )
+
+        env.cfg.move_prob = float(
+            current_move_prob
+        )
+
         obs, reset_info = reset_env(
             env=env,
             slow_rng=slow_rng,
@@ -1088,6 +1129,7 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "episode_mean_B": ep_mean_B,
                 "episode_charging_slots": ep_charging_slots,
                 "episode_outage_slots": ep_outage_slots,
+                "move_prob": float(current_move_prob),
                 "episode_quality_per_chunk":
                     ep_quality_per_chunk,
 
@@ -1234,6 +1276,12 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
     set_seed(int(train_cfg.seed), deterministic=True)
 
     env_cfg = build_env_config()
+
+    target_move_prob = float(
+        train_cfg.mobility_curriculum[-1][1]
+    )
+    env_cfg.move_prob = target_move_prob
+
     ppo_cfg = build_agent_ppo_config(train_cfg)
 
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 20011)
@@ -1253,6 +1301,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         obs_dim=obs_dim,
         ppo_cfg=ppo_cfg,
     )
+
+    if train_cfg.checkpoint is None:
+        raise ValueError(
+            "eval mode에서는 checkpoint가 반드시 필요합니다."
+        )
 
     if train_cfg.checkpoint is not None:
         agent.load(

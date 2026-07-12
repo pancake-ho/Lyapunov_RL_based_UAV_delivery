@@ -185,6 +185,60 @@ class FastActionCodec:
         scaled = (clipped + 1.0) * 0.5
         value = min_value + scaled * (max_value - min_value)
         return np.clip(value, min_value, max_value).astype(np.float32)
+    
+    @staticmethod
+    def _scale_to_power(
+        raw: np.ndarray,
+        min_positive_power: float,
+        max_power: float,
+    ) -> np.ndarray:
+        """
+        Gaussian raw action을 log-uniform power scale로 변환한다.
+
+            raw <= -1 -> min_positive_power
+            raw ==  0 -> geometric mean
+            raw >= +1 -> max_power
+
+        chunk 또는 layer가 0인 경우에는 decode 마지막 service mask에서
+        power를 정확히 0으로 다시 설정한다.
+        """
+        min_positive_power = float(
+            min_positive_power
+        )
+        max_power = float(max_power)
+
+        if min_positive_power <= 0.0:
+            raise ValueError(
+                "min_positive_power는 양수여야 합니다."
+            )
+        if max_power <= min_positive_power:
+            raise ValueError(
+                "max_power는 min_positive_power보다 커야 합니다."
+            )
+
+        clipped = np.clip(
+            np.asarray(raw, dtype=np.float32),
+            -1.0,
+            1.0,
+        )
+
+        fraction = (
+            clipped + 1.0
+        ) * 0.5
+
+        log_min = np.log(min_positive_power)
+        log_max = np.log(max_power)
+
+        power = np.exp(
+            log_min
+            + fraction * (log_max - log_min)
+        )
+
+        return np.clip(
+            power,
+            min_positive_power,
+            max_power,
+        ).astype(np.float32)
 
     def decode(self, raw_action: np.ndarray, obs: Dict[str, Any] | None = None) -> Dict[str, Any]:
         """
@@ -217,10 +271,14 @@ class FastActionCodec:
             self.spec.max_layer,
         )
 
-        uav_power = self._scale_to_float(
+        uav_power = self._scale_to_power(
             parts["uav_power"],
-            0.0,
-            self.spec.max_tx_power,
+            min_positive_power=float(
+                self.cfg.battery.min_tx_power
+            ),
+            max_power=float(
+                self.spec.max_tx_power
+            ),
         )
 
         if obs is not None:
@@ -252,6 +310,44 @@ class FastActionCodec:
                 uav_power * uav_mask
             ).astype(np.float32)
 
+        if obs is not None:
+            Z = np.asarray(
+                obs["Z"],
+                dtype=np.float32,
+            )
+
+            if Z.shape != (self.spec.num_user,):
+                raise ValueError(
+                    "Z shape mismatch: "
+                    f"expected={(self.spec.num_user,)}, "
+                    f"got={Z.shape}"
+                )
+
+            # 재생 이후 추가로 수용할 수 있는 최대 chunk 수:
+            # min{Z_n(t)+b, Q_bar}
+            user_chunk_headroom = np.floor(
+                np.minimum(
+                    Z + float(self.cfg.playback_rate),
+                    float(self.cfg.max_queue),
+                )
+            ).astype(np.int32)
+
+            user_chunk_headroom = np.clip(
+                user_chunk_headroom,
+                0,
+                self.spec.max_chunk,
+            )
+
+            rsu_chunks = np.minimum(
+                rsu_chunks,
+                user_chunk_headroom[None, :],
+            ).astype(np.int32)
+
+            uav_chunks = np.minimum(
+                uav_chunks,
+                user_chunk_headroom[None, :],
+            ).astype(np.int32)
+            
         # chunk/layer 중 하나라도 0이면 실제 전송은 없음
         rsu_service_mask = (
             (rsu_chunks > 0)

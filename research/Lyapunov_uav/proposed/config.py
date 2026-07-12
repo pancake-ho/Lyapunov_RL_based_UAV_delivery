@@ -13,7 +13,7 @@ class ChannelConfig:
 
     distance_min: float = 5.0
     distance_max: float = 25.0
-    distance_sampling: str = "uniform"
+    distance_sampling: str = "fixed" # 일단 not uniform
 
     # common params
     seed: int = 42
@@ -62,6 +62,12 @@ class ChannelConfig:
                 f"distance_max는 distance_min 이상이어야 합니다. "
                 f"현재 distance_min={self.distance_min}, distance_max={self.distance_max}"
             )
+        if self.distance_sampling not in {"fixed", "uniform"}:
+            raise ValueError(
+                "distance_sampling은 'fixed' 또는 'uniform'이어야 합니다.  "
+                f"현재 값={self.distance_sampling}"
+            )
+        
         if self.bandwidth <= 0.0:
             raise ValueError(f"bandwidth는 양수여야 합니다. 현재 값: {self.bandwidth}")
         if self.sigma_db < 0.0:
@@ -110,6 +116,7 @@ class BatteryConfig:
     energy_to_soc_factor: Optional[float] = None
 
     # 최대 통신 power bound
+    min_tx_power: float = 1e-5
     max_tx_power: float = 10.0
 
     def __post_init__(self) -> None:
@@ -130,8 +137,13 @@ class BatteryConfig:
             raise ValueError("charging_rate는 0 이상이어야 합니다.")
         if self.eta_c <= 0.0:
             raise ValueError("eta_c는 양수여야 합니다.")
-        if self.max_tx_power <= 0.0:
-            raise ValueError("max_tx_power는 양수여야 합니다.")
+        
+        if self.min_tx_power <= 0.0:
+            raise ValueError("min_tx_power는 양수여야 합니다.")
+        if self.max_tx_power <= self.min_tx_power:
+            raise ValueError(
+                "max_tx_power는 min_tx_power보다 커야 합니다."
+            )
         if self.battery_capacity_joule <= 0.0:
             raise ValueError("battery_capacity_joule은 양수여야 합니다.")
 
@@ -182,7 +194,7 @@ class EnvConfig:
             min_distance=1.0,
             distance_min=5.0,
             distance_max=25.0,
-            distance_sampling="uniform",
+            distance_sampling="fixed",
             bandwidth=1e6,
             gamma_db=25.0,
             inr_db=5.0,
@@ -198,7 +210,7 @@ class EnvConfig:
             min_distance=1.0,
             distance_min=5.0,
             distance_max=25.0,
-            distance_sampling="uniform",
+            distance_sampling="fixed",
             bandwidth=1e6,
             altitude=20.0,
             beta_zero=2e-9,

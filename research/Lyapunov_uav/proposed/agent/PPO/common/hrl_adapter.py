@@ -12,9 +12,6 @@ FAST_OBS_KEYS: tuple[str, ...] = (
     "Z",
     "B",
     "user_region",
-    "connection_type",
-    "connected_rsu",
-    "connected_uav",
     "rsu_connection",
     "uav_connection",
 )
@@ -118,21 +115,21 @@ def flatten_obs_with_keys(
 
     return np.concatenate(arrays, axis=0).astype(np.float32)
 
-def flatten_fast_obs(obs: Dict[str, Any]) -> np.ndarray:
+def flatten_fast_obs(
+    obs: Dict[str, Any],
+) -> np.ndarray:
     """
-    Fast-timescale PPO용 observation flatten.
+    Fast-timescale PPO observation flatten.
 
-    현재 확정 state:
+    확정 state:
         Z
         B
         user_region
-        connection_type
-        connected_rsu
-        connected_uav
         rsu_connection
         uav_connection
 
-    raw slow scheduling/hiring matrix는 observation에 포함하지 않는다.
+    CSI는 policy input에 넣지 않는다.
+    Slow scheduling/hiring raw action도 별도로 중복 입력하지 않는다.
     """
     return flatten_obs_with_keys(
         obs=obs,

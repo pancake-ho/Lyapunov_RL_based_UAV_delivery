@@ -228,16 +228,34 @@ class Env:
     
     def _refresh_link_distances(self) -> None:
         """
-        user_region을 기준으로 RSU-user, UAV-user 거리 상태를 생성하는 함수.
-        같은 region 안에서 local distance ~ Uniform(distance_min, distance_max)
+        Coverage region의 representative ground coordinate에 대응하는
+        고정 horizontal distance를 생성한다.
+
+        현재 formulation은 continuous user coordinate를 직접 추적하지
+        않으므로 매 slot random distance를 재샘플링하지 않는다.
+
+        UAVChannelModel은 이 horizontal distance와 altitude를 이용해
+        3D distance 및 channel gain을 계산한다.
         """
-        self.rsu_user_distance = self._sample_local_distance(
-            self.cfg.rsu_channel,
-            (self.num_rsu, self.num_user),
+        rsu_distance = max(
+            float(self.cfg.rsu_channel.distance),
+            float(self.cfg.rsu_channel.min_distance),
         )
-        self.uav_user_distance = self._sample_local_distance(
-            self.cfg.uav_channel,
+        uav_distance = max(
+            float(self.cfg.uav_channel.distance),
+            float(self.cfg.uav_channel.min_distance),
+        )
+
+        self.rsu_user_distance = np.full(
+            (self.num_rsu, self.num_user),
+            rsu_distance,
+            dtype=np.float32,
+        )
+
+        self.uav_user_distance = np.full(
             (self.num_uav, self.num_user),
+            uav_distance,
+            dtype=np.float32,
         )
 
     def _update_user_region(self) -> Dict[str, np.ndarray]:
@@ -663,6 +681,165 @@ class Env:
 
         return asdict(step_info)
     
+    def _admit_received_delivery(
+        self,
+        prev_queue: np.ndarray,
+        playback: np.ndarray,
+        transmitted_per_user: np.ndarray,
+        transmitted_quality_per_user: np.ndarray,
+    ) -> Dict[str, np.ndarray]:
+        """
+        PHY에서 전송된 chunk 중 실제 user buffer에 수용되는 chunk를 계산한다.
+
+        Formulation 정합성:
+            Q_n(t+1)
+            = min{
+                max(Q_n(t)-b_n(t), 0) + d_n(t),
+                Q_bar
+            }
+
+        여기서 Fast reward에 사용하는 d_n(t)는 buffer에 실제 수용된
+        admitted delivery로 정의한다.
+
+        단, UAV battery communication energy는 PHY에서 실제 수행된
+        transmitted delivery/action을 기준으로 이미 계산됐으므로
+        admission 과정에서 되돌리지 않는다.
+        """
+        prev_queue_arr = np.asarray(
+            prev_queue,
+            dtype=np.float32,
+        )
+        playback_arr = np.asarray(
+            playback,
+            dtype=np.float32,
+        )
+        transmitted_arr = np.asarray(
+            transmitted_per_user,
+            dtype=np.float32,
+        )
+        transmitted_quality_arr = np.asarray(
+            transmitted_quality_per_user,
+            dtype=np.float32,
+        )
+
+        expected_shape = (self.num_user,)
+
+        for name, value in (
+            ("prev_queue", prev_queue_arr),
+            ("playback", playback_arr),
+            ("transmitted_per_user", transmitted_arr),
+            (
+                "transmitted_quality_per_user",
+                transmitted_quality_arr,
+            ),
+        ):
+            if value.shape != expected_shape:
+                raise ValueError(
+                    f"{name} shape mismatch: "
+                    f"expected={expected_shape}, got={value.shape}"
+                )
+
+        prev_queue_arr = np.clip(
+            prev_queue_arr,
+            0.0,
+            float(self.cfg.max_queue),
+        )
+        playback_arr = np.maximum(
+            playback_arr,
+            0.0,
+        )
+        transmitted_arr = np.maximum(
+            transmitted_arr,
+            0.0,
+        )
+        transmitted_quality_arr = np.maximum(
+            transmitted_quality_arr,
+            0.0,
+        )
+
+        consumed_arr = np.minimum(
+            prev_queue_arr,
+            playback_arr,
+        )
+        stall_arr = np.maximum(
+            playback_arr - prev_queue_arr,
+            0.0,
+        )
+
+        queue_after_playback = np.maximum(
+            prev_queue_arr - consumed_arr,
+            0.0,
+        )
+
+        buffer_space_arr = np.maximum(
+            float(self.cfg.max_queue)
+            - queue_after_playback,
+            0.0,
+        )
+
+        admitted_arr = np.minimum(
+            transmitted_arr,
+            buffer_space_arr,
+        )
+
+        admission_ratio_arr = np.divide(
+            admitted_arr,
+            transmitted_arr,
+            out=np.zeros_like(admitted_arr),
+            where=transmitted_arr > 0.0,
+        )
+
+        # 현재 실제 active link에서는 사용자별로 하나의 source/layer가
+        # 선택되므로 동일 layer chunk의 비율만큼 quality도 수용된다.
+        admitted_quality_arr = (
+            transmitted_quality_arr
+            * admission_ratio_arr
+        )
+
+        dropped_arr = np.maximum(
+            transmitted_arr - admitted_arr,
+            0.0,
+        )
+        dropped_quality_arr = np.maximum(
+            transmitted_quality_arr
+            - admitted_quality_arr,
+            0.0,
+        )
+
+        next_queue_arr = np.clip(
+            queue_after_playback + admitted_arr,
+            0.0,
+            float(self.cfg.max_queue),
+        ).astype(np.float32)
+
+        return {
+            "consumed": consumed_arr.astype(np.float32),
+            "stall": stall_arr.astype(np.float32),
+            "queue_after_playback":
+                queue_after_playback.astype(np.float32),
+            "buffer_space": buffer_space_arr.astype(np.float32),
+
+            "transmitted":
+                transmitted_arr.astype(np.float32),
+            "transmitted_quality":
+                transmitted_quality_arr.astype(np.float32),
+
+            "admitted":
+                admitted_arr.astype(np.float32),
+            "admitted_quality":
+                admitted_quality_arr.astype(np.float32),
+
+            "dropped":
+                dropped_arr.astype(np.float32),
+            "dropped_quality":
+                dropped_quality_arr.astype(np.float32),
+
+            "admission_ratio":
+                admission_ratio_arr.astype(np.float32),
+            "next_queue":
+                next_queue_arr,
+        }
+    
     def _compute_fast_reward(
         self,
         prev_Q: np.ndarray,
@@ -743,7 +920,6 @@ class Env:
             quality_degradation_arr,
             0.0,
         ).astype(np.float32)
-        delivered_sum = float(np.sum(delivered_arr))
         
         # raw formulation terms
         raw_video_delivery_term = float(np.sum(prev_Z_arr * delivered_arr))
@@ -758,17 +934,64 @@ class Env:
         battery_charge_term = alpha_B * raw_battery_charge_term
         quality_degradation_term = -V * raw_quality_degradation_term
 
-        fast_reward = (
+        fast_reward = float(
             video_delivery_term
             + battery_consume_term
             + battery_charge_term
             + quality_degradation_term
         )
 
+        sum_delivery = float(np.sum(delivered_arr))
+        sum_quality = float(np.sum(quality_arr))
+        sum_quality_degradation = float(
+            np.sum(quality_degradation_arr)
+        )
+        sum_consumed_soc = float(
+            np.sum(consumed_soc_arr)
+        )
+        sum_charged_soc = float(
+            np.sum(charged_soc_arr)
+        )
+
+        quality_per_chunk = (
+            sum_quality / sum_delivery
+            if sum_delivery > 0.0
+            else 0.0
+        )
+        quality_degradation_per_chunk = (
+            sum_quality_degradation / sum_delivery
+            if sum_delivery > 0.0
+            else 0.0
+        )
+
+        term_abs_sum = float(
+            abs(video_delivery_term)
+            + abs(battery_consume_term)
+            + abs(battery_charge_term)
+            + abs(quality_degradation_term)
+            + 1e-8
+        )
+
+        delivery_term_share = (
+            abs(video_delivery_term)
+            / term_abs_sum
+        )
+        battery_consume_term_share = (
+            abs(battery_consume_term)
+            / term_abs_sum
+        )
+        battery_charge_term_share = (
+            abs(battery_charge_term)
+            / term_abs_sum
+        )
+        quality_term_share = (
+            abs(quality_degradation_term)
+            / term_abs_sum
+        )
+
         components: Dict[str, Any] = {
-            "reward_coefficients": (
-                self.cfg.reward_coefficients()
-            ),
+            "reward_coefficients":
+                self.cfg.reward_coefficients(),
 
             "prev_Q": prev_Q_arr.copy(),
             "next_Q": next_Q_arr.copy(),
@@ -780,32 +1003,70 @@ class Env:
             "prev_B": prev_B_arr.copy(),
             "next_B": next_B_arr.copy(),
 
-            "delivered_total_per_user": delivered_arr.copy(),
-            "quality_total_per_user": quality_arr.copy(),
-            "quality_degradation_total_per_user": quality_degradation_arr.copy(),
+            "delivered_total_per_user":
+                delivered_arr.copy(),
+            "quality_total_per_user":
+                quality_arr.copy(),
+            "quality_degradation_total_per_user":
+                quality_degradation_arr.copy(),
 
-            "consumed_soc_per_uav": consumed_soc_arr.copy(),
-            "charged_soc_per_uav": charged_soc_arr.copy(),
+            "consumed_soc_per_uav":
+                consumed_soc_arr.copy(),
+            "charged_soc_per_uav":
+                charged_soc_arr.copy(),
 
-            "raw_video_delivery_term": raw_video_delivery_term,
-            "raw_battery_consume_term": raw_battery_consume_term,
-            "raw_battery_charge_term": raw_battery_charge_term,
-            "raw_quality_term": raw_quality_term,
-            "raw_quality_degradation_term": raw_quality_degradation_term,
+            "raw_video_delivery_term":
+                raw_video_delivery_term,
+            "raw_battery_consume_term":
+                raw_battery_consume_term,
+            "raw_battery_charge_term":
+                raw_battery_charge_term,
+            "raw_quality_term":
+                raw_quality_term,
+            "raw_quality_degradation_term":
+                raw_quality_degradation_term,
 
-            "video_delivery_term": video_delivery_term,
-            "battery_consume_term": battery_consume_term,
-            "battery_charge_term": battery_charge_term,
-            "quality_degradation_term": quality_degradation_term,
+            "video_delivery_term":
+                video_delivery_term,
+            "battery_consume_term":
+                battery_consume_term,
+            "battery_charge_term":
+                battery_charge_term,
+            "quality_degradation_term":
+                quality_degradation_term,
 
             "fast_reward": fast_reward,
 
             "P_bar": P_bar,
-            "sum_delivery": delivered_sum,
-            "sum_quality": raw_quality_term,
-            "sum_quality_degradation": (
-                raw_quality_degradation_term
-            ),
+            "sum_delivery": sum_delivery,
+            "sum_quality": sum_quality,
+            "sum_quality_degradation":
+                sum_quality_degradation,
+            "sum_consumed_soc":
+                sum_consumed_soc,
+            "sum_charged_soc":
+                sum_charged_soc,
+
+            "quality_per_chunk":
+                quality_per_chunk,
+            "quality_degradation_per_chunk":
+                quality_degradation_per_chunk,
+
+            "delivery_term_share":
+                delivery_term_share,
+            "battery_consume_term_share":
+                battery_consume_term_share,
+            "battery_charge_term_share":
+                battery_charge_term_share,
+
+            # fast_train.py 기존 key
+            "quality_term_share":
+                quality_term_share,
+
+            # 보다 명확한 이름의 alias
+            "quality_degradation_term_share":
+                quality_term_share,
+
             "num_hired_uav": int(
                 np.asarray(
                     uav_hiring,
@@ -1075,14 +1336,37 @@ class Env:
 
         # Queue update
         playback = fast_act_eff.playback.astype(np.float32)
-        consumed = np.minimum(self.queue, playback)
-        stall = np.maximum(playback - self.queue, 0.0)
 
-        self.queue = np.clip(
-            self.queue - consumed + delivered_total_per_user,
-            0.0,
-            float(self.cfg.max_queue),
-        ).astype(np.float32)
+        transmitted_total_per_user = (
+            delivered_total_per_user.copy().astype(np.float32)
+        )
+        transmitted_quality_total_per_user = (
+            quality_total_per_user.copy().astype(np.float32)
+        )
+
+        admission_info = self._admit_received_delivery(
+            prev_queue=prev_Q,
+            playback=playback,
+            transmitted_per_user=transmitted_total_per_user,
+            transmitted_quality_per_user=(
+                transmitted_quality_total_per_user
+            ),
+        )
+
+        consumed = admission_info["consumed"]
+        stall = admission_info["stall"]
+
+        admitted_total_per_user = admission_info["admitted"]
+        admitted_quality_total_per_user = (
+            admission_info["admitted_quality"]
+        )
+
+        dropped_total_per_user = admission_info["dropped"]
+        dropped_quality_total_per_user = (
+            admission_info["dropped_quality"]
+        )
+
+        self.queue = admission_info["next_queue"].copy()
 
         # time update
         self.t += 1
@@ -1114,8 +1398,8 @@ class Env:
             next_E=self.E,
             prev_Y=prev_B,
             next_Y=self.Y,
-            delivered_total_per_user=delivered_total_per_user,
-            quality_total_per_user=quality_total_per_user,
+            delivered_total_per_user=admitted_total_per_user,
+            quality_total_per_user=admitted_quality_total_per_user,
             uav_hiring=self.uav_hiring,
             charging_state=self.charging_state,
             battery_step_info=battery_step_info,
@@ -1130,7 +1414,6 @@ class Env:
             self.round_slot = int(next_round_slot)
 
         region_info = self._update_user_region()
-        self._refresh_link_distances()
 
         next_connection_state = self._get_user_node_connection_state()
 
@@ -1185,12 +1468,45 @@ class Env:
             "battery_step_info": battery_step_info,
 
             # slot result
-            "delivered_rsu_per_user": delivered_rsu_per_user.copy(),
-            "delivered_uav_per_user": delivered_uav_per_user.copy(),
-            "delivered_total_per_user": delivered_total_per_user.copy(),
-            "quality_rsu_per_user": quality_rsu_per_user.copy(),
-            "quality_uav_per_user": quality_uav_per_user.copy(),
-            "quality_total_per_user": quality_total_per_user.copy(),
+            # PHY transmission result
+            "transmitted_rsu_per_user":
+                delivered_rsu_per_user.copy(),
+            "transmitted_uav_per_user":
+                delivered_uav_per_user.copy(),
+            "transmitted_total_per_user":
+                transmitted_total_per_user.copy(),
+            "transmitted_quality_total_per_user":
+                transmitted_quality_total_per_user.copy(),
+
+            # Buffer admission result
+            "admitted_total_per_user":
+                admitted_total_per_user.copy(),
+            "admitted_quality_total_per_user":
+                admitted_quality_total_per_user.copy(),
+            "dropped_total_per_user":
+                dropped_total_per_user.copy(),
+            "dropped_quality_total_per_user":
+                dropped_quality_total_per_user.copy(),
+            "buffer_space_per_user":
+                admission_info["buffer_space"].copy(),
+            "admission_ratio_per_user":
+                admission_info["admission_ratio"].copy(),
+
+            # 기존 logger와의 backward compatibility:
+            # delivered_*는 실제 buffer admission을 의미하도록 통일
+            "delivered_rsu_per_user":
+                delivered_rsu_per_user.copy(),
+            "delivered_uav_per_user":
+                delivered_uav_per_user.copy(),
+            "delivered_total_per_user":
+                admitted_total_per_user.copy(),
+
+            "quality_rsu_per_user":
+                quality_rsu_per_user.copy(),
+            "quality_uav_per_user":
+                quality_uav_per_user.copy(),
+            "quality_total_per_user":
+                admitted_quality_total_per_user.copy(),
 
             "dpp_terms": reward_components,
             "reward_components": reward_components,

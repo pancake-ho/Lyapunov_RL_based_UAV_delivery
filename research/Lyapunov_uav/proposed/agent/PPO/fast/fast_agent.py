@@ -70,6 +70,7 @@ class FastPPOConfig:
     value_clip_coef: float = 50_000.0
 
     fail_on_nan: bool = True
+    target_kl: Optional[float] = 0.015
 
     device: str = "auto"
 
@@ -369,6 +370,9 @@ class FastPPOAgent:
         approx_kl_values: list[float] = []
         clip_frac_values: list[float] = []
 
+        early_stopped = False
+        completed_minibatches = 0
+
         for _ in range(int(self.ppo_cfg.update_epochs)):
             for batch in self.buffer.iter_minibatches(
                 batch_size=int(self.ppo_cfg.batch_size),
@@ -393,6 +397,22 @@ class FastPPOAgent:
                     clip_frac = (
                         torch.abs(ratio - 1.0) > float(self.ppo_cfg.clip_coef)
                     ).float().mean()
+
+                #이미 KL이 target을 넘었다면
+                # 현재 minibatch의 추가 update를 수행하지 않는다.
+                if (
+                    self.ppo_cfg.target_kl is not None
+                    and float(approx_kl.item())
+                    > float(self.ppo_cfg.target_kl)
+                ):
+                    approx_kl_values.append(
+                        float(approx_kl.item())
+                    )
+                    clip_frac_values.append(
+                        float(clip_frac.item())
+                    )
+                    early_stopped = True
+                    break
 
                 adv = batch.advantages
 
@@ -428,11 +448,16 @@ class FastPPOAgent:
                 )
                 self.optimizer.step()
 
-                policy_losses.append(float(policy_loss.detach().cpu().item()))
-                value_losses.append(float(value_loss.detach().cpu().item()))
-                entropy_values.append(float(entropy_mean.detach().cpu().item()))
-                approx_kl_values.append(float(approx_kl.detach().cpu().item()))
-                clip_frac_values.append(float(clip_frac.detach().cpu().item()))
+                completed_minibatches += 1
+
+                policy_losses.append(float(policy_loss.detach().cpu()))
+                value_losses.append(float(value_loss.detach().cpu()))
+                entropy_values.append(float(entropy_mean.detach().cpu()))
+                approx_kl_values.append(float(approx_kl.detach().cpu()))
+                clip_frac_values.append(float(clip_frac.detach().cpu()))
+            
+            if early_stopped:
+                break
 
         obs, actions, old_log_probs, returns, advantages, old_values = self.buffer.get_tensors()
         action_masks = self.buffer.get_action_masks_tensor()
@@ -470,6 +495,10 @@ class FastPPOAgent:
                 .detach()
                 .cpu()
                 .item()
+            ),
+            "early_stopped": float(early_stopped),
+            "completed_minibatches": float(
+                completed_minibatches
             ),
         }
 
