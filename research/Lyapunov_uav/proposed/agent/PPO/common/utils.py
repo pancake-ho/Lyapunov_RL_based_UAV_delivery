@@ -177,19 +177,62 @@ def load_checkpoint(
     strict: bool = True,
 ) -> Dict[str, Any]:
     """
-    학습 중단 후 재개되는 상황을 대비한 load model checkpoint.
+    model/optimizer/observation-normalizer를 포함한 trusted checkpoint를
+    불러온다.
 
-    현재 시나리오 기준:
-        return:
-            checkpoint 전체 dict.
-            extra의 경우 checkpoint.get("extra", {})로 접근.
+    주의:
+        weights_only=False는 pickle 기반 object를 허용하므로,
+        이 프로젝트에서 직접 생성한 신뢰 가능한 checkpoint에만 사용한다.
+
+    PyTorch 호환성:
+        - PyTorch >= 2.6: weights_only=False 명시 필요
+        - 구버전 PyTorch: weights_only 인자를 지원하지 않을 수 있으므로
+          TypeError 발생 시 기존 방식으로 fallback
     """
-    checkpoint = torch.load(path, map_location=device)
+    path_obj = Path(path)
 
-    model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
+    if not path_obj.is_file():
+        raise FileNotFoundError(
+            f"checkpoint file not found: {path_obj}"
+        )
 
-    if optimizer is not None and "optimizer_state_dict" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    try:
+        checkpoint = torch.load(
+            path_obj,
+            map_location=device,
+            weights_only=False,
+        )
+    except TypeError:
+        # weights_only 인자를 지원하지 않는 구버전 PyTorch 호환
+        checkpoint = torch.load(
+            path_obj,
+            map_location=device,
+        )
+
+    if not isinstance(checkpoint, dict):
+        raise TypeError(
+            "checkpoint must be a dictionary, "
+            f"got {type(checkpoint).__name__}"
+        )
+
+    if "model_state_dict" not in checkpoint:
+        raise KeyError(
+            "checkpoint does not contain 'model_state_dict'. "
+            f"available keys={sorted(checkpoint.keys())}"
+        )
+
+    model.load_state_dict(
+        checkpoint["model_state_dict"],
+        strict=bool(strict),
+    )
+
+    if (
+        optimizer is not None
+        and "optimizer_state_dict" in checkpoint
+    ):
+        optimizer.load_state_dict(
+            checkpoint["optimizer_state_dict"]
+        )
 
     return checkpoint
 

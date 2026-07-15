@@ -41,23 +41,22 @@ from .fast_network import FastActorCritic
 class FastPPOConfig:
     """
     Fast-timescale PPO hyperparameters.
-
-    현재 시나리오 기준:
-        수치 최적화 전 단계이므로, 기본값은 안정적인 training을 추구하는 쪽으로 설정함.
     """
-    rollout_steps: int = 8192
+    rollout_steps: int = 4096
     update_epochs: int = 4
-    batch_size: int = 1024
+    batch_size: int = 512
 
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
     lr: float = 3e-5
-    max_grad_norm: float = 0.3
+    max_grad_norm: float = 0.5
 
-    clip_coef: float = 0.10
-    value_coef: float = 0.05
-    entropy_coef: float = 1e-3
+    clip_coef: float = 0.15
+    value_coef: float = 0.5
+    
+    categorical_entropy_coef: float = 2e-3
+    power_entropy_coef: float = 1e-4
 
     normalize_obs: bool = True
     normalize_adv: bool = True
@@ -67,9 +66,10 @@ class FastPPOConfig:
 
     use_value_huber_loss: bool = True
     use_value_clip: bool = True
-    value_clip_coef: float = 50_000.0
+    value_clip_coef: float = 0.5
 
     fail_on_nan: bool = True
+    target_kl: Optional[float] = 0.02
 
     device: str = "auto"
 
@@ -98,7 +98,7 @@ class FastPPOAgent:
 
         self.model = FastActorCritic(
             obs_dim=self.obs_dim,
-            action_dim=self.action_dim,
+            action_spec=self.codec.spec,
             hidden_dims=self.ppo_cfg.hidden_dims,
             init_log_std=self.ppo_cfg.init_log_std,
         ).to(self.device)
@@ -177,38 +177,56 @@ class FastPPOAgent:
         """
         실제 Fast Agent가 선택하는 action을 반환 및 env와 호환되게 설정.
         """
-        obs_vec = self.obs_to_vec(
-            obs,
-            update_norm=update_norm,
-        )
+        obs_vec = self.obs_to_vec(obs, update_norm=update_norm)
+        base_mask = self.codec.build_base_action_mask(obs)
 
         obs_tensor = to_tensor(obs_vec, device=self.device).unsqueeze(0)
+        mask_tensor = to_tensor(base_mask, device=self.device).unsqueeze(0)
 
-        raw_action_tensor, log_prob_tensor, value_tensor = self.model.act(
-            obs_tensor,
-            deterministic=deterministic,
-        )
+        action_tensor, log_prob_tensor, value_tensor, eff_mask_tensor = self.model.act(obs_tensor, deterministic, mask_tensor)
 
-        raw_action = raw_action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
-        log_prob = float(log_prob_tensor.squeeze(0).detach().cpu().item())
-        value = float(value_tensor.squeeze(0).detach().cpu().item())
+        policy_action = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        eff_mask = eff_mask_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
 
-        self._check_finite_array("raw_action", raw_action)
+        self._check_finite_array("policy_action", policy_action)
+        self._check_finite_array("eff_action_mask", eff_mask)
 
-        env_action = self.codec.decode(raw_action, obs)
+        env_action = self.codec.decode(policy_action, obs)
+
+        power_raw = policy_action[self.codec.spec.uav_power_slice]
+        power_mask = eff_mask[self.codec.spec.uav_power_slice] > 0.0
+        
+        if np.any(power_mask):
+            action_saturation_ratio = float(
+                np.mean(np.abs(np.tanh(power_raw[power_mask]))>= 0.98)
+            )
+        else:
+            action_saturation_ratio = 0.0
+
+        action_stats = self.codec.action_statistics(policy_action, eff_mask)
 
         return {
             "obs_vec": obs_vec,
-            "raw_action": raw_action,
+
+            "raw_action": policy_action,
+            "action_mask": eff_mask,
+
             "env_action": env_action,
-            "log_prob": log_prob,
-            "value": value,
+
+            "log_prob": float(log_prob_tensor.squeeze(0).detach().cpu().item()),
+            "value": float(value_tensor.squeeze(0).detach().cpu().item()),
+            "active_action_dims": int(np.sum(eff_mask)),
+            "active_action_ratio": float(np.mean(eff_mask)),
+            "action_saturation_ratio": action_saturation_ratio,
+
+            **action_stats,
         }
     
     def store_transition(
         self,
         obs_vec: np.ndarray,
         raw_action: np.ndarray,
+        action_mask: np.ndarray,
         reward: float,
         done: bool,
         value: float,
@@ -219,15 +237,23 @@ class FastPPOAgent:
         """
         if self.ppo_cfg.fail_on_nan:
             if not np.isfinite(float(reward)):
-                raise RuntimeError(f"reward is NaN or Inf: {reward}")
+                raise RuntimeError(
+                    f"reward is NaN or Inf: {reward}"
+                )
             if not np.isfinite(float(value)):
-                raise RuntimeError(f"value is NaN or Inf: {value}")
+                raise RuntimeError(
+                    f"value is NaN or Inf: {value}"
+                )
             if not np.isfinite(float(log_prob)):
-                raise RuntimeError(f"log_prob is NaN or Inf: {log_prob}")
+                raise RuntimeError(
+                    "log_prob is NaN or Inf: "
+                    f"{log_prob}"
+                )
 
         self.buffer.add(
             obs=obs_vec,
             action=raw_action,
+            action_mask=action_mask,
             reward=float(reward),
             done=bool(done),
             value=float(value),
@@ -321,26 +347,37 @@ class FastPPOAgent:
         
         policy_losses: list[float] = []
         value_losses: list[float] = []
-        entropy_values: list[float] = []
-        approx_kl_values: list[float] = []
-        clip_frac_values: list[float] = []
+        categorical_entropies: list[float] = []
+        power_entropies: list[float] = []
+        approx_kls: list[float] = []
+        clip_fracs: list[float] = []
+
+        early_stopped = False
+        completed_minibatches = 0
 
         for _ in range(int(self.ppo_cfg.update_epochs)):
             for batch in self.buffer.iter_minibatches(
                 batch_size=int(self.ppo_cfg.batch_size),
                 shuffle=True,
+                include_action_masks=True,
             ):
-                new_log_prob, entropy, new_value = self.model.evaluate_actions(
+                new_log_prob, categorical_entropy, power_entropy, new_value = self.model.evaluate_actions(
                     obs=batch.obs,
                     actions=batch.actions,
+                    action_mask=batch.action_masks,
                 )
-
-                self._check_finite_tensor("new_log_prob", new_log_prob)
-                self._check_finite_tensor("entropy", entropy)
-                self._check_finite_tensor("new_value", new_value)
+                for name, tensor in (
+                    ("new_log_prob", new_log_prob),
+                    ("categorical_entropy", categorical_entropy),
+                    ("power_entropy", power_entropy),
+                    ("new_value", new_value),
+                ):
+                    self._check_finite_tensor(name, tensor)
 
                 log_ratio = new_log_prob - batch.old_log_probs
                 ratio = torch.exp(log_ratio)
+
+                self._check_finite_tensor("ppo_ratio", ratio)
 
                 with torch.no_grad():
                     approx_kl = ((ratio - 1.0) - log_ratio).mean()
@@ -348,15 +385,31 @@ class FastPPOAgent:
                         torch.abs(ratio - 1.0) > float(self.ppo_cfg.clip_coef)
                     ).float().mean()
 
+                #이미 KL이 target을 넘었다면
+                # 현재 minibatch의 추가 update를 수행하지 않는다.
+                if (
+                    self.ppo_cfg.target_kl is not None
+                    and float(approx_kl.item())
+                    > float(self.ppo_cfg.target_kl)
+                ):
+                    approx_kls.append(
+                        float(approx_kl.item())
+                    )
+                    clip_fracs.append(
+                        float(clip_frac.item())
+                    )
+                    early_stopped = True
+                    break
+
                 adv = batch.advantages
 
-                policy_loss_1 = -adv * ratio
-                policy_loss_2 = -adv * torch.clamp(
+                policy_loss_unclipped = -adv * ratio
+                policy_loss_clipped = -adv * torch.clamp(
                     ratio,
                     1.0 - float(self.ppo_cfg.clip_coef),
                     1.0 + float(self.ppo_cfg.clip_coef),
                 )
-                policy_loss = torch.max(policy_loss_1, policy_loss_2).mean()
+                policy_loss = torch.maximum(policy_loss_unclipped, policy_loss_clipped).mean()
 
                 value_loss = self._compute_value_loss(
                     new_value=new_value,
@@ -364,34 +417,47 @@ class FastPPOAgent:
                     returns=batch.returns,
                 )
 
-                entropy_mean = entropy.mean()
+                categorical_entropy_mean = categorical_entropy.mean()
+                power_entropy_mean = power_entropy.mean()
 
                 loss = (
                     policy_loss
                     + float(self.ppo_cfg.value_coef) * value_loss
-                    - float(self.ppo_cfg.entropy_coef) * entropy_mean
+                    - float(self.ppo_cfg.categorical_entropy_coef) * categorical_entropy_mean
+                    - float(self.ppo_cfg.power_entropy_coef) * power_entropy_mean
                 )
 
                 self._check_finite_tensor("ppo_loss", loss)
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=float(self.ppo_cfg.max_grad_norm),
                 )
                 self.optimizer.step()
 
-                policy_losses.append(float(policy_loss.detach().cpu().item()))
-                value_losses.append(float(value_loss.detach().cpu().item()))
-                entropy_values.append(float(entropy_mean.detach().cpu().item()))
-                approx_kl_values.append(float(approx_kl.detach().cpu().item()))
-                clip_frac_values.append(float(clip_frac.detach().cpu().item()))
+                completed_minibatches += 1
 
-        obs, actions, old_log_probs, returns, advantages, old_values = self.buffer.get_tensors()
+                policy_losses.append(float(policy_loss.detach().cpu()))
+                value_losses.append(float(value_loss.detach().cpu()))
+                categorical_entropies.append(float(categorical_entropy_mean.detach().cpu()))
+                power_entropies.append(float(power_entropy_mean.detach().cpu()))
+                approx_kls.append(float(approx_kl.detach().cpu()))
+                clip_fracs.append(float(clip_frac.detach().cpu()))
+            
+            if early_stopped:
+                break
+
+        obs, actions, _, returns, _, _ = self.buffer.get_tensors()
+        action_masks = self.buffer.get_action_masks_tensor()
 
         with torch.no_grad():
-            _, _, value_after = self.model.evaluate_actions(obs, actions)
+            _, _, _, value_after = self.model.evaluate_actions(obs, actions, action_masks)
+
+            self._check_finite_tensor("value_after", value_after)
+
             explained_v = explained_var(
                 y_pred=value_after.detach().cpu().numpy(),
                 y_true=returns.detach().cpu().numpy(),
@@ -399,19 +465,44 @@ class FastPPOAgent:
 
         buffer_summary = self.buffer.summary()
 
+        categorical_entropy_mean = float(np.mean(categorical_entropies)) if categorical_entropies else 0.0
+        power_entropy_mean = float(np.mean(power_entropies)) if power_entropies else 0.0
+
+        entropy_bonus = float(self.ppo_cfg.categorical_entropy_coef) * categorical_entropy_mean + float(self.ppo_cfg.power_entropy_coef) * power_entropy_mean
+
         logs = {
             "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
             "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
-            "entropy": float(np.mean(entropy_values)) if entropy_values else 0.0,
-            "approx_kl": float(np.mean(approx_kl_values)) if approx_kl_values else 0.0,
-            "clipfrac": float(np.mean(clip_frac_values)) if clip_frac_values else 0.0,
+            "categorical_entropy": categorical_entropy_mean,
+            "power_entropy": power_entropy_mean,
+            "entropy_bonus": entropy_bonus,
+            "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
+            "clipfrac": float(np.mean(clip_fracs)) if clip_fracs else 0.0,
             "explained_variance": float(explained_v),
             "buffer_reward_mean": float(buffer_summary["reward_mean"]),
             "buffer_reward_std": float(buffer_summary["reward_std"]),
+            "active_action_dims_mean": float(
+                action_masks
+                .sum(dim=-1)
+                .mean()
+                .detach()
+                .cpu()
+                .item()
+            ),
+            "active_action_ratio_mean": float(
+                action_masks
+                .mean()
+                .detach()
+                .cpu()
+                .item()
+            ),
+            "early_stopped": float(early_stopped),
+            "completed_minibatches": float(
+                completed_minibatches
+            ),
         }
 
         self.buffer.reset()
-
         return logs
 
     def save(
@@ -423,9 +514,14 @@ class FastPPOAgent:
         model/optimizer 저장.
         """
         merged_extra: Dict[str, Any] = {
-            "fast_ppo_config": asdict(self.ppo_cfg),
-            "obs_dim": self.obs_dim,
-            "action_dim": self.action_dim,
+            "policy_type":
+                "conditional_mixed_categorical_gaussian_v1",
+            "fast_ppo_config":
+                asdict(self.ppo_cfg),
+            "obs_dim":
+                self.obs_dim,
+            "action_dim":
+                self.action_dim,
         }
 
         if self.obs_normalizer is not None:
@@ -462,3 +558,86 @@ class FastPPOAgent:
             self.obs_normalizer.load_state_dict(obs_norm_state)
 
         return checkpoint
+    
+    def load_legacy_transfer(
+        self,
+        path: str | Path,
+    ) -> Dict[str, Any]:
+        """
+        기존 all-Gaussian PPO checkpoint에서
+        critic과 observation normalizer만 이전한다.
+
+        기존 actor/log_std/optimizer는 절대 가져오지 않는다.
+        """
+        try:
+            checkpoint = torch.load(
+                path,
+                map_location=self.device,
+                weights_only=False,
+            )
+        except TypeError:
+            checkpoint = torch.load(
+                path,
+                map_location=self.device,
+            )
+
+        source_state = checkpoint[
+            "model_state_dict"
+        ]
+        target_state = (
+            self.model.state_dict()
+        )
+
+        compatible = {
+            key: value
+            for key, value
+            in source_state.items()
+            if (
+                key.startswith(
+                    "critic_network."
+                )
+                and key in target_state
+                and (
+                    target_state[key].shape
+                    == value.shape
+                )
+            )
+        }
+
+        if not compatible:
+            raise RuntimeError(
+                "이전 가능한 critic parameter를 "
+                "찾지 못했습니다."
+            )
+
+        self.model.load_state_dict(
+            compatible,
+            strict=False,
+        )
+
+        extra = checkpoint.get(
+            "extra",
+            {},
+        )
+
+        obs_norm_state = extra.get(
+            "obs_normalizer",
+        )
+
+        if (
+            obs_norm_state is not None
+            and self.obs_normalizer is not None
+        ):
+            self.obs_normalizer.load_state_dict(
+                obs_norm_state
+            )
+
+        return {
+            "transferred_keys": sorted(
+                compatible.keys()
+            ),
+            "num_transferred_tensors": len(
+                compatible
+            ),
+            "source_extra": extra,
+        }
