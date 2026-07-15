@@ -27,7 +27,7 @@ def _build_body(
 
     for hidden_dim in hidden_dims:
         width = int(hidden_dim)
-        layers.extent([nn.Linear(prev_dim, width), activation()])
+        layers.extend([nn.Linear(prev_dim, width), activation()])
         prev_dim = width
 
     return nn.Sequential(*layers), prev_dim

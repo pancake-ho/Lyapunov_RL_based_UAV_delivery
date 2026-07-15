@@ -135,7 +135,10 @@ class Env:
         """
         value = getattr(self.cfg, "uav_hiring_cost", None)
         if value is None:
-            return AttributeError("config.py 내 EnvConfig class에 uav_hiring_cost 변수가 필요합니다.")
+            raise AttributeError(
+                "config.py 내 EnvConfig class에 "
+                "uav_hiring_cost 변수가 필요합니다."
+            )
         
         arr = np.asarray(value, dtype=np.float32)
         if arr.ndim == 0:
