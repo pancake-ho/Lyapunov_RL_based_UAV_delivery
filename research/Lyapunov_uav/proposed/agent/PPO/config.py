@@ -20,9 +20,9 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 1) 실행 모드 / seed / device
     # ------------------------------------------------------------------
-    mode: str = "eval"  # train | eval
+    mode: str = "train"  # train | eval
     seed: int = 2026
-    deterministic_torch: bool = False
+    deterministic_torch: bool = True
     device: str = "cuda"  # cuda | cuda:0 | cpu | auto
 
     # ------------------------------------------------------------------
@@ -33,10 +33,10 @@ class FastTrainConfig:
 
     # None이면 fast_train.py에서 자동 이름 생성
     run_name: Optional[str] = (
-        "260716_00h42m_eval"
+        "fast_final_static_cat5e4_seed2026"
     )
 
-    checkpoint: Optional[str] = "fast/fast_ppo_rs1e4_multiround_v1/checkpoints/fast_ppo_ep10.pt"
+    checkpoint: Optional[str] = None
     resume: bool = False
     legacy_transfer: bool = False
 
@@ -45,8 +45,8 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 현재 fast-only 학습에서는 episode 하나를 slow_T slot짜리 round 하나로 본다.
     # 즉, num_episodes=50000이면 slow_T slot짜리 round를 50000번 학습한다.
-    num_episodes: int = 30
-    eval_episodes: int = 5
+    num_episodes: int = 200
+    eval_episodes: int = 10
 
     rounds_per_episode: int = 10
     eval_rounds_per_episode: int = 5
@@ -55,9 +55,9 @@ class FastTrainConfig:
     rollout_slots: int = 4096
 
     # checkpoint / plot 저장 주기
-    save_every_episodes: int = 5
-    plot_every_episodes: int = 5
-    plot_smooth_window: int = 5
+    save_every_episodes: int = 10
+    plot_every_episodes: int = 10
+    plot_smooth_window: int = 10
 
     # ------------------------------------------------------------------
     # 4) PPO hyperparameters
@@ -78,7 +78,7 @@ class FastTrainConfig:
     # raw reward를 그대로 쓰므로 value loss가 커질 수 있다.
     # critic loss가 actor를 압도하지 않도록 value_coef는 낮게 둔다.
     value_coef: float = 0.5
-    categorical_entropy_coef: float = 2e-3
+    categorical_entropy_coef: float = 5e-4
     power_entropy_coef: float = 1e-4
 
     max_grad_norm: float = 0.5
