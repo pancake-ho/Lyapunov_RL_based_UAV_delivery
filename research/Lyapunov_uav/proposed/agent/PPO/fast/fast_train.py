@@ -1640,23 +1640,149 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
 
             if ep_done:
                 break
+        
+        step_denominator = float(
+            max(ep_steps, 1)
+        )
 
+        ep_quality_per_chunk = (
+            ep_quality / ep_delivery
+            if ep_delivery > 0.0
+            else 0.0
+        )
+
+        ep_quality_degradation_per_chunk = (
+            ep_quality_degradation
+            / ep_delivery
+            if ep_delivery > 0.0
+            else 0.0
+        )
+
+        ep_scheduled_stall_rate = (
+            ep_scheduled_stall
+            / ep_scheduled_playback
+            if ep_scheduled_playback > 0.0
+            else 0.0
+        )
+
+        ep_unscheduled_stall_rate = (
+            ep_unscheduled_stall
+            / ep_unscheduled_playback
+            if ep_unscheduled_playback > 0.0
+            else 0.0
+        )
+
+        ep_mean_soc = (
+            ep_mean_soc_sum
+            / step_denominator
+        )
+
+        ep_mean_B = (
+            ep_mean_B_sum
+            / step_denominator
+        )
+
+        ep_active_action_dims_mean = (
+            ep_active_action_dims
+            / step_denominator
+        )
+
+        ep_active_action_ratio_mean = (
+            ep_active_action_ratio
+            / step_denominator
+        )
+
+        ep_action_saturation_ratio_mean = (
+            ep_action_saturation_ratio
+            / step_denominator
+        )
+
+        ep_service_rate = (
+            ep_service_rate
+            / step_denominator
+        )
+
+        ep_mean_requested_chunks = (
+            ep_mean_requested_chunks
+            / step_denominator
+        )
+
+        ep_layer_ratios = (
+            ep_layer_ratios
+            / step_denominator
+        )
+
+        if not np.isfinite(ep_min_soc):
+            ep_min_soc = 0.0
+            
         rewards.append(ep_reward)
         deliveries.append(ep_delivery)
         qualities.append(ep_quality)
         stalls.append(ep_stall)
 
+        layer_metrics = {
+            f"episode_layer_{layer_idx}_ratio":
+                float(ep_layer_ratios[layer_idx])
+            for layer_idx in range(
+                1,
+                int(env_cfg.layer) + 1,
+            )
+        }
+
         eval_logger.write(
             {
                 "episode": episode_idx,
-                "episode_steps": ep_steps,
-                "episode_reward": ep_reward,
-                "episode_delivery": ep_delivery,
-                "episode_quality": ep_quality,
-                "episode_stall": ep_stall,
-                "episode_consumed_soc": ep_consumed_soc,
-                "episode_charged_soc": ep_charged_soc,
-                "episode_outage": ep_outage,
+                "move_prob":
+                    float(env_cfg.move_prob),
+                "episode_steps":
+                    ep_steps,
+                "episode_reward":
+                    ep_reward,
+                "episode_delivery":
+                    ep_delivery,
+                "episode_quality":
+                    ep_quality,
+                "episode_quality_per_chunk":
+                    ep_quality_per_chunk,
+                "episode_quality_degradation":
+                    ep_quality_degradation,
+                "episode_quality_degradation_per_chunk":
+                    ep_quality_degradation_per_chunk,
+                "episode_stall":
+                    ep_stall,
+                "episode_scheduled_stall_rate":
+                    ep_scheduled_stall_rate,
+                "episode_unscheduled_stall_rate":
+                    ep_unscheduled_stall_rate,
+                "episode_consumed_soc":
+                    ep_consumed_soc,
+                "episode_charged_soc":
+                    ep_charged_soc,
+                "episode_outage":
+                    ep_outage,
+                "episode_min_soc":
+                    ep_min_soc,
+                "episode_mean_soc":
+                    ep_mean_soc,
+                "episode_max_B":
+                    ep_max_B,
+                "episode_mean_B":
+                    ep_mean_B,
+                "episode_charging_slots":
+                    ep_charging_slots,
+                "episode_outage_slots":
+                    ep_outage_slots,
+                "episode_active_action_dims_mean":
+                    ep_active_action_dims_mean,
+                "episode_active_action_ratio_mean":
+                    ep_active_action_ratio_mean,
+                "episode_action_saturation_ratio_mean":
+                    ep_action_saturation_ratio_mean,
+                "episode_service_rate":
+                    ep_service_rate,
+                "episode_mean_requested_chunks":
+                    ep_mean_requested_chunks,
+                **layer_metrics,
             }
         )
 

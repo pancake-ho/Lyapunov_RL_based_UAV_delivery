@@ -347,9 +347,10 @@ class FastPPOAgent:
         
         policy_losses: list[float] = []
         value_losses: list[float] = []
-        entropy_values: list[float] = []
-        approx_kl_values: list[float] = []
-        clip_frac_values: list[float] = []
+        categorical_entropies: list[float] = []
+        power_entropies: list[float] = []
+        approx_kls: list[float] = []
+        clip_fracs: list[float] = []
 
         early_stopped = False
         completed_minibatches = 0
@@ -365,9 +366,18 @@ class FastPPOAgent:
                     actions=batch.actions,
                     action_mask=batch.action_masks,
                 )
+                for name, tensor in (
+                    ("new_log_prob", new_log_prob),
+                    ("categorical_entropy", categorical_entropy),
+                    ("power_entropy", power_entropy),
+                    ("new_value", new_value),
+                ):
+                    self._check_finite_tensor(name, tensor)
 
                 log_ratio = new_log_prob - batch.old_log_probs
                 ratio = torch.exp(log_ratio)
+
+                self._check_finite_tensor("ppo_ratio", ratio)
 
                 with torch.no_grad():
                     approx_kl = ((ratio - 1.0) - log_ratio).mean()
@@ -382,10 +392,10 @@ class FastPPOAgent:
                     and float(approx_kl.item())
                     > float(self.ppo_cfg.target_kl)
                 ):
-                    approx_kl_values.append(
+                    approx_kls.append(
                         float(approx_kl.item())
                     )
-                    clip_frac_values.append(
+                    clip_fracs.append(
                         float(clip_frac.item())
                     )
                     early_stopped = True
@@ -393,13 +403,13 @@ class FastPPOAgent:
 
                 adv = batch.advantages
 
-                policy_loss_1 = -adv * ratio
-                policy_loss_2 = -adv * torch.clamp(
+                policy_loss_unclipped = -adv * ratio
+                policy_loss_clipped = -adv * torch.clamp(
                     ratio,
                     1.0 - float(self.ppo_cfg.clip_coef),
                     1.0 + float(self.ppo_cfg.clip_coef),
                 )
-                policy_loss = torch.max(policy_loss_1, policy_loss_2).mean()
+                policy_loss = torch.maximum(policy_loss_unclipped, policy_loss_clipped).mean()
 
                 value_loss = self._compute_value_loss(
                     new_value=new_value,
@@ -421,6 +431,7 @@ class FastPPOAgent:
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=float(self.ppo_cfg.max_grad_norm),
@@ -431,17 +442,21 @@ class FastPPOAgent:
 
                 policy_losses.append(float(policy_loss.detach().cpu()))
                 value_losses.append(float(value_loss.detach().cpu()))
-                approx_kl_values.append(float(approx_kl.detach().cpu()))
-                clip_frac_values.append(float(clip_frac.detach().cpu()))
+                categorical_entropies.append(float(categorical_entropy_mean.detach().cpu()))
+                power_entropies.append(float(power_entropy_mean.detach().cpu()))
+                approx_kls.append(float(approx_kl.detach().cpu()))
+                clip_fracs.append(float(clip_frac.detach().cpu()))
             
             if early_stopped:
                 break
 
-        obs, actions, old_log_probs, returns, advantages, old_values = self.buffer.get_tensors()
+        obs, actions, _, returns, _, _ = self.buffer.get_tensors()
         action_masks = self.buffer.get_action_masks_tensor()
 
         with torch.no_grad():
-            _, _, value_after = self.model.evaluate_actions(obs, actions, action_masks)
+            _, _, _, value_after = self.model.evaluate_actions(obs, actions, action_masks)
+
+            self._check_finite_tensor("value_after", value_after)
 
             explained_v = explained_var(
                 y_pred=value_after.detach().cpu().numpy(),
@@ -450,12 +465,19 @@ class FastPPOAgent:
 
         buffer_summary = self.buffer.summary()
 
+        categorical_entropy_mean = float(np.mean(categorical_entropies)) if categorical_entropies else 0.0
+        power_entropy_mean = float(np.mean(power_entropies)) if power_entropies else 0.0
+
+        entropy_bonus = float(self.ppo_cfg.categorical_entropy_coef) * categorical_entropy_mean + float(self.ppo_cfg.power_entropy_coef) * power_entropy_mean
+
         logs = {
             "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
             "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
-            "entropy": float(np.mean(entropy_values)) if entropy_values else 0.0,
-            "approx_kl": float(np.mean(approx_kl_values)) if approx_kl_values else 0.0,
-            "clipfrac": float(np.mean(clip_frac_values)) if clip_frac_values else 0.0,
+            "categorical_entropy": categorical_entropy_mean,
+            "power_entropy": power_entropy_mean,
+            "entropy_bonus": entropy_bonus,
+            "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
+            "clipfrac": float(np.mean(clip_fracs)) if clip_fracs else 0.0,
             "explained_variance": float(explained_v),
             "buffer_reward_mean": float(buffer_summary["reward_mean"]),
             "buffer_reward_std": float(buffer_summary["reward_std"]),
@@ -478,29 +500,9 @@ class FastPPOAgent:
             "completed_minibatches": float(
                 completed_minibatches
             ),
-            "categorical_entropy": (
-                float(
-                    np.mean(
-                        categorical_entropy_values
-                    )
-                )
-                if categorical_entropy_values
-                else 0.0
-            ),
-
-            "power_entropy": (
-                float(
-                    np.mean(
-                        power_entropy_values
-                    )
-                )
-                if power_entropy_values
-                else 0.0
-            ),
         }
 
         self.buffer.reset()
-
         return logs
 
     def save(
@@ -512,9 +514,14 @@ class FastPPOAgent:
         model/optimizer 저장.
         """
         merged_extra: Dict[str, Any] = {
-            "fast_ppo_config": asdict(self.ppo_cfg),
-            "obs_dim": self.obs_dim,
-            "action_dim": self.action_dim,
+            "policy_type":
+                "conditional_mixed_categorical_gaussian_v1",
+            "fast_ppo_config":
+                asdict(self.ppo_cfg),
+            "obs_dim":
+                self.obs_dim,
+            "action_dim":
+                self.action_dim,
         }
 
         if self.obs_normalizer is not None:
@@ -562,10 +569,17 @@ class FastPPOAgent:
 
         기존 actor/log_std/optimizer는 절대 가져오지 않는다.
         """
-        checkpoint = torch.load(
-            path,
-            map_location=self.device,
-        )
+        try:
+            checkpoint = torch.load(
+                path,
+                map_location=self.device,
+                weights_only=False,
+            )
+        except TypeError:
+            checkpoint = torch.load(
+                path,
+                map_location=self.device,
+            )
 
         source_state = checkpoint[
             "model_state_dict"

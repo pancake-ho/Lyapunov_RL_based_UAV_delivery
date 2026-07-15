@@ -55,9 +55,9 @@ class FastTrainConfig:
     rollout_slots: int = 4096
 
     # checkpoint / plot 저장 주기
-    save_every_episodes: int = 10
+    save_every_episodes: int = 5
     plot_every_episodes: int = 5
-    plot_smooth_window: int = 20
+    plot_smooth_window: int = 5
 
     # ------------------------------------------------------------------
     # 4) PPO hyperparameters
@@ -200,10 +200,16 @@ class FastTrainConfig:
             raise ValueError(
                 "value_coef must be non-negative."
             )
-        if self.entropy_coef < 0.0:
-            raise ValueError(
-                "entropy_coef must be non-negative."
-            )
+        for name in (
+            "value_coef",
+            "categorical_entropy_coef",
+            "power_entropy_coef",
+        ):
+            if float(getattr(self, name)) < 0.0:
+                raise ValueError(
+                    f"{name} must be non-negative."
+                )
+            
         if self.max_grad_norm <= 0.0:
             raise ValueError(
                 "max_grad_norm must be positive."
@@ -308,18 +314,6 @@ class FastTrainConfig:
             raise ValueError(
                 "target_kl은 None 또는 "
                 "양수여야 합니다."
-            )
-
-        if self.categorical_entropy_coef < 0.0:
-            raise ValueError(
-                "categorical_entropy_coef는 "
-                "0 이상이어야 합니다."
-            )
-
-        if self.power_entropy_coef < 0.0:
-            raise ValueError(
-                "power_entropy_coef는 "
-                "0 이상이어야 합니다."
             )
 
     def to_dict(self) -> Dict[str, object]:
