@@ -41,23 +41,22 @@ from .fast_network import FastActorCritic
 class FastPPOConfig:
     """
     Fast-timescale PPO hyperparameters.
-
-    현재 시나리오 기준:
-        수치 최적화 전 단계이므로, 기본값은 안정적인 training을 추구하는 쪽으로 설정함.
     """
-    rollout_steps: int = 8192
+    rollout_steps: int = 4096
     update_epochs: int = 4
-    batch_size: int = 1024
+    batch_size: int = 512
 
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
     lr: float = 3e-5
-    max_grad_norm: float = 0.3
+    max_grad_norm: float = 0.5
 
-    clip_coef: float = 0.10
-    value_coef: float = 0.05
-    entropy_coef: float = 1e-3
+    clip_coef: float = 0.15
+    value_coef: float = 0.5
+    
+    categorical_entropy_coef: float = 2e-3
+    power_entropy_coef: float = 1e-4
 
     normalize_obs: bool = True
     normalize_adv: bool = True
@@ -67,10 +66,10 @@ class FastPPOConfig:
 
     use_value_huber_loss: bool = True
     use_value_clip: bool = True
-    value_clip_coef: float = 50_000.0
+    value_clip_coef: float = 0.5
 
     fail_on_nan: bool = True
-    target_kl: Optional[float] = 0.015
+    target_kl: Optional[float] = 0.02
 
     device: str = "auto"
 
@@ -99,7 +98,7 @@ class FastPPOAgent:
 
         self.model = FastActorCritic(
             obs_dim=self.obs_dim,
-            action_dim=self.action_dim,
+            action_spec=self.codec.spec,
             hidden_dims=self.ppo_cfg.hidden_dims,
             init_log_std=self.ppo_cfg.init_log_std,
         ).to(self.device)
@@ -178,67 +177,49 @@ class FastPPOAgent:
         """
         실제 Fast Agent가 선택하는 action을 반환 및 env와 호환되게 설정.
         """
-        obs_vec = self.obs_to_vec(
-            obs,
-            update_norm=update_norm,
-        )
-
-        action_mask = self.codec.build_action_mask(obs)
+        obs_vec = self.obs_to_vec(obs, update_norm=update_norm)
+        base_mask = self.codec.build_base_action_mask(obs)
 
         obs_tensor = to_tensor(obs_vec, device=self.device).unsqueeze(0)
-        mask_tensor = to_tensor(action_mask, device=self.device).unsqueeze(0)
+        mask_tensor = to_tensor(base_mask, device=self.device).unsqueeze(0)
 
-        raw_action_tensor, log_prob_tensor, value_tensor = self.model.act(
-            obs=obs_tensor,
-            deterministic=deterministic,
-            action_mask=mask_tensor,
-        )
+        action_tensor, log_prob_tensor, value_tensor, eff_mask_tensor = self.model.act(obs_tensor, deterministic, mask_tensor)
 
-        raw_action = raw_action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
-        log_prob = float(log_prob_tensor.squeeze(0).detach().cpu().item())
-        value = float(value_tensor.squeeze(0).detach().cpu().item())
+        policy_action = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        eff_mask = eff_mask_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
 
-        self._check_finite_array("raw_action", raw_action)
+        self._check_finite_array("policy_action", policy_action)
+        self._check_finite_array("eff_action_mask", eff_mask)
 
-        env_action = self.codec.decode(raw_action, obs)
+        env_action = self.codec.decode(policy_action, obs)
 
-        active_action_dims = int(
-            np.sum(action_mask)
-        )
-
-        active_action_ratio = float(
-            np.mean(action_mask)
-        )
-
-        active_values = raw_action[
-            action_mask > 0.0
-        ]
-
-        if active_values.size > 0:
+        power_raw = policy_action[self.codec.spec.uav_power_slice]
+        power_mask = eff_mask[self.codec.spec.uav_power_slice] > 0.0
+        
+        if np.any(power_mask):
             action_saturation_ratio = float(
-                np.mean(
-                    np.abs(active_values) >= 1.0
-                )
+                np.mean(np.abs(np.tanh(power_raw[power_mask]))>= 0.98)
             )
         else:
             action_saturation_ratio = 0.0
 
+        action_stats = self.codec.action_statistics(policy_action, eff_mask)
+
         return {
             "obs_vec": obs_vec,
-            "raw_action": raw_action,
-            "action_mask": action_mask,
+
+            "raw_action": policy_action,
+            "action_mask": eff_mask,
+
             "env_action": env_action,
-            "log_prob": log_prob,
-            "value": value,
-            "active_action_dims": (
-                active_action_dims
-            ),
-            "active_action_ratio": (
-                active_action_ratio
-            ),
-            "action_saturation_ratio": (
-                action_saturation_ratio
-            ),
+
+            "log_prob": float(log_prob_tensor.squeeze(0).detach().cpu().item()),
+            "value": float(value_tensor.squeeze(0).detach().cpu().item()),
+            "active_action_dims": int(np.sum(eff_mask)),
+            "active_action_ratio": float(np.mean(eff_mask)),
+            "action_saturation_ratio": action_saturation_ratio,
+
+            **action_stats,
         }
     
     def store_transition(
@@ -379,15 +360,11 @@ class FastPPOAgent:
                 shuffle=True,
                 include_action_masks=True,
             ):
-                new_log_prob, entropy, new_value = self.model.evaluate_actions(
+                new_log_prob, categorical_entropy, power_entropy, new_value = self.model.evaluate_actions(
                     obs=batch.obs,
                     actions=batch.actions,
                     action_mask=batch.action_masks,
                 )
-
-                self._check_finite_tensor("new_log_prob", new_log_prob)
-                self._check_finite_tensor("entropy", entropy)
-                self._check_finite_tensor("new_value", new_value)
 
                 log_ratio = new_log_prob - batch.old_log_probs
                 ratio = torch.exp(log_ratio)
@@ -430,12 +407,14 @@ class FastPPOAgent:
                     returns=batch.returns,
                 )
 
-                entropy_mean = entropy.mean()
+                categorical_entropy_mean = categorical_entropy.mean()
+                power_entropy_mean = power_entropy.mean()
 
                 loss = (
                     policy_loss
                     + float(self.ppo_cfg.value_coef) * value_loss
-                    - float(self.ppo_cfg.entropy_coef) * entropy_mean
+                    - float(self.ppo_cfg.categorical_entropy_coef) * categorical_entropy_mean
+                    - float(self.ppo_cfg.power_entropy_coef) * power_entropy_mean
                 )
 
                 self._check_finite_tensor("ppo_loss", loss)
@@ -452,7 +431,6 @@ class FastPPOAgent:
 
                 policy_losses.append(float(policy_loss.detach().cpu()))
                 value_losses.append(float(value_loss.detach().cpu()))
-                entropy_values.append(float(entropy_mean.detach().cpu()))
                 approx_kl_values.append(float(approx_kl.detach().cpu()))
                 clip_frac_values.append(float(clip_frac.detach().cpu()))
             
@@ -499,6 +477,25 @@ class FastPPOAgent:
             "early_stopped": float(early_stopped),
             "completed_minibatches": float(
                 completed_minibatches
+            ),
+            "categorical_entropy": (
+                float(
+                    np.mean(
+                        categorical_entropy_values
+                    )
+                )
+                if categorical_entropy_values
+                else 0.0
+            ),
+
+            "power_entropy": (
+                float(
+                    np.mean(
+                        power_entropy_values
+                    )
+                )
+                if power_entropy_values
+                else 0.0
             ),
         }
 
@@ -554,3 +551,79 @@ class FastPPOAgent:
             self.obs_normalizer.load_state_dict(obs_norm_state)
 
         return checkpoint
+    
+    def load_legacy_transfer(
+        self,
+        path: str | Path,
+    ) -> Dict[str, Any]:
+        """
+        기존 all-Gaussian PPO checkpoint에서
+        critic과 observation normalizer만 이전한다.
+
+        기존 actor/log_std/optimizer는 절대 가져오지 않는다.
+        """
+        checkpoint = torch.load(
+            path,
+            map_location=self.device,
+        )
+
+        source_state = checkpoint[
+            "model_state_dict"
+        ]
+        target_state = (
+            self.model.state_dict()
+        )
+
+        compatible = {
+            key: value
+            for key, value
+            in source_state.items()
+            if (
+                key.startswith(
+                    "critic_network."
+                )
+                and key in target_state
+                and (
+                    target_state[key].shape
+                    == value.shape
+                )
+            )
+        }
+
+        if not compatible:
+            raise RuntimeError(
+                "이전 가능한 critic parameter를 "
+                "찾지 못했습니다."
+            )
+
+        self.model.load_state_dict(
+            compatible,
+            strict=False,
+        )
+
+        extra = checkpoint.get(
+            "extra",
+            {},
+        )
+
+        obs_norm_state = extra.get(
+            "obs_normalizer",
+        )
+
+        if (
+            obs_norm_state is not None
+            and self.obs_normalizer is not None
+        ):
+            self.obs_normalizer.load_state_dict(
+                obs_norm_state
+            )
+
+        return {
+            "transferred_keys": sorted(
+                compatible.keys()
+            ),
+            "num_transferred_tensors": len(
+                compatible
+            ),
+            "source_extra": extra,
+        }

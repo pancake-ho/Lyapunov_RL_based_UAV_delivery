@@ -78,38 +78,88 @@ def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
         hidden_dims = [256, 256]
 
     return AgentPPOConfig(
-        rollout_steps=int(train_cfg.rollout_slots),
-        update_epochs=int(train_cfg.update_epochs),
-        batch_size=int(train_cfg.batch_size),
+        rollout_steps=int(
+            train_cfg.rollout_slots
+        ),
+        update_epochs=int(
+            train_cfg.update_epochs
+        ),
+        batch_size=int(
+            train_cfg.batch_size
+        ),
 
-        gamma=float(train_cfg.gamma),
-        gae_lambda=float(train_cfg.gae_lambda),
+        gamma=float(
+            train_cfg.gamma
+        ),
+        gae_lambda=float(
+            train_cfg.gae_lambda
+        ),
 
-        lr=float(train_cfg.lr),
-        max_grad_norm=float(train_cfg.max_grad_norm),
+        lr=float(
+            train_cfg.lr
+        ),
+        max_grad_norm=float(
+            train_cfg.max_grad_norm
+        ),
 
-        clip_coef=float(train_cfg.clip_coef),
-        value_coef=float(train_cfg.value_coef),
-        entropy_coef=float(train_cfg.entropy_coef),
+        clip_coef=float(
+            train_cfg.clip_coef
+        ),
+        value_coef=float(
+            train_cfg.value_coef
+        ),
+
+        categorical_entropy_coef=float(
+            train_cfg
+            .categorical_entropy_coef
+        ),
+        power_entropy_coef=float(
+            train_cfg
+            .power_entropy_coef
+        ),
+
         target_kl=(
             None
             if train_cfg.target_kl is None
-            else float(train_cfg.target_kl)
+            else float(
+                train_cfg.target_kl
+            )
         ),
 
-        normalize_obs=bool(train_cfg.obs_norm),
-        normalize_adv=bool(train_cfg.adv_norm),
+        normalize_obs=bool(
+            train_cfg.obs_norm
+        ),
+        normalize_adv=bool(
+            train_cfg.adv_norm
+        ),
 
-        hidden_dims=tuple(int(x) for x in hidden_dims),
-        init_log_std=float(train_cfg.init_log_std),
+        hidden_dims=tuple(
+            int(x)
+            for x
+            in train_cfg.hidden_dims
+        ),
 
-        use_value_huber_loss=bool(train_cfg.use_value_huber_loss),
-        use_value_clip=bool(train_cfg.use_value_clip),
-        value_clip_coef=float(train_cfg.value_clip_coef),
+        init_log_std=float(
+            train_cfg.init_log_std
+        ),
 
-        fail_on_nan=bool(train_cfg.fail_on_nan),
+        use_value_huber_loss=bool(
+            train_cfg
+            .use_value_huber_loss
+        ),
+        use_value_clip=bool(
+            train_cfg.use_value_clip
+        ),
+        value_clip_coef=float(
+            train_cfg.value_clip_coef
+        ),
 
-        device=str(train_cfg.device),
+        fail_on_nan=bool(
+            train_cfg.fail_on_nan
+        ),
+        device=str(
+            train_cfg.device
+        ),
     )
 
 
@@ -827,10 +877,34 @@ def train(train_cfg: FastTrainConfig) -> None:
         ppo_cfg=ppo_cfg,
     )
 
-    if train_cfg.resume:
+    if train_cfg.legacy_transfer:
         if train_cfg.checkpoint is None:
-            raise ValueError("resume=True 사용 시 checkpoint가 필요합니다.")
+            raise ValueError(
+                "legacy_transfer=True이면 "
+                "checkpoint가 필요합니다."
+            )
 
+        transfer_info = (
+            agent.load_legacy_transfer(
+                train_cfg.checkpoint
+            )
+        )
+
+        print(
+            "[LEGACY TRANSFER] "
+            f"critic tensors="
+            f"{transfer_info['num_transferred_tensors']}",
+            flush=True,
+        )
+
+    elif train_cfg.resume:
+        if train_cfg.checkpoint is None:
+            raise ValueError(
+                "resume=True이면 "
+                "checkpoint가 필요합니다."
+            )
+
+        # 새 mixed policy checkpoint만 resume 가능
         agent.load(
             path=train_cfg.checkpoint,
             strict=True,
@@ -923,8 +997,38 @@ def train(train_cfg: FastTrainConfig) -> None:
 
         ep_horizon = int(env_cfg.slow_T) * int(train_cfg.rounds_per_episode)
 
+        ep_service_rate = 0.0
+        ep_mean_requested_chunks = 0.0
+
+        ep_layer_ratios = np.zeros(
+            int(env_cfg.layer) + 1,
+            dtype=np.float64,
+        )
+
         for _ in range(ep_horizon):
             selected = agent.select_action(obs)
+
+            ep_service_rate += float(
+                selected["service_rate"]
+            )
+
+            ep_mean_requested_chunks += float(
+                selected[
+                    "mean_requested_chunks"
+                ]
+            )
+
+            for layer_idx in range(
+                1,
+                int(env_cfg.layer) + 1,
+            ):
+                ep_layer_ratios[
+                    layer_idx
+                ] += float(
+                    selected[
+                        f"layer_{layer_idx}_ratio"
+                    ]
+                )
 
             next_obs_raw, reward, terminated, truncated, info = split_env_step(
                 env.step(selected["env_action"])
@@ -1101,6 +1205,20 @@ def train(train_cfg: FastTrainConfig) -> None:
             / max(ep_steps, 1)
         )
 
+        ep_service_rate /= max(
+            ep_steps,
+            1,
+        )
+
+        ep_mean_requested_chunks /= max(
+            ep_steps,
+            1,
+        )
+
+        ep_layer_ratios /= float(
+            max(ep_steps, 1)
+        )
+
         if ep_steps > 0:
             ep_mean_soc = ep_mean_soc_sum / float(ep_steps)
             ep_mean_B = ep_mean_B_sum / float(ep_steps)
@@ -1165,7 +1283,25 @@ def train(train_cfg: FastTrainConfig) -> None:
 
                 "episode_action_saturation_ratio_mean":
                     ep_action_saturation_ratio_mean,
-                            }
+    
+                "episode_service_rate":
+                    ep_service_rate,
+
+                "episode_mean_requested_chunks":
+                    ep_mean_requested_chunks,
+
+                "episode_layer_1_ratio":
+                    float(ep_layer_ratios[1]),
+
+                "episode_layer_2_ratio":
+                    float(ep_layer_ratios[2]),
+
+                "episode_layer_3_ratio":
+                    float(ep_layer_ratios[3]),
+
+                "episode_layer_4_ratio":
+                    float(ep_layer_ratios[4]),
+            }
         )
 
         print(
@@ -1382,9 +1518,15 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ep_active_action_dims = 0.0
         ep_active_action_ratio = 0.0
         ep_action_saturation_ratio = 0.0
-        
 
         ep_horizon = int(env_cfg.slow_T) * int(train_cfg.eval_rounds_per_episode)
+        ep_service_rate = 0.0
+        ep_mean_requested_chunks = 0.0
+
+        ep_layer_ratios = np.zeros(
+            int(env_cfg.layer) + 1,
+            dtype=np.float64,
+        )
 
         for _ in range(ep_horizon):
             selected = agent.select_action(
@@ -1392,6 +1534,27 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 deterministic=True,
                 update_norm=False,
             )
+            ep_service_rate += float(
+                selected["service_rate"]
+            )
+
+            ep_mean_requested_chunks += float(
+                selected[
+                    "mean_requested_chunks"
+                ]
+            )
+
+            for layer_idx in range(
+                1,
+                int(env_cfg.layer) + 1,
+            ):
+                ep_layer_ratios[
+                    layer_idx
+                ] += float(
+                    selected[
+                        f"layer_{layer_idx}_ratio"
+                    ]
+                )
 
             next_obs_raw, reward, terminated, truncated, info = split_env_step(
                 env.step(selected["env_action"])

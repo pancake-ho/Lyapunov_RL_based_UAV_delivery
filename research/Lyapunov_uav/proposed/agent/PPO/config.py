@@ -38,13 +38,14 @@ class FastTrainConfig:
 
     checkpoint: Optional[str] = None
     resume: bool = False
+    legacy_transfer: bool = False
 
     # ------------------------------------------------------------------
     # 3) episode / rollout
     # ------------------------------------------------------------------
     # 현재 fast-only 학습에서는 episode 하나를 slow_T slot짜리 round 하나로 본다.
     # 즉, num_episodes=50000이면 slow_T slot짜리 round를 50000번 학습한다.
-    num_episodes: int = 300
+    num_episodes: int = 30
     eval_episodes: int = 5
 
     rounds_per_episode: int = 10
@@ -70,18 +71,17 @@ class FastTrainConfig:
     gae_lambda: float = 0.95
 
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
-    lr: float = 5e-5
-    clip_coef: float = 0.10
+    lr: float = 3e-5
+    clip_coef: float = 0.15
+    target_kl: Optional[float] = 0.02
 
     # raw reward를 그대로 쓰므로 value loss가 커질 수 있다.
     # critic loss가 actor를 압도하지 않도록 value_coef는 낮게 둔다.
     value_coef: float = 0.5
-
-    # 기존 1e-5는 action_dim=1000 기준으로 거의 영향이 없다.
-    entropy_coef: float = 1e-3
+    categorical_entropy_coef: float = 2e-3
+    power_entropy_coef: float = 1e-4
 
     max_grad_norm: float = 0.5
-
     hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
 
     # 기존 -1.5는 std≈0.22로 탐색이 좁다.
@@ -136,8 +136,8 @@ class FastTrainConfig:
         ...
     ] = (
         (1, 0.0),
-        (51, 1e-4),
-        (101, 5e-4),
+        (11, 1e-4),
+        (21, 5e-4),
     )
 
     # --------------------------------------------------------------
@@ -283,6 +283,43 @@ class FastTrainConfig:
             raise ValueError(
                 "mobility_curriculum은 episode 1부터 "
                 "정의되어야 합니다."
+            )
+        
+        if self.resume and self.legacy_transfer:
+            raise ValueError(
+                "resume과 legacy_transfer는 "
+                "동시에 True일 수 없습니다."
+            )
+
+        if (
+            self.resume
+            or self.legacy_transfer
+            or self.mode == "eval"
+        ):
+            if self.checkpoint is None:
+                raise ValueError(
+                    "checkpoint 경로가 필요합니다."
+                )
+
+        if (
+            self.target_kl is not None
+            and self.target_kl <= 0.0
+        ):
+            raise ValueError(
+                "target_kl은 None 또는 "
+                "양수여야 합니다."
+            )
+
+        if self.categorical_entropy_coef < 0.0:
+            raise ValueError(
+                "categorical_entropy_coef는 "
+                "0 이상이어야 합니다."
+            )
+
+        if self.power_entropy_coef < 0.0:
+            raise ValueError(
+                "power_entropy_coef는 "
+                "0 이상이어야 합니다."
             )
 
     def to_dict(self) -> Dict[str, object]:

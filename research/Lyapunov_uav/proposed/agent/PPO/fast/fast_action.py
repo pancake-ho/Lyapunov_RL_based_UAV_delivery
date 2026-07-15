@@ -5,10 +5,7 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 
-try:
-    from config import EnvConfig
-except ImportError:
-    from config import EnvConfig
+from config import EnvConfig
 
 
 @dataclass(frozen=True)
@@ -21,11 +18,11 @@ class FastActionSpec:
 
     현재 시나리오 기준:
         action vector layout:
-            1) rsu_chunks: shape (M, N)
-            2) rsu_layers: shape (M, N)
-            3) uav_chunks: shape (U, N)
-            4) uav_layers: shape (U, N)
-            5) uav_power: shape (U, N)
+            1) rsu_chunks: shape (M, N) | {0, ..., L}
+            2) rsu_layers: shape (M, N) | chunks = 0이면 0, chunks > 0이면 {1, ..., K}
+            3) uav_chunks: shape (U, N) | {0, ..., L}
+            4) uav_layers: shape (U, N) | chunks = 0이면 0, chunks > 0이면 {1, ..., K}
+            5) uav_power: shape (U, N)  | Gaussian latent var
         
         Slow decision은 fast action vector에 포함하지 않고,
         obs 또는 env state에서 가져와 조건으로만 사용함.
@@ -33,9 +30,12 @@ class FastActionSpec:
     num_rsu: int
     num_user: int
     num_uav: int
+
     max_chunk: int
     max_layer: int
+
     max_tx_power: float
+    min_tx_power: float
 
     @classmethod
     def from_config(cls, cfg: EnvConfig) -> "FastActionSpec":
@@ -48,6 +48,7 @@ class FastActionSpec:
             num_uav=int(cfg.num_uav),
             max_chunk=int(cfg.chunk),
             max_layer=int(cfg.layer),
+            min_tx_power=float(cfg.battery.min_tx_power),
             max_tx_power=float(cfg.battery.max_tx_power),
         )
     
@@ -64,33 +65,94 @@ class FastActionSpec:
         UAV와 관련된 action의 shape을 반환.
         """
         return (self.num_uav, self.num_user)
+
+    @property
+    def rsu_link_dim(self) -> int:
+        return (
+            self.num_rsu
+            * self.num_user
+        )
+
+    @property
+    def uav_link_dim(self) -> int:
+        return (
+            self.num_uav
+            * self.num_user
+        )
+
+    @property
+    def chunk_choices(self) -> int:
+        # 0, 1, ..., L
+        return self.max_chunk + 1
+
+    @property
+    def layer_choices(self) -> int:
+        # service 상태에서는 1, ..., K
+        return self.max_layer
     
     @property
     def action_dim(self) -> int:
         """
         전체 action의 dim을 반환.
         """
-        m = self.num_rsu
-        n = self.num_user
-        u = self.num_uav
-
         return (
-            m * n       # rsu_chunks
-            + m * n     # rsu_layers
-            + u * n     # uav_chunks
-            + u * n     # uav_layers
-            + u * n     # uav_power
+            2 * self.rsu_link_dim
+            + 3 * self.uav_link_dim
         )
-    
+
+    @property
+    def rsu_chunks_slice(self) -> slice:
+        return slice(
+            0,
+            self.rsu_link_dim,
+        )
+
+    @property
+    def rsu_layers_slice(self) -> slice:
+        start = self.rsu_link_dim
+        return slice(
+            start,
+            start + self.rsu_link_dim,
+        )
+
+    @property
+    def uav_chunks_slice(self) -> slice:
+        start = 2 * self.rsu_link_dim
+        return slice(
+            start,
+            start + self.uav_link_dim,
+        )
+
+    @property
+    def uav_layers_slice(self) -> slice:
+        start = (
+            2 * self.rsu_link_dim
+            + self.uav_link_dim
+        )
+        return slice(
+            start,
+            start + self.uav_link_dim,
+        )
+
+    @property
+    def uav_power_slice(self) -> slice:
+        start = (
+            2 * self.rsu_link_dim
+            + 2 * self.uav_link_dim
+        )
+        return slice(
+            start,
+            start + self.uav_link_dim,
+        )
+
 
 class FastActionCodec:
     """
-    PPO의 output으로 나온 continuous raw action을 실제 env.step()에 넣을 수 있는 dict 형태로 변환. (호환성)
+    Mixed policy action을 env action으로 변환.
 
     중요한 원칙:
-        - PPO는 raw continuous action만 학습함.
-        - env에는 validators.py가 요구하는 dict action을 넘김.
-        - slow decision은 fast policy의 action이 아니라 condition임.
+        - chunk/layer는 더 이상 Gaussian scaling X, Network가 선택한 categorical index를 그대로 사용
+        - UAV power만 Gaussian latent를 실제 power로 변환
     """
     def __init__(self, cfg: EnvConfig) -> None:
         self.cfg = cfg
@@ -98,289 +160,305 @@ class FastActionCodec:
     
     @property
     def action_dim(self) -> int:
-        """
-        spec의 action dim을 반환.
-        """
         return self.spec.action_dim
-    
-    def _split_raw_action(self, raw_action: np.ndarray) -> Dict[str, np.ndarray]:
-        """
-        PPO의 output으로 나오는 긴 raw vector를 action 종류별 vector로 분리.
-        """
-        action = np.asarray(raw_action, dtype=np.float32).reshape(-1)
 
-        if action.shape[0] != self.action_dim:
+    def split_policy_vector(
+        self,
+        action: np.ndarray,
+    ) -> Dict[str, np.ndarray]:
+        arr = np.asarray(
+            action,
+            dtype=np.float32,
+        ).reshape(-1)
+
+        if arr.shape != (
+            self.action_dim,
+        ):
             raise ValueError(
-                f"Fast raw action dim mismatch: expected {self.action_dim}, "
-                f"got {action.shape[0]}"
+                "Fast policy action dim mismatch: "
+                f"expected={(self.action_dim,)}, "
+                f"got={arr.shape}"
             )
-        
-        m = self.spec.num_rsu
-        n = self.spec.num_user
-        u = self.spec.num_uav
 
-        idx = 0
-
-        rsu_chunks = action[idx: idx + m * n].reshape(m, n)
-        idx += m * n
-
-        rsu_layers = action[idx: idx + m * n].reshape(m, n)
-        idx += m * n
-
-        uav_chunks = action[idx: idx + u * n].reshape(u, n)
-        idx += u * n
-
-        uav_layers = action[idx: idx + u * n].reshape(u, n)
-        idx += u * n
-
-        uav_power = action[idx: idx + u * n].reshape(u, n)
-        idx += u * n
-
-        if idx != self.action_dim:
-            raise RuntimeError("내부 action split 로직에서 error가 발생했습니다.")
+        s = self.spec
 
         return {
-            "rsu_chunks": rsu_chunks,
-            "rsu_layers": rsu_layers,
-            "uav_chunks": uav_chunks,
-            "uav_layers": uav_layers,
-            "uav_power": uav_power,
+            "rsu_chunks": (
+                arr[s.rsu_chunks_slice]
+                .reshape(s.rsu_shape)
+            ),
+            "rsu_layers": (
+                arr[s.rsu_layers_slice]
+                .reshape(s.rsu_shape)
+            ),
+            "uav_chunks": (
+                arr[s.uav_chunks_slice]
+                .reshape(s.uav_shape)
+            ),
+            "uav_layers": (
+                arr[s.uav_layers_slice]
+                .reshape(s.uav_shape)
+            ),
+            "uav_power_raw": (
+                arr[s.uav_power_slice]
+                .reshape(s.uav_shape)
+            ),
         }
-    
+
     @staticmethod
-    def _scale_to_int(
-        raw: np.ndarray,
-        min_value: int,
-        max_value: int,
+    def _discrete(
+        value: np.ndarray,
+        low: int,
+        high: int,
     ) -> np.ndarray:
         """
-        raw continuous value를 [min_value, max_value] 범위의 int type으로 변환.
-
-        또한 tanh를 사용하지 않아도 Gaussian raw action이 큰 값을 뽑아낼 수 있으므로,
-        sigmoid-like clipping 대신 단순 clip 기반 scaling을 사용.
-
-        현재 시나리오 기준:
-            chunk 및 layer 수에 사용.
-            raw <= -1 -> min_value
-            raw >= +1 -> max_value
+        Network가 이미 categorical index를 출력하므로
+        여기의 rint는 외부 입력에 대한 방어적 검증일 뿐이다.
         """
-        clipped = np.clip(raw, -1.0, 1.0)
-        scaled = (clipped + 1.0) * 0.5
-        value = np.rint(min_value + scaled * (max_value - min_value))
-        return np.clip(value, min_value, max_value).astype(np.int32)
-    
+        arr = np.nan_to_num(
+            value,
+            nan=float(low),
+            posinf=float(high),
+            neginf=float(low),
+        )
+
+        return np.clip(
+            np.rint(arr),
+            low,
+            high,
+        ).astype(np.int32)
+
     @staticmethod
-    def _scale_to_float(
+    def _decode_power(
         raw: np.ndarray,
-        min_value: float,
-        max_value: float,
-    ) -> np.ndarray:
-        """
-        raw continuous value를 연속 범위로 변환.
-
-        현재 시나리오 기준:
-            UAV power allocation에 사용.
-        """
-        clipped = np.clip(raw, -1.0, 1.0)
-        scaled = (clipped + 1.0) * 0.5
-        value = min_value + scaled * (max_value - min_value)
-        return np.clip(value, min_value, max_value).astype(np.float32)
-    
-    @staticmethod
-    def _scale_to_power(
-        raw: np.ndarray,
-        min_positive_power: float,
+        min_power: float,
         max_power: float,
     ) -> np.ndarray:
-        """
-        Gaussian raw action을 log-uniform power scale로 변환한다.
-
-            raw <= -1 -> min_positive_power
-            raw ==  0 -> geometric mean
-            raw >= +1 -> max_power
-
-        chunk 또는 layer가 0인 경우에는 decode 마지막 service mask에서
-        power를 정확히 0으로 다시 설정한다.
-        """
-        min_positive_power = float(
-            min_positive_power
-        )
-        max_power = float(max_power)
-
-        if min_positive_power <= 0.0:
+        if (
+            min_power <= 0.0
+            or max_power <= min_power
+        ):
             raise ValueError(
-                "min_positive_power는 양수여야 합니다."
-            )
-        if max_power <= min_positive_power:
-            raise ValueError(
-                "max_power는 min_positive_power보다 커야 합니다."
+                "0 < min_power < max_power "
+                "조건이 필요합니다."
             )
 
-        clipped = np.clip(
-            np.asarray(raw, dtype=np.float32),
-            -1.0,
-            1.0,
+        # Gaussian latent를 hard clipping하지 않는다.
+        normalized = np.tanh(
+            np.asarray(
+                raw,
+                dtype=np.float32,
+            )
         )
 
         fraction = (
-            clipped + 1.0
+            normalized + 1.0
         ) * 0.5
 
-        log_min = np.log(min_positive_power)
+        log_min = np.log(min_power)
         log_max = np.log(max_power)
 
         power = np.exp(
             log_min
-            + fraction * (log_max - log_min)
+            + fraction
+            * (log_max - log_min)
         )
 
-        return np.clip(
-            power,
-            min_positive_power,
-            max_power,
-        ).astype(np.float32)
+        return power.astype(np.float32)
 
-    def decode(self, raw_action: np.ndarray, obs: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        """
-        raw PPO action을 env.step()용 fast action dict로 변환한다.
+    def decode(
+        self,
+        policy_action: np.ndarray,
+        obs: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        parts = self.split_policy_vector(
+            policy_action
+        )
+        s = self.spec
 
-        obs는 signature compatibility용으로만 받는다.
-        현재 decode에는 slow decision이 필요 없다.
-        """
-        parts = self._split_raw_action(raw_action)
-
-        rsu_chunks = self._scale_to_int(
+        rsu_chunks = self._discrete(
             parts["rsu_chunks"],
             0,
-            self.spec.max_chunk,
+            s.max_chunk,
         )
-        rsu_layers = self._scale_to_int(
+        rsu_layers = self._discrete(
             parts["rsu_layers"],
             0,
-            self.spec.max_layer,
+            s.max_layer,
         )
 
-        uav_chunks = self._scale_to_int(
+        uav_chunks = self._discrete(
             parts["uav_chunks"],
             0,
-            self.spec.max_chunk,
+            s.max_chunk,
         )
-        uav_layers = self._scale_to_int(
+        uav_layers = self._discrete(
             parts["uav_layers"],
             0,
-            self.spec.max_layer,
+            s.max_layer,
         )
 
-        uav_power = self._scale_to_power(
-            parts["uav_power"],
-            min_positive_power=float(
-                self.cfg.battery.min_tx_power
-            ),
-            max_power=float(
-                self.spec.max_tx_power
-            ),
+        uav_power = self._decode_power(
+            parts["uav_power_raw"],
+            min_power=s.min_tx_power,
+            max_power=s.max_tx_power,
         )
 
         if obs is not None:
-            mask_parts = self._split_raw_action(
-                self.build_action_mask(obs)
+            base_mask = (
+                self.build_base_action_mask(
+                    obs
+                )
+            )
+            mask_parts = (
+                self.split_policy_vector(
+                    base_mask
+                )
             )
 
-            rsu_mask = mask_parts[
-                "rsu_chunks"
-            ]
-            uav_mask = mask_parts[
-                "uav_chunks"
-            ]
+            rsu_link_mask = (
+                mask_parts["rsu_chunks"]
+                > 0.0
+            )
+            uav_link_mask = (
+                mask_parts["uav_chunks"]
+                > 0.0
+            )
 
-            rsu_chunks = (
-                rsu_chunks * rsu_mask
-            ).astype(np.int32)
-            rsu_layers = (
-                rsu_layers * rsu_mask
-            ).astype(np.int32)
+            rsu_chunks = np.where(
+                rsu_link_mask,
+                rsu_chunks,
+                0,
+            )
+            rsu_layers = np.where(
+                rsu_link_mask,
+                rsu_layers,
+                0,
+            )
 
-            uav_chunks = (
-                uav_chunks * uav_mask
-            ).astype(np.int32)
-            uav_layers = (
-                uav_layers * uav_mask
-            ).astype(np.int32)
-            uav_power = (
-                uav_power * uav_mask
-            ).astype(np.float32)
+            uav_chunks = np.where(
+                uav_link_mask,
+                uav_chunks,
+                0,
+            )
+            uav_layers = np.where(
+                uav_link_mask,
+                uav_layers,
+                0,
+            )
+            uav_power = np.where(
+                uav_link_mask,
+                uav_power,
+                0.0,
+            )
 
-        if obs is not None:
             Z = np.asarray(
                 obs["Z"],
                 dtype=np.float32,
             )
 
-            if Z.shape != (self.spec.num_user,):
+            if Z.shape != (
+                s.num_user,
+            ):
                 raise ValueError(
                     "Z shape mismatch: "
-                    f"expected={(self.spec.num_user,)}, "
+                    f"expected={(s.num_user,)}, "
                     f"got={Z.shape}"
                 )
 
-            # 재생 이후 추가로 수용할 수 있는 최대 chunk 수:
-            # min{Z_n(t)+b, Q_bar}
-            user_chunk_headroom = np.floor(
+            # Q(t+1)
+            # = min(max(Q(t)-b,0)+d,Q_bar)
+            #
+            # 에서 유도되는 slot별 수용 가능 chunk.
+            user_headroom = np.floor(
                 np.minimum(
-                    Z + float(self.cfg.playback_rate),
-                    float(self.cfg.max_queue),
+                    Z
+                    + float(
+                        self.cfg.playback_rate
+                    ),
+                    float(
+                        self.cfg.max_queue
+                    ),
                 )
             ).astype(np.int32)
 
-            user_chunk_headroom = np.clip(
-                user_chunk_headroom,
+            user_headroom = np.clip(
+                user_headroom,
                 0,
-                self.spec.max_chunk,
+                s.max_chunk,
             )
 
             rsu_chunks = np.minimum(
                 rsu_chunks,
-                user_chunk_headroom[None, :],
-            ).astype(np.int32)
-
+                user_headroom[None, :],
+            )
             uav_chunks = np.minimum(
                 uav_chunks,
-                user_chunk_headroom[None, :],
-            ).astype(np.int32)
-            
-        # chunk/layer 중 하나라도 0이면 실제 전송은 없음
-        rsu_service_mask = (
-            (rsu_chunks > 0)
+                user_headroom[None, :],
+            )
+
+        # Conditional policy 불변식
+        rsu_service = (
+            rsu_chunks > 0
+        )
+        uav_service = (
+            uav_chunks > 0
+        )
+
+        rsu_layers = np.where(
+            rsu_service,
+            rsu_layers,
+            0,
+        ).astype(np.int32)
+
+        uav_layers = np.where(
+            uav_service,
+            uav_layers,
+            0,
+        ).astype(np.int32)
+
+        uav_power = np.where(
+            uav_service,
+            uav_power,
+            0.0,
+        ).astype(np.float32)
+
+        # 외부 action에 대한 최종 안전장치
+        rsu_valid = (
+            rsu_service
             & (rsu_layers > 0)
         )
-        uav_service_mask = (
-            (uav_chunks > 0)
+        uav_valid = (
+            uav_service
             & (uav_layers > 0)
         )
 
         rsu_chunks = np.where(
-            rsu_service_mask,
+            rsu_valid,
             rsu_chunks,
             0,
         ).astype(np.int32)
+
         rsu_layers = np.where(
-            rsu_service_mask,
+            rsu_valid,
             rsu_layers,
             0,
         ).astype(np.int32)
 
         uav_chunks = np.where(
-            uav_service_mask,
+            uav_valid,
             uav_chunks,
             0,
         ).astype(np.int32)
+
         uav_layers = np.where(
-            uav_service_mask,
+            uav_valid,
             uav_layers,
             0,
         ).astype(np.int32)
+
         uav_power = np.where(
-            uav_service_mask,
+            uav_valid,
             uav_power,
             0.0,
         ).astype(np.float32)
@@ -393,7 +471,10 @@ class FastActionCodec:
             "uav_power": uav_power,
         }
 
-    def zeros_env_action(self, obs: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def zeros_env_action(
+        self,
+        obs: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         return {
             "rsu_chunks": np.zeros(
                 self.spec.rsu_shape,
@@ -416,37 +497,48 @@ class FastActionCodec:
                 dtype=np.float32,
             ),
         }
-    
-    def build_action_mask(
+
+    def build_base_action_mask(
         self,
         obs: Dict[str, Any],
     ) -> np.ndarray:
         """
-        현재 slot에서 formulation 상 유효한 Fast action dimension mask 계산.
+        Slow scheduling 및 charging state로부터
+        사전 유효 Fast action mask를 생성한다.
+
+        이 mask 구조는 현재 시나리오와 맞으므로 유지한다.
         """
+        s = self.spec
+
         rsu_connection = np.asarray(
-        obs["rsu_connection"],
-        dtype=np.float32,
+            obs["rsu_connection"],
+            dtype=np.float32,
         )
         uav_connection = np.asarray(
             obs["uav_connection"],
             dtype=np.float32,
         )
 
-        if rsu_connection.shape != self.spec.rsu_shape:
+        if (
+            rsu_connection.shape
+            != s.rsu_shape
+        ):
             raise ValueError(
                 "rsu_connection shape mismatch: "
-                f"expected={self.spec.rsu_shape}, "
+                f"expected={s.rsu_shape}, "
                 f"got={rsu_connection.shape}"
             )
 
-        if uav_connection.shape != self.spec.uav_shape:
+        if (
+            uav_connection.shape
+            != s.uav_shape
+        ):
             raise ValueError(
                 "uav_connection shape mismatch: "
-                f"expected={self.spec.uav_shape}, "
+                f"expected={s.uav_shape}, "
                 f"got={uav_connection.shape}"
             )
-        
+
         rsu_mask = (
             rsu_connection > 0
         ).astype(np.float32)
@@ -455,9 +547,10 @@ class FastActionCodec:
             uav_connection > 0
         ).astype(np.float32)
 
-        # I_u(t)=1{E_u(t)<=E_u^TH}
         if (
-            bool(self.cfg.battery.allow_charge)
+            bool(
+                self.cfg.battery.allow_charge
+            )
             and bool(
                 self.cfg.battery.enable_charging
             )
@@ -467,28 +560,32 @@ class FastActionCodec:
                 dtype=np.float32,
             )
 
-            if B.shape != (self.spec.num_uav,):
+            if B.shape != (
+                s.num_uav,
+            ):
                 raise ValueError(
                     "B shape mismatch: "
-                    f"expected={(self.spec.num_uav,)}, "
+                    f"expected={(s.num_uav,)}, "
                     f"got={B.shape}"
                 )
 
-            # B_u(t)=E_bar-E_u(t)
             current_soc = (
-                float(self.cfg.battery.e_max)
+                float(
+                    self.cfg.battery.e_max
+                )
                 - B
             )
 
-            charging_uav = (
+            charging = (
                 current_soc
-                <= float(self.cfg.battery.e_min)
-            ).astype(np.float32)
+                <= float(
+                    self.cfg.battery.e_min
+                )
+            )
 
             uav_mask *= (
-                1.0
-                - charging_uav[:, None]
-            )
+                ~charging[:, None]
+            ).astype(np.float32)
 
         action_mask = np.concatenate(
             [
@@ -506,8 +603,120 @@ class FastActionCodec:
         ):
             raise RuntimeError(
                 "Fast action mask dim mismatch: "
-                f"expected={(self.action_dim,)}, "
                 f"got={action_mask.shape}"
             )
 
         return action_mask
+
+    # 기존 caller 호환
+    def build_action_mask(
+        self,
+        obs: Dict[str, Any],
+    ) -> np.ndarray:
+        return (
+            self.build_base_action_mask(
+                obs
+            )
+        )
+
+    def action_statistics(
+        self,
+        policy_action: np.ndarray,
+        effective_mask: np.ndarray,
+    ) -> Dict[str, float]:
+        parts = self.split_policy_vector(
+            policy_action
+        )
+        masks = self.split_policy_vector(
+            effective_mask
+        )
+
+        chunks = np.concatenate(
+            [
+                parts["rsu_chunks"].reshape(-1),
+                parts["uav_chunks"].reshape(-1),
+            ]
+        )
+
+        chunk_mask = (
+            np.concatenate(
+                [
+                    masks[
+                        "rsu_chunks"
+                    ].reshape(-1),
+                    masks[
+                        "uav_chunks"
+                    ].reshape(-1),
+                ]
+            )
+            > 0.0
+        )
+
+        layers = np.concatenate(
+            [
+                parts["rsu_layers"].reshape(-1),
+                parts["uav_layers"].reshape(-1),
+            ]
+        )
+
+        layer_mask = (
+            np.concatenate(
+                [
+                    masks[
+                        "rsu_layers"
+                    ].reshape(-1),
+                    masks[
+                        "uav_layers"
+                    ].reshape(-1),
+                ]
+            )
+            > 0.0
+        )
+
+        active_chunks = chunks[
+            chunk_mask
+        ]
+
+        active_layers = (
+            layers[layer_mask]
+            .astype(np.int64)
+        )
+
+        stats: Dict[str, float] = {
+            "service_rate": (
+                float(
+                    np.mean(
+                        active_chunks > 0.0
+                    )
+                )
+                if active_chunks.size > 0
+                else 0.0
+            ),
+            "mean_requested_chunks": (
+                float(
+                    np.mean(active_chunks)
+                )
+                if active_chunks.size > 0
+                else 0.0
+            ),
+        }
+
+        denominator = max(
+            int(active_layers.size),
+            1,
+        )
+
+        for layer in range(
+            1,
+            self.spec.max_layer + 1,
+        ):
+            stats[
+                f"layer_{layer}_ratio"
+            ] = float(
+                np.sum(
+                    active_layers == layer
+                )
+                / denominator
+            )
+
+        return stats
