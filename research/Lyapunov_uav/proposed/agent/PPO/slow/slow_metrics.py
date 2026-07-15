@@ -17,6 +17,8 @@ class HRLMetrics:
     hire_cost: float = 0.0
 
     delivery: float = 0.0
+    transmitted_rsu: float = 0.0
+    transmitted_uav: float = 0.0
     quality: float = 0.0
     degradation: float = 0.0
     stall: float = 0.0
@@ -35,6 +37,11 @@ class HRLMetrics:
     fast_active_ratio: float = 0.0
     fast_service_rate: float = 0.0
     fast_requested_chunks: float = 0.0
+    fast_action_saturation: float = 0.0
+    hired_uav_slots: float = 0.0
+    serving_uav_slots: float = 0.0
+    idle_hired_uav_slots: float = 0.0
+    charging_uav_slots: float = 0.0
     fast_layer_ratios: np.ndarray = field(
         default_factory=lambda: np.zeros(4, dtype=np.float64)
     )
@@ -45,6 +52,7 @@ class HRLMetrics:
     scheduled_users_rounds: float = 0.0
     slow_active_dims_rounds: float = 0.0
     slow_active_ratio_rounds: float = 0.0
+    slow_projection_count: float = 0.0
 
     def add_slot(
         self,
@@ -57,6 +65,18 @@ class HRLMetrics:
         self.slots += 1
         self.fast_reward += float(reward_components.get("fast_reward", 0.0))
         self.delivery += float(fast.get("sum_delivery", 0.0))
+        self.transmitted_rsu += float(
+            np.asarray(
+                info.get("transmitted_rsu_per_user", []),
+                dtype=np.float32,
+            ).sum()
+        )
+        self.transmitted_uav += float(
+            np.asarray(
+                info.get("transmitted_uav_per_user", []),
+                dtype=np.float32,
+            ).sum()
+        )
         self.quality += float(fast.get("sum_quality", 0.0))
         self.degradation += float(
             fast.get("sum_quality_degradation", 0.0)
@@ -90,6 +110,23 @@ class HRLMetrics:
             np.asarray(info.get("charging_state", []), dtype=np.float32).sum()
         )
 
+        hiring = np.asarray(
+            info.get("uav_hiring", []), dtype=np.int32
+        ).reshape(-1)
+        self.hired_uav_slots += float(hiring.sum())
+        for index, battery_info in enumerate(
+            info.get("battery_step_info", [])
+        ):
+            if index >= hiring.size or int(hiring[index]) != 1:
+                continue
+            mode = str(battery_info.get("mode", "")).lower()
+            if mode == "serve":
+                self.serving_uav_slots += 1.0
+            elif mode == "charge":
+                self.charging_uav_slots += 1.0
+            elif mode == "idle":
+                self.idle_hired_uav_slots += 1.0
+
         self.fast_active_dims += float(
             fast_selected.get("active_action_dims", 0.0)
         )
@@ -101,6 +138,9 @@ class HRLMetrics:
         )
         self.fast_requested_chunks += float(
             fast_selected.get("mean_requested_chunks", 0.0)
+        )
+        self.fast_action_saturation += float(
+            fast_selected.get("action_saturation_ratio", 0.0)
         )
         if self.fast_layer_ratios.shape != (num_layers,):
             self.fast_layer_ratios = np.zeros(num_layers, dtype=np.float64)
@@ -138,18 +178,25 @@ class HRLMetrics:
         self.slow_active_ratio_rounds += float(
             info.get("active_action_ratio", 0.0)
         )
+        self.slow_projection_count += float(
+            info.get("projection_count", 0.0)
+        )
 
     def merge(self, other: "HRLMetrics") -> None:
         for name in (
             "slots", "rounds", "fast_reward", "slow_reward", "hire_cost",
-            "delivery", "quality", "degradation", "stall",
-            "scheduled_stall", "scheduled_playback", "unscheduled_stall",
+            "delivery", "transmitted_rsu", "transmitted_uav", "quality",
+            "degradation", "stall", "scheduled_stall",
+            "scheduled_playback", "unscheduled_stall",
             "unscheduled_playback", "consumed_soc", "charged_soc",
             "outage_slots", "charging_slots", "fast_active_dims",
             "fast_active_ratio", "fast_service_rate", "fast_requested_chunks",
-            "hired_uav_rounds", "rsu_links_rounds", "uav_links_rounds",
+            "fast_action_saturation", "hired_uav_slots",
+            "serving_uav_slots", "idle_hired_uav_slots",
+            "charging_uav_slots", "hired_uav_rounds",
+            "rsu_links_rounds", "uav_links_rounds",
             "scheduled_users_rounds", "slow_active_dims_rounds",
-            "slow_active_ratio_rounds",
+            "slow_active_ratio_rounds", "slow_projection_count",
         ):
             setattr(self, name, getattr(self, name) + getattr(other, name))
         self.min_soc = min(self.min_soc, other.min_soc)
@@ -172,6 +219,20 @@ class HRLMetrics:
             "hire_cost_per_round": float(self.hire_cost / rounds),
             "delivery": float(delivery),
             "delivery_per_slot": float(delivery / slots),
+            "transmitted_rsu_per_slot": float(
+                self.transmitted_rsu / slots
+            ),
+            "transmitted_uav_per_slot": float(
+                self.transmitted_uav / slots
+            ),
+            "uav_transmission_share": (
+                float(
+                    self.transmitted_uav
+                    / (self.transmitted_rsu + self.transmitted_uav)
+                )
+                if self.transmitted_rsu + self.transmitted_uav > 0.0
+                else 0.0
+            ),
             "quality_per_chunk": (
                 float(self.quality / delivery) if delivery > 0.0 else 0.0
             ),
@@ -200,6 +261,22 @@ class HRLMetrics:
             "fast_mean_requested_chunks": float(
                 self.fast_requested_chunks / slots
             ),
+            "fast_action_saturation_ratio_mean": float(
+                self.fast_action_saturation / slots
+            ),
+            "hired_uav_per_slot": float(self.hired_uav_slots / slots),
+            "serving_hired_uav_ratio": (
+                float(self.serving_uav_slots / self.hired_uav_slots)
+                if self.hired_uav_slots > 0.0 else 0.0
+            ),
+            "idle_hired_uav_ratio": (
+                float(self.idle_hired_uav_slots / self.hired_uav_slots)
+                if self.hired_uav_slots > 0.0 else 0.0
+            ),
+            "charging_hired_uav_ratio": (
+                float(self.charging_uav_slots / self.hired_uav_slots)
+                if self.hired_uav_slots > 0.0 else 0.0
+            ),
             "hired_uav_per_round": float(self.hired_uav_rounds / rounds),
             "rsu_links_per_round": float(self.rsu_links_rounds / rounds),
             "uav_links_per_round": float(self.uav_links_rounds / rounds),
@@ -212,6 +289,7 @@ class HRLMetrics:
             "slow_active_action_ratio_mean": float(
                 self.slow_active_ratio_rounds / rounds
             ),
+            "slow_projection_count": float(self.slow_projection_count),
         }
         for index, value in enumerate(self.fast_layer_ratios, start=1):
             result[f"fast_layer_{index}_ratio"] = float(value / slots)
