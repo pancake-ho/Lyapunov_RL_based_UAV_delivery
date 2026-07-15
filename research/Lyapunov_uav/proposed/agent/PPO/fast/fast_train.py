@@ -136,7 +136,7 @@ def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
         hidden_dims=tuple(
             int(x)
             for x
-            in train_cfg.hidden_dims
+            in hidden_dims
         ),
 
         init_log_std=float(
@@ -549,10 +549,16 @@ def save_training_plots(
         loss_keys = [
             "policy_loss",
             "value_loss",
-            "entropy",
+            "categorical_entropy",
+            "power_entropy",
+            "entropy_bonus",
             "approx_kl",
             "clipfrac",
             "explained_variance",
+            "active_action_dims_mean",
+            "active_action_ratio_mean",
+            "early_stopped",
+            "completed_minibatches",
         ]
 
         plt.figure()
@@ -1149,10 +1155,14 @@ def train(train_cfg: FastTrainConfig) -> None:
                     f"episode={episode_idx + 1} "
                     f"policy_loss={update_logs['policy_loss']:.6f} "
                     f"value_loss={update_logs['value_loss']:.6f} "
-                    f"entropy={update_logs['entropy']:.6f} "
+                    f"cat_entropy={update_logs['categorical_entropy']:.6f} "
+                    f"power_entropy={update_logs['power_entropy']:.6f} "
+                    f"entropy_bonus={update_logs['entropy_bonus']:.6f} "
                     f"kl={update_logs['approx_kl']:.6f} "
                     f"clipfrac={update_logs['clipfrac']:.4f} "
-                    f"ev={update_logs['explained_variance']:.4f}",
+                    f"ev={update_logs['explained_variance']:.4f} "
+                    f"early_stop={int(update_logs['early_stopped'])} "
+                    f"minibatches={int(update_logs['completed_minibatches'])}",
                     flush=True,
                 )
 
@@ -1368,7 +1378,15 @@ def train(train_cfg: FastTrainConfig) -> None:
             f"update={update_idx} "
             f"slot={global_slot} "
             f"policy_loss={update_logs['policy_loss']:.6f} "
-            f"value_loss={update_logs['value_loss']:.6f}",
+            f"value_loss={update_logs['value_loss']:.6f} "
+            f"cat_entropy={update_logs['categorical_entropy']:.6f} "
+            f"power_entropy={update_logs['power_entropy']:.6f} "
+            f"entropy_bonus={update_logs['entropy_bonus']:.6f} "
+            f"kl={update_logs['approx_kl']:.6f} "
+            f"clipfrac={update_logs['clipfrac']:.4f} "
+            f"ev={update_logs['explained_variance']:.4f} "
+            f"early_stop={int(update_logs['early_stopped'])} "
+            f"minibatches={int(update_logs['completed_minibatches'])}",
             flush=True,
         )
 

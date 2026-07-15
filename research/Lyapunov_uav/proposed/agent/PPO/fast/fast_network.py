@@ -102,7 +102,7 @@ class FastActorCritic(nn.Module):
         self.uav_layer_head = nn.Linear(actor_dim, (self.spec.uav_link_dim * self.spec.layer_choices))
 
         self.power_mean_head = nn.Linear(actor_dim, self.spec.uav_link_dim)
-        self.power_log_std = nn.Parameter(torch.full(self.spec.uav_link_dim, init_log_std, dtype=torch.float32))
+        self.power_log_std = nn.Parameter(torch.full((self.spec.uav_link_dim,), float(init_log_std), dtype=torch.float32))
 
         # network
         self.critic_network = _build_MLP(

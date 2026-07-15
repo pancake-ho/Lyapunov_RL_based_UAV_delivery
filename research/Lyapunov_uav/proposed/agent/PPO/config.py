@@ -20,7 +20,7 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 1) 실행 모드 / seed / device
     # ------------------------------------------------------------------
-    mode: str = "train"  # train | eval
+    mode: str = "eval"  # train | eval
     seed: int = 2026
     deterministic_torch: bool = False
     device: str = "cuda"  # cuda | cuda:0 | cpu | auto
@@ -33,10 +33,10 @@ class FastTrainConfig:
 
     # None이면 fast_train.py에서 자동 이름 생성
     run_name: Optional[str] = (
-        "fast_ppo_qdeg_mask_v1"
+        "260716_00h42m_eval"
     )
 
-    checkpoint: Optional[str] = None
+    checkpoint: Optional[str] = "fast/fast_ppo_rs1e4_multiround_v1/checkpoints/fast_ppo_ep10.pt"
     resume: bool = False
     legacy_transfer: bool = False
 
@@ -136,8 +136,6 @@ class FastTrainConfig:
         ...
     ] = (
         (1, 0.0),
-        (11, 1e-4),
-        (21, 5e-4),
     )
 
     # --------------------------------------------------------------
