@@ -484,30 +484,15 @@ class Env:
     
     def _reset_round_reward_accumulators(self):
         """
-        slow-timescale reward 계산을 위한 round-level accumulator 초기화.
-        
-        현재 formulation 기준 slow-timescale reward 산식:
-            R_H(r)
-            = sum_{t in T_r} R_L(t)
-            - W_hire * sum_u mu_u(r) C_u^hire
-        
-        이를 위해 slow-level fast reward와 주요 fast component를 round 동안 누적하고,
-        실제 slow reward는 round boundary에서만 반환하게끔 함.
+        slow-timescale reward 계산을 위한 round-level accumulator 초기화
+        (slot별 fast reward component을 누적)
         """
         self.round_fast_reward_sum = 0.0
-
-        # logging 및 분석용 누적 값
         self.round_quality_sum = 0.0
         self.round_delivery_sum = 0.0
         self.round_stall_sum = 0.0
-
         self.round_battery_consume_sum = 0.0
         self.round_battery_charge_sum = 0.0
-
-        self.round_video_delivery_term_sum = 0.0
-        self.round_quality_term_sum = 0.0
-        self.round_battery_consume_term_sum = 0.0
-        self.round_battery_charge_term_sum = 0.0
     
     def _start_new_round(self) -> None:
         """
@@ -1111,131 +1096,61 @@ class Env:
         reward_components: Dict[str, Any],
     ) -> Tuple[float, Dict[str, Any]]:
         """
-        Slow-timescale DPP reward 계산.
+        Slow-timescale DPP reward 계산을 수행하는 함수.
 
         다음과 같은 산식을 가짐:
+
             R_H(r)
-            = sum_{t in T_r} R_L(t)
-                - W_hire * sum_u mu_u(r) C_u^hire
+            = - W_hire * sum_u mu_u(r) D_u^hire
+              + sum_{t in T_r} R_L(t)
         """
-        fast_reward_value = float(fast_reward)
-
-        # 현재 round에 대하여 fast reward 누적
-        self.round_fast_reward_sum += fast_reward_value
-
+        self.round_fast_reward_sum += float(fast_reward)
         self.round_quality_sum += float(reward_components.get("sum_quality", 0.0))
         self.round_delivery_sum += float(reward_components.get("sum_delivery", 0.0))
+        self.round_battery_consume_sum += float(reward_components.get("battery_consume_term", 0.0))
+        self.round_battery_charge_sum += float(reward_components.get("battery_charge_term", 0.0))
 
-        self.round_video_delivery_term_sum += float(
-        reward_components.get("video_delivery_term", 0.0)
-        )
-        self.round_quality_term_sum += float(
-            reward_components.get("quality_term", 0.0)
-        )
-        self.round_battery_consume_term_sum += float(
-            reward_components.get("battery_consume_term", 0.0)
-        )
-        self.round_battery_charge_term_sum += float(
-            reward_components.get("battery_charge_term", 0.0)
-        )
-        self.round_battery_consume_sum += float(
-        reward_components.get("sum_consumed_soc", 0.0)
-        )
-        self.round_battery_charge_sum += float(
-            reward_components.get("sum_charged_soc", 0.0)
-        )
-
-        # Round-level UAV 고용 비용
-        hire_cost_per_uav = self._hire_cost().astype(np.float32)
-        uav_hiring = np.asarray(self.uav_hiring, dtype=np.float32).reshape(-1)
-
-        hire_cost_raw = float(np.sum(uav_hiring * hire_cost_per_uav))
-
+        hire_cost_per_uav = self._hire_cost()
+        hire_cost_raw = float(np.sum(np.asarray(self.uav_hiring, dtype=np.float32) * hire_cost_per_uav))
         hire_weight = float(getattr(self.cfg, "hire_weight", 1.0))
-        hire_cost_term = -hire_weight * hire_cost_raw
+        hire_cost = -hire_weight * hire_cost_raw
 
-        # boundary에서의 현재 round reward
-        candidate_slow_reward = float(self.round_fast_reward_sum + hire_cost_term)
-
-        # boundary가 아닌 경우
-        if not bool(is_round_boundary):
+        if not is_round_boundary:
             components = {
                 "is_round_boundary": False,
                 "slow_reward": 0.0,
-
                 "round_fast_reward_sum_so_far": float(self.round_fast_reward_sum),
-                "round_video_delivery_term_sum_so_far": float(
-                    self.round_video_delivery_term_sum
-                ),
-                "round_quality_term_sum_so_far": float(self.round_quality_term_sum),
-                "round_battery_consume_term_sum_so_far": float(
-                    self.round_battery_consume_term_sum
-                ),
-                "round_battery_charge_term_sum_so_far": float(
-                    self.round_battery_charge_term_sum
-                ),
-
                 "round_quality_sum_so_far": float(self.round_quality_sum),
                 "round_delivery_sum_so_far": float(self.round_delivery_sum),
-                "round_battery_consume_sum_so_far": float(
-                    self.round_battery_consume_sum
-                ),
-                "round_battery_charge_sum_so_far": float(
-                    self.round_battery_charge_sum
-                ),
-
-                "uav_hiring": self.uav_hiring.copy(),
-                "num_hired_uav": int(np.sum(self.uav_hiring)),
-                "hire_cost_per_uav": hire_cost_per_uav.copy(),
+                "round_battery_consume_sum_so_far": float(self.round_battery_consume_sum),
+                "round_battery_charge_sum_so_far": float(self.round_battery_charge_sum),
                 "hire_cost_raw": float(hire_cost_raw),
                 "hire_weight": float(hire_weight),
-                "hire_cost_term": float(hire_cost_term),
-
-                "candidate_slow_reward_if_boundary": float(candidate_slow_reward),
+                "hire_cost": float(hire_cost),
             }
-
             return 0.0, components
         
-        # boundary에서의 실제 round-level slow reward
-        slow_reward = candidate_slow_reward
+        slow_reward = float(hire_cost) + float(self.round_fast_reward_sum)
 
         components = {
             "is_round_boundary": True,
             "slow_reward": float(slow_reward),
 
-            # final round-level DPP reward components
             "round_fast_reward_sum": float(self.round_fast_reward_sum),
-            "hire_cost_term": float(hire_cost_term),
-            "hire_cost_raw": float(hire_cost_raw),
-            "hire_weight": float(hire_weight),
-            "hire_cost_per_uav": hire_cost_per_uav.copy(),
-
-            # detailed accumulated fast DPP terms
-            "round_video_delivery_term_sum": float(
-                self.round_video_delivery_term_sum
-            ),
-            "round_quality_term_sum": float(self.round_quality_term_sum),
-            "round_battery_consume_term_sum": float(
-                self.round_battery_consume_term_sum
-            ),
-            "round_battery_charge_term_sum": float(
-                self.round_battery_charge_term_sum
-            ),
-
-            # raw accumulated metrics
             "round_quality_sum": float(self.round_quality_sum),
             "round_delivery_sum": float(self.round_delivery_sum),
-            "round_battery_consume_sum": float(self.round_battery_consume_sum),
-            "round_battery_charge_sum": float(self.round_battery_charge_sum),
+            "round_battery_consume_sum": float(
+                self.round_battery_consume_sum
+            ),
+            "round_battery_charge_sum": float(
+                self.round_battery_charge_sum
+            ),
 
-            # current slow action
-            "rsu_scheduling": self.rsu_scheduling.copy(),
             "uav_hiring": self.uav_hiring.copy(),
-            "uav_scheduling": self.uav_scheduling.copy(),
-
-            "num_rsu_links": int(np.sum(self.rsu_scheduling)),
-            "num_hired_uav": int(np.sum(self.uav_hiring)),
-            "num_uav_links": int(np.sum(self.uav_scheduling)),
+            "hire_cost_per_uav": hire_cost_per_uav.copy(),
+            "hire_cost_raw": float(hire_cost_raw),
+            "hire_weight": float(hire_weight),
+            "hire_cost": float(hire_cost),
         }
 
         return float(slow_reward), components
