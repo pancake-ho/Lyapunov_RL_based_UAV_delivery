@@ -59,8 +59,8 @@ class SlowActorCritic(nn.Module):
         action_spec: SlowActionSpec,
         hidden_dims: Sequence[int] = (256, 256),
         rsu_init_logit: float = 0.0,
-        hiring_init_logit: float = 0.8472978604,
-        uav_init_logit: float = 1.3862943611,
+        hiring_init_logit: float = 0.0,
+        uav_init_logit: float = 0.0,
         min_logit: float = -20.0,
         max_logit: float = 20.0
     ) -> None:
