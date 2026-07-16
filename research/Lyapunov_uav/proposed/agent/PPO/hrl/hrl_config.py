@@ -15,12 +15,12 @@ class JointHRLConfig:
     device: str = "cuda"
 
     output_root: str = "hrl"
-    run_name: str = "joint_mobility_p1e4_seed2026"
+    run_name: str = "joint_static_full_seed2026"
 
     # fast-/slow-timescale checkpoint 초기화할 경우 대비
     initial_fast_checkpoint: str = (
-        "fast/fast_final_static_cat5e4_seed2026/"
-        "checkpoints/fast_ppo_ep40.pt"
+        "fast/fast_ft_ep20_static_cat5e4/"
+        "checkpoints/fast_ppo_ep25.pt"
     )
     initial_slow_checkpoint: Optional[str] = None
     resume_manifest: Optional[str] = None
@@ -29,7 +29,7 @@ class JointHRLConfig:
     # 6400번의 slow transitions + 50번의 slow PPO 업데이트 진행
     num_episodes: int = 640
     rounds_per_episode: int = 10
-    train_move_prob: float = 1e-4
+    train_move_prob: float = 0.0
 
     fast_freeze_rounds: int = 0
     fast_deterministic_while_frozen: bool = False
@@ -48,8 +48,8 @@ class JointHRLConfig:
     fast_power_entropy_coef: float = 1e-4
     fast_max_grad_norm: float = 0.5
     fast_reward_scale: float = 1e-4
-    fast_hidden_dims_fallback: Tuple[int, ...] = (256, 256)
-    fast_init_log_std_fallback: float = -1.0
+    # fast_hidden_dims_fallback: Tuple[int, ...] = (256, 256)
+    # fast_init_log_std_fallback: float = -1.0
 
     # joint slow fine-tuning
     slow_rollout_rounds: int = 128
@@ -69,8 +69,8 @@ class JointHRLConfig:
     rsu_init_logit: float = 0.0
     hiring_init_logit: float = 0.0
     uav_init_logit: float = 0.0
-    min_logit: float = -20.0
-    max_logit: float = 20.0
+    # min_logit: float = -20.0
+    # max_logit: float = 20.0
 
     obs_norm: bool = True
     adv_norm: bool = True
@@ -88,7 +88,7 @@ class JointHRLConfig:
     final_test_seeds: Tuple[int, ...] = (3031, 3032, 3033, 3034, 3035)
     eval_rounds_per_seed: int = 5
     
-    selection_move_prob: float = 1e-4
+    selection_move_prob: float = 0.0
     weak_mobility_move_prob: float = 1e-4
     fast_deterministic_eval: bool = True
 
