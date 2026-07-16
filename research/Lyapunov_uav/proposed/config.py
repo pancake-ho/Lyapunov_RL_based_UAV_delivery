@@ -181,7 +181,7 @@ class EnvConfig:
     # FSMC mobility
     # user는 매 slot 확률 p로 왼쪽 region으로 이동
     # region 0에서 이동이 발생하면 오른쪽 끝 region으로 다른 user 재진입
-    move_prob: float = 0.0005
+    move_prob: float = 1e-4
     region_len: float = 50.0
 
     # Channel
