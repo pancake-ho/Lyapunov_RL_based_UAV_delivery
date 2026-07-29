@@ -33,7 +33,7 @@ class FastTrainConfig:
 
     # None이면 fast_train.py에서 자동 이름 생성
     run_name: Optional[str] = (
-        "fast_mixed_seed2026_parameter_sweep1_fixed_move_prob"
+        "fast_mixed_seed2026_continuous_mobility_slot1s"
     )
 
     checkpoint: Optional[str] = None
@@ -44,12 +44,13 @@ class FastTrainConfig:
     # 3) episode / rollout
     # ------------------------------------------------------------------
     # 한 episode는 rounds_per_episode개의 slow-timescale round로 구성한다.
-    # 현재 기본값에서는 1 episode = 10 * 3600 = 36,000 fast slot이다.
+    # 현재 기본값에서는 1 episode = 18,000 * 2 = 36,000 fast slot이다.
+    # 기존 run과 동일한 총 slot 수를 유지하여 PPO update 수를 보존한다.
     num_episodes: int = 250
     eval_episodes: int = 10
 
-    rounds_per_episode: int = 10
-    eval_rounds_per_episode: int = 5
+    rounds_per_episode: int = 18_000
+    eval_rounds_per_episode: int = 9_000
 
     # PPO update 1번에 모을 slot 수
     rollout_slots: int = 4096
@@ -126,16 +127,15 @@ class FastTrainConfig:
     random_uav_user_prob: float = 0.80
 
     # --------------------------------------------------------------
-    # 8) Mobility curriculum
+    # 8) Mobility speed curriculum
     # --------------------------------------------------------------
-    # episode 1~50: static
-    # episode 51~100: weak mobility
-    # episode 101~300: target scenario
-    mobility_curriculum: Tuple[
+    # EnvConfig의 30--60 km/h에 곱하는 scale.
+    # 기본 학습은 target physical speed를 처음부터 고정한다.
+    mobility_speed_curriculum: Tuple[
         Tuple[int, float],
         ...
     ] = (
-        (1, 1e-4),
+        (1, 1.0),
     )
 
     # --------------------------------------------------------------
@@ -262,30 +262,30 @@ class FastTrainConfig:
 
         prev_episode = 0
 
-        for start_episode, move_prob in (
-            self.mobility_curriculum
+        for start_episode, speed_scale in (
+            self.mobility_speed_curriculum
         ):
             if int(start_episode) <= prev_episode:
                 raise ValueError(
-                    "mobility_curriculum episode은 "
+                    "mobility_speed_curriculum episode은 "
                     "오름차순이어야 합니다."
                 )
-            if not (0.0 <= float(move_prob) <= 1.0):
+            if float(speed_scale) < 0.0:
                 raise ValueError(
-                    "curriculum move_prob은 "
-                    "[0,1] 범위여야 합니다."
+                    "curriculum speed_scale은 "
+                    "0 이상이어야 합니다."
                 )
 
             prev_episode = int(start_episode)
 
         if (
-            len(self.mobility_curriculum) == 0
+            len(self.mobility_speed_curriculum) == 0
             or int(
-                self.mobility_curriculum[0][0]
+                self.mobility_speed_curriculum[0][0]
             ) != 1
         ):
             raise ValueError(
-                "mobility_curriculum은 episode 1부터 "
+                "mobility_speed_curriculum은 episode 1부터 "
                 "정의되어야 합니다."
             )
         

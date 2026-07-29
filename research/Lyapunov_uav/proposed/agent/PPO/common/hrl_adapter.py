@@ -7,11 +7,18 @@ import numpy as np
 ArrayLike = np.ndarray | list | tuple | float | int | bool
 
 # 현재 fast-timescale policy state 정의:
-# s_L(t) = [Z(t), B(t), user_region(t), connection(r)]
+# s_L(t) = [Z(t), B(t), region(t), speed(t),
+#           serving distance(t), connection(r)]
+#
+# Instantaneous fading/CSI는 입력하지 않는다.  Distance는 mobility state이며,
+# round-fixed association의 slot별 capacity 변화를 학습하기 위해 필요하다.
 FAST_OBS_KEYS: tuple[str, ...] = (
     "Z",
     "B",
     "user_region",
+    "user_speed_kmh",
+    "rsu_serving_distance",
+    "uav_serving_distance",
     "rsu_connection",
     "uav_connection",
 )
@@ -125,10 +132,13 @@ def flatten_fast_obs(
         Z
         B
         user_region
+        user_speed_kmh
+        rsu_serving_distance
+        uav_serving_distance
         rsu_connection
         uav_connection
 
-    CSI는 policy input에 넣지 않는다.
+    Instantaneous fading/CSI는 policy input에 넣지 않는다.
     Slow scheduling/hiring raw action도 별도로 중복 입력하지 않는다.
     """
     return flatten_obs_with_keys(
