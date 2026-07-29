@@ -33,7 +33,7 @@ class FastTrainConfig:
 
     # None이면 fast_train.py에서 자동 이름 생성
     run_name: Optional[str] = (
-        "fast_mixed_seed2026_continuous_mobility_slot1s"
+        "fast_mixed_seed2026_continuous_mobility_slot1s_noklstop"
     )
 
     checkpoint: Optional[str] = None
@@ -75,7 +75,7 @@ class FastTrainConfig:
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
     lr: float = 6e-5
     clip_coef: float = 0.15
-    target_kl: Optional[float] = 0.02
+    target_kl: Optional[float] = None
 
     # ppo_reward_scale 적용 후 critic loss가 actor를 압도하지 않도록
     # value_coef는 0.5로 유지한다
