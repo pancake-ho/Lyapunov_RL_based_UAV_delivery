@@ -33,7 +33,7 @@ class FastTrainConfig:
 
     # None이면 fast_train.py에서 자동 이름 생성
     run_name: Optional[str] = (
-        "fast_mixed_seed2026"
+        "fast_mixed_seed2026_parameter_sweep1_fixed_move_prob"
     )
 
     checkpoint: Optional[str] = None
@@ -45,7 +45,7 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 한 episode는 rounds_per_episode개의 slow-timescale round로 구성한다.
     # 현재 기본값에서는 1 episode = 10 * 3600 = 36,000 fast slot이다.
-    num_episodes: int = 200
+    num_episodes: int = 250
     eval_episodes: int = 10
 
     rounds_per_episode: int = 10
@@ -72,15 +72,15 @@ class FastTrainConfig:
     gae_lambda: float = 0.95
 
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
-    lr: float = 3e-5
+    lr: float = 6e-5
     clip_coef: float = 0.15
     target_kl: Optional[float] = 0.02
 
     # ppo_reward_scale 적용 후 critic loss가 actor를 압도하지 않도록
     # value_coef는 0.5로 유지한다
     value_coef: float = 0.5
-    categorical_entropy_coef: float = 5e-4
-    power_entropy_coef: float = 1e-4
+    categorical_entropy_coef: float = 1e-4
+    power_entropy_coef: float = 1e-5
 
     max_grad_norm: float = 0.5
     hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
@@ -135,9 +135,7 @@ class FastTrainConfig:
         Tuple[int, float],
         ...
     ] = (
-        (1, 0.0),
-        (51, 1e-4),
-        (101, 5e-4),
+        (1, 1e-4),
     )
 
     # --------------------------------------------------------------
