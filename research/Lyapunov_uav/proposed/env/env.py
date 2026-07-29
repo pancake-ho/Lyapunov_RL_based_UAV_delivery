@@ -73,7 +73,29 @@ class Env:
         # user는 왼쪽으로만 이동한다고 가정
         self.user_region = np.zeros(self.num_user, dtype=np.int32)
 
-        # default distance states
+        # 1-D road mobility state.
+        # RSU/UAV u is placed at the center of coverage region u.
+        self.road_length_m = (
+            float(self.num_rsu)
+            * float(self.cfg.region_len)
+        )
+        self.node_position_m = (
+            (
+                np.arange(self.num_rsu, dtype=np.float32)
+                + 0.5
+            )
+            * float(self.cfg.region_len)
+        ).astype(np.float32)
+        self.user_position_m = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+        self.user_speed_mps = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+
+        # slot-varying link distance states
         self.rsu_user_distance = self._default_rsu_user_distance()
         self.uav_user_distance = self._default_uav_user_distance()
 
@@ -198,16 +220,59 @@ class Env:
             dtype=np.float32,
         )
     
-    def _reset_user_regions(self) -> None:
+    def _sample_user_speed_mps(
+        self,
+        size: int | tuple[int, ...],
+    ) -> np.ndarray:
         """
-        episode 시작 시 user region을 초기화하는 함수
+        차량 속도를 [speed_min_kmh, speed_max_kmh]에서 샘플링한다.
+
+        mobility_speed_scale은 학습용 정적/약한 이동 ablation에만 사용하며,
+        기본값 1.0에서는 30--60 km/h를 그대로 사용한다.
         """
-        self.user_region = self.rng.integers(
-            low=0,
-            high=self.num_rsu,
-            size=self.num_user,
-            dtype=np.int32,
+        low_kmh = float(self.cfg.speed_min_kmh)
+        high_kmh = float(self.cfg.speed_max_kmh)
+        sampled_kmh = self.rng.uniform(
+            low=low_kmh,
+            high=high_kmh,
+            size=size,
         )
+        sampled_mps = (
+            sampled_kmh
+            / 3.6
+            * float(self.cfg.mobility_speed_scale)
+        )
+        return np.asarray(sampled_mps, dtype=np.float32)
+
+    def _reset_user_mobility(self) -> None:
+        """
+        episode 시작 시 연속 위치, 속도 및 region index를 초기화한다.
+        """
+        if self.road_length_m <= 0.0:
+            raise ValueError(
+                "road_length_m은 양수여야 합니다. "
+                f"현재 값: {self.road_length_m}"
+            )
+
+        self.user_position_m = self.rng.uniform(
+            low=0.0,
+            high=self.road_length_m,
+            size=self.num_user,
+        ).astype(np.float32)
+
+        self.user_speed_mps = self._sample_user_speed_mps(
+            self.num_user
+        )
+
+        self.user_region = np.floor(
+            self.user_position_m
+            / float(self.cfg.region_len)
+        ).astype(np.int32)
+        self.user_region = np.clip(
+            self.user_region,
+            0,
+            self.num_rsu - 1,
+        ).astype(np.int32)
     
     def _sample_local_distance(self, channel_cfg, size: tuple[int, ...]) -> np.ndarray:
         """
@@ -231,71 +296,163 @@ class Env:
     
     def _refresh_link_distances(self) -> None:
         """
-        Coverage region의 representative ground coordinate에 대응하는
-        고정 horizontal distance를 생성한다.
+        현재 연속 user 위치로부터 모든 RSU/UAV horizontal distance를
+        갱신한다.
 
-        현재 formulation은 continuous user coordinate를 직접 추적하지
-        않으므로 매 slot random distance를 재샘플링하지 않는다.
-
-        UAVChannelModel은 이 horizontal distance와 altitude를 이용해
-        3D distance 및 channel gain을 계산한다.
+        scheduling matrix는 round 동안 고정되지만, 이 distance는 매
+        slot 갱신되므로 이미 연결된 link의 channel capacity는 이동과
+        fading에 따라 계속 달라진다.
         """
-        rsu_distance = max(
-            float(self.cfg.rsu_channel.distance),
+        horizontal_distance = np.abs(
+            self.node_position_m[:, None]
+            - self.user_position_m[None, :]
+        )
+
+        self.rsu_user_distance = np.maximum(
+            horizontal_distance,
             float(self.cfg.rsu_channel.min_distance),
-        )
-        uav_distance = max(
-            float(self.cfg.uav_channel.distance),
+        ).astype(np.float32)
+
+        self.uav_user_distance = np.maximum(
+            horizontal_distance,
             float(self.cfg.uav_channel.min_distance),
-        )
+        ).astype(np.float32)
 
-        self.rsu_user_distance = np.full(
-            (self.num_rsu, self.num_user),
-            rsu_distance,
-            dtype=np.float32,
-        )
-
-        self.uav_user_distance = np.full(
-            (self.num_uav, self.num_user),
-            uav_distance,
-            dtype=np.float32,
-        )
-
-    def _update_user_region(self) -> Dict[str, np.ndarray]:
+    def _drop_departed_user_association(
+        self,
+        entered_mask: np.ndarray,
+    ) -> None:
         """
-        FSMC에 따른 user 위치 영역을 업데이트하는 함수.
-        다음과 같은 동작 수행.
-        
-            1) 매 slot마다 각 user는 move_prob 확률로 왼쪽 region으로 이동한다.
-            2) region 0에서 user 이동이 발생하면 해당 user가 오른쪽 끝 region으로 재진입.
-            3) 새로 진입한 user는 queue와 requested content를 새로 초기화.
+        road를 떠난 차량 index에 새 차량이 들어오면 이전 차량의
+        association을 승계하지 않도록 한다.
+
+        단순 region crossing은 이 함수를 호출하지 않으므로 scheduling은
+        round 끝까지 유지된다. 새 차량은 다음 round에서 다시 scheduling된다.
+        """
+        departed_users = np.flatnonzero(
+            np.asarray(entered_mask, dtype=np.int32) > 0
+        )
+        if departed_users.size == 0:
+            return
+
+        self.rsu_scheduling[:, departed_users] = 0
+        self.uav_scheduling[:, departed_users] = 0
+
+    def _update_user_mobility(self) -> Dict[str, np.ndarray]:
+        """
+        한 slot 동안 user mobility를 갱신한다.
+
+        continuous mode:
+            x_n(t+1) = x_n(t) - v_n * slot_duration.
+            region 경계를 넘어도 기존 association은 유지된다.
+            road 왼쪽 끝을 벗어난 차량만 새 차량으로 교체한다.
+
+        fsmc mode:
+            과거 실험 재현을 위한 legacy 경로이다.
         """
         prev_region = self.user_region.copy()
-
-        move_prob = float(self.cfg.move_prob)
-        move_mask = (self.rng.random(self.num_user) < move_prob)
-
+        prev_position_m = self.user_position_m.copy()
+        prev_speed_mps = self.user_speed_mps.copy()
         entered_mask = np.zeros(self.num_user, dtype=np.int32)
 
-        for n in range(self.num_user):
-            if not bool(move_mask[n]):
-                continue
+        if str(self.cfg.mobility_mode) == "continuous":
+            displacement_m = (
+                self.user_speed_mps
+                * float(self.cfg.battery.slot_duration)
+            ).astype(np.float32)
 
-            if int(self.user_region[n]) > 0:
-                self.user_region[n] -= 1
-            else:
-                # print(f"user {n} | region 이탈로 재진입 발생")
-                self.user_region[n] = self.num_rsu - 1
+            next_position_m = (
+                self.user_position_m
+                - displacement_m
+            )
+            entered_mask = (
+                next_position_m < 0.0
+            ).astype(np.int32)
+
+            self.user_position_m = np.mod(
+                next_position_m,
+                self.road_length_m,
+            ).astype(np.float32)
+
+            for n in np.flatnonzero(entered_mask > 0):
+                n = int(n)
                 self.queue[n] = float(self.cfg.init_queue)
-                self.requested_content[n] = self._sample_user_requested_content()
-                entered_mask[n] = 1
-        
+                self.requested_content[n] = (
+                    self._sample_user_requested_content()
+                )
+                self.user_speed_mps[n] = float(
+                    self._sample_user_speed_mps(1)[0]
+                )
+
+            self.user_region = np.floor(
+                self.user_position_m
+                / float(self.cfg.region_len)
+            ).astype(np.int32)
+            self.user_region = np.clip(
+                self.user_region,
+                0,
+                self.num_rsu - 1,
+            ).astype(np.int32)
+        else:
+            fsmc_move = (
+                self.rng.random(self.num_user)
+                < float(self.cfg.move_prob)
+            )
+            for n in range(self.num_user):
+                if not bool(fsmc_move[n]):
+                    continue
+                if int(self.user_region[n]) > 0:
+                    self.user_region[n] -= 1
+                else:
+                    self.user_region[n] = self.num_rsu - 1
+                    self.queue[n] = float(self.cfg.init_queue)
+                    self.requested_content[n] = (
+                        self._sample_user_requested_content()
+                    )
+                    entered_mask[n] = 1
+
+            self.user_position_m = (
+                (
+                    self.user_region.astype(np.float32)
+                    + 0.5
+                )
+                * float(self.cfg.region_len)
+            ).astype(np.float32)
+            displacement_m = np.where(
+                fsmc_move,
+                float(self.cfg.region_len),
+                0.0,
+            ).astype(np.float32)
+
+        region_crossing_mask = (
+            self.user_region != prev_region
+        ).astype(np.int32)
+
+        self._drop_departed_user_association(entered_mask)
+        self._refresh_link_distances()
+
         return {
             "prev_user_region": prev_region.astype(np.int32),
             "next_user_region": self.user_region.copy().astype(np.int32),
-            "move_mask": move_mask.astype(np.int32),
+            "move_mask": region_crossing_mask.copy(),
+            "region_crossing_mask": region_crossing_mask.copy(),
             "entered_mask": entered_mask.astype(np.int32),
+            "prev_user_position_m": prev_position_m.astype(np.float32),
+            "next_user_position_m":
+                self.user_position_m.copy().astype(np.float32),
+            "prev_user_speed_mps": prev_speed_mps.astype(np.float32),
+            "next_user_speed_mps":
+                self.user_speed_mps.copy().astype(np.float32),
+            "displacement_m": displacement_m.astype(np.float32),
         }
+
+    def _update_user_region(self) -> Dict[str, np.ndarray]:
+        """
+        Legacy private-method alias.
+
+        신규 코드는 _update_user_mobility()를 사용한다.
+        """
+        return self._update_user_mobility()
     
     def _region_mask_rsu(self) -> np.ndarray:
         """
@@ -316,9 +473,13 @@ class Env:
     
     def _get_effective_rsu_connection_matrix(self) -> np.ndarray:
         """
-        현재 region constraint가 반영된 RSU-user connection matrix.
+        round 시작에 확정된 RSU-user association을 반환한다.
+
+        현재 region은 association 후보를 만들 때만 사용한다. Round 도중
+        region을 넘어가더라도 association을 제거하지 않으며, 실제 전송량은
+        slot별 distance/channel capacity constraint가 결정한다.
         """
-        return (self.rsu_scheduling * self._region_mask_rsu()).astype(np.int32)
+        return self.rsu_scheduling.copy().astype(np.int32)
 
     def _get_effective_uav_connection_matrix(self) -> np.ndarray:
         """
@@ -328,14 +489,12 @@ class Env:
         
             1) phi_un(r) = 1 (scheduling=1)
             2) 해당 coverage region의 UAV가 hired 상태
-            3) user와 UAV가 동일한 region에 위치 (안전 장치)
-            4) user가 RSU에 scheduling되지 않은 residual user
-            5) UAV cached content와 requested content가 일치
-        """
-        region_mask = self._region_mask_uav().astype(
-            np.int32
-        )
+            3) user가 RSU에 scheduling되지 않은 residual user
+            4) UAV cached content와 requested content가 일치
 
+        Region constraint는 round 시작의 apply_slow_action()에서만 적용한다.
+        Round 중 region crossing은 association을 제거하지 않는다.
+        """
         rsu_connection = (
             self._get_effective_rsu_connection_matrix()
         )
@@ -354,7 +513,6 @@ class Env:
         effective_link = (
             self.uav_scheduling
             * self.uav_hiring[:, None]
-            * region_mask
             * residual_user_mask[None, :]
             * cache_match
         )
@@ -429,6 +587,55 @@ class Env:
             "connection_type": connection_type.astype(np.int32),
         }
 
+    def _get_serving_distance_state(
+        self,
+        connection_state: Dict[str, np.ndarray],
+    ) -> Dict[str, np.ndarray]:
+        """
+        각 user가 현재 round에 association된 node까지의 distance를 반환한다.
+
+        Instantaneous fading/CSI는 policy input에 넣지 않는다. 대신 논문의
+        CSI-free delivery state와 같이, 이동으로 결정되는 현재 distance만
+        제공하여 PPO가 channel feasibility 변화를 학습할 수 있게 한다.
+        """
+        connected_rsu = np.asarray(
+            connection_state["connected_rsu"],
+            dtype=np.int32,
+        )
+        connected_uav = np.asarray(
+            connection_state["connected_uav"],
+            dtype=np.int32,
+        )
+
+        rsu_serving_distance = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+        uav_serving_distance = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+
+        for n in range(self.num_user):
+            rsu_idx = int(connected_rsu[n])
+            uav_idx = int(connected_uav[n])
+
+            if 0 <= rsu_idx < self.num_rsu:
+                rsu_serving_distance[n] = float(
+                    self.rsu_user_distance[rsu_idx, n]
+                )
+            if 0 <= uav_idx < self.num_uav:
+                uav_serving_distance[n] = float(
+                    self.uav_user_distance[uav_idx, n]
+                )
+
+        return {
+            "rsu_serving_distance":
+                rsu_serving_distance.astype(np.float32),
+            "uav_serving_distance":
+                uav_serving_distance.astype(np.float32),
+        }
+
     def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
         에피소드 초기화 수행.
@@ -442,7 +649,7 @@ class Env:
         # 사용자 큐 초기화
         self.queue = np.full(self.num_user, float(self.cfg.init_queue), dtype=np.float32)
 
-        self._reset_user_regions()
+        self._reset_user_mobility()
 
         # slow-timescale decision 초기화
         self.rsu_scheduling = np.zeros(
@@ -480,6 +687,9 @@ class Env:
             "reset": True,
             "obs_type": "fast_obs",
             "user_region": self.user_region.copy(),
+            "user_position_m": self.user_position_m.copy(),
+            "user_speed_kmh":
+                (self.user_speed_mps * 3.6).astype(np.float32),
             "requested_content": self.requested_content.copy(),
             "uav_cached_content": self.uav_cached_content.copy(),
         }
@@ -538,6 +748,9 @@ class Env:
     def apply_slow_action(self, action: EnvAction) -> SlowAction:
         """
         round-level slow-timescale decision을 갱신하는 함수.
+
+        현재 region mask는 round 시작의 candidate feasibility에만 적용한다.
+        여기서 확정된 scheduling은 다음 round boundary까지 고정된다.
         """
         if int(self.round_slot) != 0: # 안전장치
             raise RuntimeError(
@@ -568,8 +781,12 @@ class Env:
     
     def _build_effective_fast_action(self, fast_act: FastAction) -> FastAction:
         """
-        slow-timescale decision과 현재 region constraint를 반영하여
+        round-fixed slow-timescale decision을 반영하여
         실제 실행 가능한 fast action으로 projection하는 함수.
+
+        현재 user_region은 projection mask로 사용하지 않는다. 이동 효과는
+        rsu_user_distance/uav_user_distance와 channel capacity constraint로
+        반영된다.
         """
         rsu_connection = self._get_effective_rsu_connection_matrix()
         uav_connection = self._get_effective_uav_connection_matrix()
@@ -583,7 +800,7 @@ class Env:
         effective_uav_layers = fast_act.uav_layers.copy()
         effective_uav_power = fast_act.uav_power.copy()
 
-        # RSU scheduling + region constraint
+        # round-fixed RSU scheduling
         effective_rsu_chunks = effective_rsu_chunks * rsu_connection
         effective_rsu_layers = effective_rsu_layers * rsu_connection
 
@@ -593,7 +810,7 @@ class Env:
         effective_uav_layers[inactive_uav_mask, :] = 0
         effective_uav_power[inactive_uav_mask, :] = 0.0
 
-        # UAV scheduling + residual + region constraint
+        # round-fixed UAV scheduling + residual constraint
         effective_uav_chunks = (
             effective_uav_chunks
             * uav_connection
@@ -1311,6 +1528,9 @@ class Env:
             "Z": self.Z.copy(),
             "B": self.Y.copy(),
             "user_region": self.user_region.copy(),
+            "user_position_m": self.user_position_m.copy(),
+            "user_speed_kmh":
+                (self.user_speed_mps * 3.6).astype(np.float32),
         }
 
     def get_fast_obs(self) -> Dict[str, np.ndarray]:
@@ -1318,11 +1538,20 @@ class Env:
         fast-timescale 상태값을 반환하는 함수.
         """
         connection_state = self._get_user_node_connection_state()
+        serving_distance = self._get_serving_distance_state(
+            connection_state
+        )
 
         return {
             "Z": self.Z.copy(),
             "B": self.Y.copy(),
             "user_region": self.user_region.copy(),
+            "user_speed_kmh":
+                (self.user_speed_mps * 3.6).astype(np.float32),
+            "rsu_serving_distance":
+                serving_distance["rsu_serving_distance"].copy(),
+            "uav_serving_distance":
+                serving_distance["uav_serving_distance"].copy(),
 
             # user가 어떤 node와 연결돼 있는지 나타내는 fast policy state
             "connection_type": connection_state["connection_type"].copy(),
@@ -1357,6 +1586,10 @@ class Env:
         prev_round_slot = int(self.round_slot)
 
         prev_user_region = self.user_region.copy()
+        prev_user_position_m = self.user_position_m.copy()
+        prev_user_speed_mps = self.user_speed_mps.copy()
+        prev_rsu_user_distance = self.rsu_user_distance.copy()
+        prev_uav_user_distance = self.uav_user_distance.copy()
         prev_connection_state = self._get_user_node_connection_state()
 
         prev_E = self.E.copy()
@@ -1507,7 +1740,7 @@ class Env:
             self.round_idx = int(next_round_idx)
             self.round_slot = int(next_round_slot)
 
-        region_info = self._update_user_region()
+        region_info = self._update_user_mobility()
 
         next_connection_state = self._get_user_node_connection_state()
 
@@ -1539,6 +1772,14 @@ class Env:
             # mobility
             "prev_user_region": prev_user_region.copy(),
             "next_user_region": self.user_region.copy(),
+            "prev_user_position_m": prev_user_position_m.copy(),
+            "next_user_position_m": self.user_position_m.copy(),
+            "prev_user_speed_mps": prev_user_speed_mps.copy(),
+            "next_user_speed_mps": self.user_speed_mps.copy(),
+            "prev_rsu_user_distance": prev_rsu_user_distance.copy(),
+            "next_rsu_user_distance": self.rsu_user_distance.copy(),
+            "prev_uav_user_distance": prev_uav_user_distance.copy(),
+            "next_uav_user_distance": self.uav_user_distance.copy(),
             "region_info": region_info,
 
             # queue transition

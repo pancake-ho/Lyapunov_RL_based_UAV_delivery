@@ -107,7 +107,7 @@ class BatteryConfig:
 
     # time slot
     slot_duration: float = 1.0
-    target_service_slots_per_round: int = 5
+    target_service_slots_per_round: int = 2
 
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
@@ -166,7 +166,10 @@ class EnvConfig:
     num_uav: int = 10
     uav_user_cap: int = 2
     
-    slow_T: int = 3600
+    # IoTJ reference: 0.05 s/slot, 25 slots/round = 1.25 s/round.
+    # 현재 연구는 1 s/slot을 유지하므로, two-timescale 분리를 보존하는
+    # 최소 정수값인 2 slots/round (= 2 s/round)를 사용한다.
+    slow_T: int = 2
     episode_slots: Optional[int] = None
     N0: int = 3
 
@@ -178,10 +181,14 @@ class EnvConfig:
     rsu_capacity: int = 3
     zipf_alpha: float = 1.1
 
-    # FSMC mobility
-    # user는 매 slot 확률 p로 왼쪽 region으로 이동
-    # region 0에서 이동이 발생하면 오른쪽 끝 region으로 다른 user 재진입
-    move_prob: float = 1e-4
+    # Mobility
+    # 기본 모드는 논문과 동일하게 일정 속도로 이동하는 continuous model.
+    # move_prob은 과거 FSMC 실행과의 호환성을 위해서만 남긴다.
+    mobility_mode: str = "continuous"
+    speed_min_kmh: float = 30.0
+    speed_max_kmh: float = 60.0
+    mobility_speed_scale: float = 1.0
+    move_prob: float = 0.0
     region_len: float = 50.0
 
     # Channel
@@ -230,11 +237,14 @@ class EnvConfig:
 
     # 각 layer에 대한 quality 가중치
     quality_weights: Tuple[float, ...] = (34.0, 36.64, 39.11, 41.64)
+    # Reference paper uses 0.05 s video chunks.  In the current 1 s slot
+    # model, one queue chunk represents one 1-second macro chunk.  Multiplying
+    # the paper sizes by 1 / 0.05 = 20 preserves the same application bitrate.
     chunk_size_bits: Tuple[float, ...] = (
-        2.621e3,
-        5.073e3,
-        10.658e3,
-        26.496e3,
+        52.420e3,
+        101.460e3,
+        213.160e3,
+        529.920e3,
     )
 
     # scaled Lyapunov queue coefficients
@@ -243,9 +253,11 @@ class EnvConfig:
     alpha_Z: float = 1.0
     alpha_B: float = 30.0
 
-    # slow-timescale decision에 반영
-    # 추후 scale에 따라 수정 필요
-    uav_hiring_cost: float = 5000.0
+    # slow-timescale decision에 반영.
+    # 기존 3600-slot round에서 5000이던 상대 weight를 2-slot round에
+    # 맞춰 시간 비율로 보존: 5000 * (2 / 3600) = 2.777...
+    # 물리적인 화폐 비용이 아니라 DPP objective scaling 값이다.
+    uav_hiring_cost: float = 2.7777777777777777
     hire_weight: float = 1.0
 
     # Lyapunov trade-off parameter
@@ -276,6 +288,15 @@ class EnvConfig:
             raise ValueError("slow_T는 양수여야 합니다.")
         if self.episode_slots is not None and self.episode_slots <= 0:
             raise ValueError("episode_slots는 None 또는 양수여야 합니다.")
+        if (
+            self.episode_slots is not None
+            and int(self.episode_slots) % int(self.slow_T) != 0
+        ):
+            raise ValueError(
+                "episode_slots는 완전한 slow round로 구성되어야 하므로 "
+                "slow_T의 배수여야 합니다. "
+                f"episode_slots={self.episode_slots}, slow_T={self.slow_T}"
+            )
 
         if self.num_video <= 0:
             raise ValueError("num_video는 양수여야 합니다.")
@@ -290,8 +311,22 @@ class EnvConfig:
         if self.zipf_alpha <= 0.0:
             raise ValueError("zipf_alpha는 양수여야 합니다.")
 
+        self.mobility_mode = str(self.mobility_mode).lower().strip()
+        if self.mobility_mode not in {"continuous", "fsmc"}:
+            raise ValueError(
+                "mobility_mode은 'continuous' 또는 'fsmc'여야 합니다. "
+                f"현재 값: {self.mobility_mode}"
+            )
+        if self.speed_min_kmh < 0.0:
+            raise ValueError("speed_min_kmh는 0 이상이어야 합니다.")
+        if self.speed_max_kmh < self.speed_min_kmh:
+            raise ValueError(
+                "speed_max_kmh는 speed_min_kmh 이상이어야 합니다."
+            )
+        if self.mobility_speed_scale < 0.0:
+            raise ValueError("mobility_speed_scale은 0 이상이어야 합니다.")
         if not (0.0 <= self.move_prob <= 1.0):
-            raise ValueError("move_prob는 [0, 1] 범위여야 합니다.")
+            raise ValueError("legacy move_prob는 [0, 1] 범위여야 합니다.")
         if self.region_len <= 0.0:
             raise ValueError("region_len은 양수여야 합니다.")
 

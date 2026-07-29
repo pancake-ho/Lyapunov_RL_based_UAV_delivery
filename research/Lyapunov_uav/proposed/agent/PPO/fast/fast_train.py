@@ -204,27 +204,27 @@ def make_run_dir(train_cfg: FastTrainConfig, env_cfg: EnvConfig) -> Path:
     return run_dir
 
 
-def get_episode_move_prob(
+def get_episode_mobility_speed_scale(
     train_cfg: FastTrainConfig,
     episode_idx: int,
 ) -> float:
     """
-    1-based episode index에 해당하는 mobility probability를 반환한다.
+    1-based episode index에 해당하는 mobility speed scale을 반환한다.
     """
     episode_idx = int(episode_idx)
 
-    selected_prob = float(
-        train_cfg.mobility_curriculum[0][1]
+    selected_scale = float(
+        train_cfg.mobility_speed_curriculum[0][1]
     )
 
-    for start_episode, move_prob in (
-        train_cfg.mobility_curriculum
+    for start_episode, speed_scale in (
+        train_cfg.mobility_speed_curriculum
     ):
         if episode_idx < int(start_episode):
             break
-        selected_prob = float(move_prob)
+        selected_scale = float(speed_scale)
 
-    return selected_prob
+    return selected_scale
 
 
 def sample_random_slow_action(
@@ -986,15 +986,15 @@ def train(train_cfg: FastTrainConfig) -> None:
     while episode_idx < int(train_cfg.num_episodes):
         current_episode = episode_idx + 1
 
-        current_move_prob = (
-            get_episode_move_prob(
+        current_speed_scale = (
+            get_episode_mobility_speed_scale(
                 train_cfg=train_cfg,
                 episode_idx=current_episode,
             )
         )
 
-        env.cfg.move_prob = float(
-            current_move_prob
+        env.cfg.mobility_speed_scale = float(
+            current_speed_scale
         )
 
         obs, reset_info = reset_env(
@@ -1020,6 +1020,7 @@ def train(train_cfg: FastTrainConfig) -> None:
         ep_outage_slots = 0.0
         ep_rounds_completed = 0
         ep_user_entries = 0
+        ep_region_crossings = 0
         ep_active_uav_power_sum = 0.0
         ep_active_uav_power_sq_sum = 0.0
         ep_active_uav_power_count = 0
@@ -1118,6 +1119,19 @@ def train(train_cfg: FastTrainConfig) -> None:
                 dtype=np.int32,
             )
             ep_user_entries += int(entered_mask.sum())
+            crossing_mask = np.asarray(
+                info.get("region_info", {}).get(
+                    "region_crossing_mask",
+                    np.zeros(
+                        int(env_cfg.num_user),
+                        dtype=np.int32,
+                    ),
+                ),
+                dtype=np.int32,
+            )
+            ep_region_crossings += int(
+                crossing_mask.sum()
+            )
 
             if ep_done and not is_round_boundary:
                 raise RuntimeError(
@@ -1389,7 +1403,14 @@ def train(train_cfg: FastTrainConfig) -> None:
                     int(ep_rounds_completed),
                 "episode_user_entries":
                     int(ep_user_entries),
-                "move_prob": float(current_move_prob),
+                "episode_region_crossings":
+                    int(ep_region_crossings),
+                "mobility_speed_scale":
+                    float(current_speed_scale),
+                "speed_min_kmh":
+                    float(env_cfg.speed_min_kmh),
+                "speed_max_kmh":
+                    float(env_cfg.speed_max_kmh),
                 "episode_quality_per_chunk":
                     ep_quality_per_chunk,
 
@@ -1469,6 +1490,7 @@ def train(train_cfg: FastTrainConfig) -> None:
             f"stall={ep_stall:.4f} "
             f"rounds={ep_rounds_completed} "
             f"entries={ep_user_entries} "
+            f"crossings={ep_region_crossings} "
             f"uav_power={ep_active_uav_power_mean:.4f}",
             f"min_soc={ep_min_soc:.2f} ",
             f"charging_slots={ep_charging_slots:.0f} ",
@@ -1585,10 +1607,10 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ),
     )
 
-    target_move_prob = float(
-        train_cfg.mobility_curriculum[-1][1]
+    target_speed_scale = float(
+        train_cfg.mobility_speed_curriculum[-1][1]
     )
-    env_cfg.move_prob = target_move_prob
+    env_cfg.mobility_speed_scale = target_speed_scale
 
     ppo_cfg = build_agent_ppo_config(train_cfg)
 
@@ -1682,6 +1704,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ep_outage_slots = 0.0
         ep_rounds_completed = 0
         ep_user_entries = 0
+        ep_region_crossings = 0
         ep_active_uav_power_sum = 0.0
         ep_active_uav_power_sq_sum = 0.0
         ep_active_uav_power_count = 0
@@ -1787,6 +1810,19 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 dtype=np.int32,
             )
             ep_user_entries += int(entered_mask.sum())
+            crossing_mask = np.asarray(
+                info.get("region_info", {}).get(
+                    "region_crossing_mask",
+                    np.zeros(
+                        int(env_cfg.num_user),
+                        dtype=np.int32,
+                    ),
+                ),
+                dtype=np.int32,
+            )
+            ep_region_crossings += int(
+                crossing_mask.sum()
+            )
 
             if ep_done and not is_round_boundary:
                 raise RuntimeError(
@@ -2005,8 +2041,12 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         eval_logger.write(
             {
                 "episode": episode_idx,
-                "move_prob":
-                    float(env_cfg.move_prob),
+                "mobility_speed_scale":
+                    float(env_cfg.mobility_speed_scale),
+                "speed_min_kmh":
+                    float(env_cfg.speed_min_kmh),
+                "speed_max_kmh":
+                    float(env_cfg.speed_max_kmh),
                 "episode_steps":
                     ep_steps,
                 "episode_reward":
@@ -2051,6 +2091,8 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     int(ep_rounds_completed),
                 "episode_user_entries":
                     int(ep_user_entries),
+                "episode_region_crossings":
+                    int(ep_region_crossings),
                 "episode_queue_playback_term":
                     ep_queue_playback_term,
                 "episode_active_action_dims_mean":
@@ -2084,6 +2126,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             f"stall={ep_stall:.4f} "
             f"rounds={ep_rounds_completed} "
             f"entries={ep_user_entries} "
+            f"crossings={ep_region_crossings} "
             f"uav_power={ep_active_uav_power_mean:.4f}",
             flush=True,
         )
