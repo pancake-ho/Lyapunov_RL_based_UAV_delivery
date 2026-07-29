@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -65,14 +65,25 @@ from agent.PPO.fast.fast_agent import FastPPOAgent, FastPPOConfig as AgentPPOCon
 
 def build_env_config(
     train_cfg: FastTrainConfig,
+    rounds_per_episode: int,
 ) -> EnvConfig:
     """
-    EnvConfig는 proposed/config.py 기준 그대로 사용한다.
-    fast_train.py에서는 시스템 상수를 override하지 않고,
-    재현성을 위해 학습 seed만 환경 seed로 전달한다.
+    proposed/config.py의 시스템 상수는 유지하고,
+    실행별 seed 및 multi-round episode horizon만 명시.
     """
-    return EnvConfig(
-        seed=int(train_cfg.seed)
+    rounds = int(rounds_per_episode)
+    if rounds <= 0:
+        raise ValueError(
+            "rounds_per_episode는 양수 값을 가져야 합니다."
+        )
+
+    base = EnvConfig()
+    episode_slots = int(base.slow_T) * rounds
+
+    return replace(
+        base,
+        seed=int(train_cfg.seed),
+        episode_slots=episode_slots,
     )
 
 
@@ -874,7 +885,12 @@ def train(train_cfg: FastTrainConfig) -> None:
         deterministic=bool(train_cfg.deterministic_torch),
     )
 
-    env_cfg = build_env_config(train_cfg)
+    env_cfg = build_env_config(
+        train_cfg,
+        rounds_per_episode=int(
+            train_cfg.rounds_per_episode
+        ),
+    )
     ppo_cfg = build_agent_ppo_config(train_cfg)
 
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 10007)
@@ -951,6 +967,11 @@ def train(train_cfg: FastTrainConfig) -> None:
     print(f"obs_dim       : {obs_dim}", flush=True)
     print(f"action_dim    : {agent.action_dim}", flush=True)
     print(f"slow_T        : {env_cfg.slow_T}", flush=True)
+    print(f"episode_slots : {env_cfg.episode_slots}", flush=True)
+    print(
+        f"rounds/episode: {train_cfg.rounds_per_episode}",
+        flush=True,
+    )
     print(f"rollout_slots : {ppo_cfg.rollout_steps}", flush=True)
     print(f"reset_info    : {reset_info}", flush=True)
     print("=" * 100, flush=True)
@@ -997,6 +1018,11 @@ def train(train_cfg: FastTrainConfig) -> None:
         ep_mean_B_sum = 0.0
         ep_charging_slots = 0.0
         ep_outage_slots = 0.0
+        ep_rounds_completed = 0
+        ep_user_entries = 0
+        ep_active_uav_power_sum = 0.0
+        ep_active_uav_power_sq_sum = 0.0
+        ep_active_uav_power_count = 0
 
         ep_quality_degradation = 0.0
 
@@ -1016,6 +1042,11 @@ def train(train_cfg: FastTrainConfig) -> None:
         ep_action_saturation_ratio = 0.0
 
         ep_horizon = int(env_cfg.slow_T) * int(train_cfg.rounds_per_episode)
+        if int(env_cfg.episode_slots) != ep_horizon:
+            raise RuntimeError(
+                "Environment/trainer episode horizon mismatch: "
+                f"env={env_cfg.episode_slots}, trainer={ep_horizon}"
+            )
 
         ep_service_rate = 0.0
         ep_mean_requested_chunks = 0.0
@@ -1027,6 +1058,24 @@ def train(train_cfg: FastTrainConfig) -> None:
 
         for _ in range(ep_horizon):
             selected = agent.select_action(obs)
+
+            selected_uav_power = np.asarray(
+                selected["env_action"]["uav_power"],
+                dtype=np.float64,
+            )
+            active_uav_power = selected_uav_power[
+                selected_uav_power > 0.0
+            ]
+            if active_uav_power.size > 0:
+                ep_active_uav_power_sum += float(
+                    active_uav_power.sum()
+                )
+                ep_active_uav_power_sq_sum += float(
+                    np.square(active_uav_power).sum()
+                )
+                ep_active_uav_power_count += int(
+                    active_uav_power.size
+                )
 
             ep_service_rate += float(
                 selected["service_rate"]
@@ -1057,6 +1106,24 @@ def train(train_cfg: FastTrainConfig) -> None:
             is_round_boundary = bool(info.get("is_round_boundary", False))
 
             ep_done = bool(terminated or truncated or ep_steps + 1 >= ep_horizon)
+
+            if is_round_boundary:
+                ep_rounds_completed += 1
+
+            entered_mask = np.asarray(
+                info.get("region_info", {}).get(
+                    "entered_mask",
+                    np.zeros(int(env_cfg.num_user), dtype=np.int32),
+                ),
+                dtype=np.int32,
+            )
+            ep_user_entries += int(entered_mask.sum())
+
+            if ep_done and not is_round_boundary:
+                raise RuntimeError(
+                    "Episode ended inside a slow-timescale round. "
+                    f"ep_steps={ep_steps + 1}, slow_T={env_cfg.slow_T}"
+                )
 
             # reward scaling
             raw_reward = float(reward)
@@ -1175,6 +1242,7 @@ def train(train_cfg: FastTrainConfig) -> None:
                     f"value_loss={update_logs['value_loss']:.6f} "
                     f"cat_entropy={update_logs['categorical_entropy']:.6f} "
                     f"power_entropy={update_logs['power_entropy']:.6f} "
+                    f"power_log_std={update_logs['power_log_std_mean']:.6f} "
                     f"entropy_bonus={update_logs['entropy_bonus']:.6f} "
                     f"kl={update_logs['approx_kl']:.6f} "
                     f"clipfrac={update_logs['clipfrac']:.4f} "
@@ -1190,6 +1258,29 @@ def train(train_cfg: FastTrainConfig) -> None:
                 break
 
         episode_idx += 1
+
+        if ep_steps != ep_horizon:
+            raise RuntimeError(
+                "Incomplete training episode: "
+                f"expected_slots={ep_horizon}, actual_slots={ep_steps}"
+            )
+        if ep_rounds_completed != int(train_cfg.rounds_per_episode):
+            raise RuntimeError(
+                "Completed slow-round count mismatch: "
+                f"expected={train_cfg.rounds_per_episode}, "
+                f"actual={ep_rounds_completed}"
+            )
+        if not np.isclose(
+            ep_reward,
+            -ep_dpp_cost,
+            rtol=1e-6,
+            atol=1e-3,
+        ):
+            raise RuntimeError(
+                "Fast reward/DPP cost mismatch: "
+                f"episode_reward={ep_reward}, "
+                f"episode_dpp_cost={ep_dpp_cost}"
+            )
 
         ep_quality_per_chunk = (
             ep_quality / ep_delivery
@@ -1257,6 +1348,24 @@ def train(train_cfg: FastTrainConfig) -> None:
         if not np.isfinite(ep_min_soc):
             ep_min_soc = 0.0
 
+        if ep_active_uav_power_count > 0:
+            ep_active_uav_power_mean = (
+                ep_active_uav_power_sum
+                / float(ep_active_uav_power_count)
+            )
+            ep_active_uav_power_var = max(
+                0.0,
+                ep_active_uav_power_sq_sum
+                / float(ep_active_uav_power_count)
+                - ep_active_uav_power_mean ** 2,
+            )
+            ep_active_uav_power_std = float(
+                np.sqrt(ep_active_uav_power_var)
+            )
+        else:
+            ep_active_uav_power_mean = 0.0
+            ep_active_uav_power_std = 0.0
+
         episode_logger.write(
             {
                 "episode": episode_idx,
@@ -1276,6 +1385,10 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "episode_mean_B": ep_mean_B,
                 "episode_charging_slots": ep_charging_slots,
                 "episode_outage_slots": ep_outage_slots,
+                "episode_rounds_completed":
+                    int(ep_rounds_completed),
+                "episode_user_entries":
+                    int(ep_user_entries),
                 "move_prob": float(current_move_prob),
                 "episode_quality_per_chunk":
                     ep_quality_per_chunk,
@@ -1315,6 +1428,15 @@ def train(train_cfg: FastTrainConfig) -> None:
 
                 "episode_action_saturation_ratio_mean":
                     ep_action_saturation_ratio_mean,
+
+                "episode_active_uav_power_count":
+                    int(ep_active_uav_power_count),
+
+                "episode_active_uav_power_mean":
+                    ep_active_uav_power_mean,
+
+                "episode_active_uav_power_std":
+                    ep_active_uav_power_std,
     
                 "episode_service_rate":
                     ep_service_rate,
@@ -1344,7 +1466,10 @@ def train(train_cfg: FastTrainConfig) -> None:
             f"dpp_cost={ep_dpp_cost:.4f} "
             f"delivery={ep_delivery:.4f} "
             f"quality={ep_quality:.4f} "
-            f"stall={ep_stall:.4f}",
+            f"stall={ep_stall:.4f} "
+            f"rounds={ep_rounds_completed} "
+            f"entries={ep_user_entries} "
+            f"uav_power={ep_active_uav_power_mean:.4f}",
             f"min_soc={ep_min_soc:.2f} ",
             f"charging_slots={ep_charging_slots:.0f} ",
             f"outage_slots={ep_outage_slots:.0f}",
@@ -1404,6 +1529,7 @@ def train(train_cfg: FastTrainConfig) -> None:
             f"value_loss={update_logs['value_loss']:.6f} "
             f"cat_entropy={update_logs['categorical_entropy']:.6f} "
             f"power_entropy={update_logs['power_entropy']:.6f} "
+            f"power_log_std={update_logs['power_log_std_mean']:.6f} "
             f"entropy_bonus={update_logs['entropy_bonus']:.6f} "
             f"kl={update_logs['approx_kl']:.6f} "
             f"clipfrac={update_logs['clipfrac']:.4f} "
@@ -1452,7 +1578,12 @@ def train(train_cfg: FastTrainConfig) -> None:
 def evaluate(train_cfg: FastTrainConfig) -> None:
     set_seed(int(train_cfg.seed), deterministic=True)
 
-    env_cfg = build_env_config(train_cfg)
+    env_cfg = build_env_config(
+        train_cfg,
+        rounds_per_episode=int(
+            train_cfg.eval_rounds_per_episode
+        ),
+    )
 
     target_move_prob = float(
         train_cfg.mobility_curriculum[-1][1]
@@ -1512,6 +1643,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
     print(f"obs_dim       : {obs_dim}", flush=True)
     print(f"action_dim    : {agent.action_dim}", flush=True)
     print(f"slow_T        : {env_cfg.slow_T}", flush=True)
+    print(f"episode_slots : {env_cfg.episode_slots}", flush=True)
+    print(
+        f"rounds/episode: {train_cfg.eval_rounds_per_episode}",
+        flush=True,
+    )
     print(f"checkpoint    : {train_cfg.checkpoint}", flush=True)
     print(f"reset_info    : {reset_info}", flush=True)
     print("=" * 100, flush=True)
@@ -1544,6 +1680,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ep_mean_B_sum = 0.0
         ep_charging_slots = 0.0
         ep_outage_slots = 0.0
+        ep_rounds_completed = 0
+        ep_user_entries = 0
+        ep_active_uav_power_sum = 0.0
+        ep_active_uav_power_sq_sum = 0.0
+        ep_active_uav_power_count = 0
 
         ep_quality_degradation = 0.0
 
@@ -1563,6 +1704,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ep_action_saturation_ratio = 0.0
 
         ep_horizon = int(env_cfg.slow_T) * int(train_cfg.eval_rounds_per_episode)
+        if int(env_cfg.episode_slots) != ep_horizon:
+            raise RuntimeError(
+                "Environment/evaluator episode horizon mismatch: "
+                f"env={env_cfg.episode_slots}, evaluator={ep_horizon}"
+            )
         ep_service_rate = 0.0
         ep_mean_requested_chunks = 0.0
 
@@ -1577,6 +1723,25 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 deterministic=True,
                 update_norm=False,
             )
+
+            selected_uav_power = np.asarray(
+                selected["env_action"]["uav_power"],
+                dtype=np.float64,
+            )
+            active_uav_power = selected_uav_power[
+                selected_uav_power > 0.0
+            ]
+            if active_uav_power.size > 0:
+                ep_active_uav_power_sum += float(
+                    active_uav_power.sum()
+                )
+                ep_active_uav_power_sq_sum += float(
+                    np.square(active_uav_power).sum()
+                )
+                ep_active_uav_power_count += int(
+                    active_uav_power.size
+                )
+
             ep_service_rate += float(
                 selected["service_rate"]
             )
@@ -1610,6 +1775,24 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 or truncated
                 or ep_steps + 1 >= ep_horizon
             )
+
+            if is_round_boundary:
+                ep_rounds_completed += 1
+
+            entered_mask = np.asarray(
+                info.get("region_info", {}).get(
+                    "entered_mask",
+                    np.zeros(int(env_cfg.num_user), dtype=np.int32),
+                ),
+                dtype=np.int32,
+            )
+            ep_user_entries += int(entered_mask.sum())
+
+            if ep_done and not is_round_boundary:
+                raise RuntimeError(
+                    "Evaluation episode ended inside a slow-timescale round. "
+                    f"ep_steps={ep_steps + 1}, slow_T={env_cfg.slow_T}"
+                )
 
             next_obs = next_obs_raw
 
@@ -1687,6 +1870,31 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
 
             if ep_done:
                 break
+
+        if ep_steps != ep_horizon:
+            raise RuntimeError(
+                "Incomplete evaluation episode: "
+                f"expected_slots={ep_horizon}, actual_slots={ep_steps}"
+            )
+        if ep_rounds_completed != int(
+            train_cfg.eval_rounds_per_episode
+        ):
+            raise RuntimeError(
+                "Completed evaluation slow-round count mismatch: "
+                f"expected={train_cfg.eval_rounds_per_episode}, "
+                f"actual={ep_rounds_completed}"
+            )
+        if not np.isclose(
+            ep_reward,
+            -ep_dpp_cost,
+            rtol=1e-6,
+            atol=1e-3,
+        ):
+            raise RuntimeError(
+                "Evaluation fast reward/DPP cost mismatch: "
+                f"episode_reward={ep_reward}, "
+                f"episode_dpp_cost={ep_dpp_cost}"
+            )
         
         step_denominator = float(
             max(ep_steps, 1)
@@ -1761,6 +1969,24 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
 
         if not np.isfinite(ep_min_soc):
             ep_min_soc = 0.0
+
+        if ep_active_uav_power_count > 0:
+            ep_active_uav_power_mean = (
+                ep_active_uav_power_sum
+                / float(ep_active_uav_power_count)
+            )
+            ep_active_uav_power_var = max(
+                0.0,
+                ep_active_uav_power_sq_sum
+                / float(ep_active_uav_power_count)
+                - ep_active_uav_power_mean ** 2,
+            )
+            ep_active_uav_power_std = float(
+                np.sqrt(ep_active_uav_power_var)
+            )
+        else:
+            ep_active_uav_power_mean = 0.0
+            ep_active_uav_power_std = 0.0
             
         rewards.append(ep_reward)
         deliveries.append(ep_delivery)
@@ -1821,6 +2047,10 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     ep_charging_slots,
                 "episode_outage_slots":
                     ep_outage_slots,
+                "episode_rounds_completed":
+                    int(ep_rounds_completed),
+                "episode_user_entries":
+                    int(ep_user_entries),
                 "episode_queue_playback_term":
                     ep_queue_playback_term,
                 "episode_active_action_dims_mean":
@@ -1829,6 +2059,12 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     ep_active_action_ratio_mean,
                 "episode_action_saturation_ratio_mean":
                     ep_action_saturation_ratio_mean,
+                "episode_active_uav_power_count":
+                    int(ep_active_uav_power_count),
+                "episode_active_uav_power_mean":
+                    ep_active_uav_power_mean,
+                "episode_active_uav_power_std":
+                    ep_active_uav_power_std,
                 "episode_service_rate":
                     ep_service_rate,
                 "episode_mean_requested_chunks":
@@ -1845,7 +2081,10 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             f"dpp_cost={ep_dpp_cost:.4f} "
             f"delivery={ep_delivery:.4f} "
             f"quality={ep_quality:.4f} "
-            f"stall={ep_stall:.4f}",
+            f"stall={ep_stall:.4f} "
+            f"rounds={ep_rounds_completed} "
+            f"entries={ep_user_entries} "
+            f"uav_power={ep_active_uav_power_mean:.4f}",
             flush=True,
         )
 

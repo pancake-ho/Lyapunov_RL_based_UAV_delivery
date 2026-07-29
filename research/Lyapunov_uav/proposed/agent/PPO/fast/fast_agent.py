@@ -385,7 +385,7 @@ class FastPPOAgent:
                         torch.abs(ratio - 1.0) > float(self.ppo_cfg.clip_coef)
                     ).float().mean()
 
-                #이미 KL이 target을 넘었다면
+                # 이미 KL이 target을 넘었다면
                 # 현재 minibatch의 추가 update를 수행하지 않는다.
                 if (
                     self.ppo_cfg.target_kl is not None
@@ -470,11 +470,27 @@ class FastPPOAgent:
 
         entropy_bonus = float(self.ppo_cfg.categorical_entropy_coef) * categorical_entropy_mean + float(self.ppo_cfg.power_entropy_coef) * power_entropy_mean
 
+        with torch.no_grad():
+            power_log_std = torch.clamp(
+                self.model.power_log_std,
+                min=-5.0,
+                max=1.0,
+            ).detach()
+
         logs = {
             "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
             "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
             "categorical_entropy": categorical_entropy_mean,
             "power_entropy": power_entropy_mean,
+            "power_log_std_mean": float(
+                power_log_std.mean().cpu().item()
+            ),
+            "power_log_std_min": float(
+                power_log_std.min().cpu().item()
+            ),
+            "power_log_std_max": float(
+                power_log_std.max().cpu().item()
+            ),
             "entropy_bonus": entropy_bonus,
             "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
             "clipfrac": float(np.mean(clip_fracs)) if clip_fracs else 0.0,

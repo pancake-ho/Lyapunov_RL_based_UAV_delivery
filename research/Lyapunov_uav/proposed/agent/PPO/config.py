@@ -43,8 +43,8 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 3) episode / rollout
     # ------------------------------------------------------------------
-    # 현재 fast-only 학습에서는 episode 하나를 slow_T slot짜리 round 하나로 본다.
-    # 즉, num_episodes=50000이면 slow_T slot짜리 round를 50000번 학습한다.
+    # 한 episode는 rounds_per_episode개의 slow-timescale round로 구성한다.
+    # 현재 기본값에서는 1 episode = 10 * 3600 = 36,000 fast slot이다.
     num_episodes: int = 200
     eval_episodes: int = 10
 
@@ -65,8 +65,9 @@ class FastTrainConfig:
     batch_size: int = 512
     update_epochs: int = 4
 
-    # Queue/Battery 장기 pressure를 보려면 0.90은 너무 짧다.
-    # reward scaling은 하지 않고 horizon만 길게 본다.
+    # Queue/Battery 장기 pressure를 보려면 gamma=0.90은 너무 짧다.
+    # 환경 reward는 raw DPP 단위로 유지하고, rollout buffer 저장 직전에
+    # ppo_reward_scale만 적용한다.
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
@@ -75,8 +76,8 @@ class FastTrainConfig:
     clip_coef: float = 0.15
     target_kl: Optional[float] = 0.02
 
-    # raw reward를 그대로 쓰므로 value loss가 커질 수 있다.
-    # critic loss가 actor를 압도하지 않도록 value_coef는 낮게 둔다.
+    # ppo_reward_scale 적용 후 critic loss가 actor를 압도하지 않도록
+    # value_coef는 0.5로 유지한다
     value_coef: float = 0.5
     categorical_entropy_coef: float = 5e-4
     power_entropy_coef: float = 1e-4
@@ -109,9 +110,8 @@ class FastTrainConfig:
     use_value_huber_loss: bool = True
     use_value_clip: bool = True
 
-    # raw reward 기준 value prediction 변화폭 clipping.
+    # PPO에 저장되는 scaled reward/value 단위의 value clipping 폭.
     value_clip_coef: float = 0.5
-
 
     # ------------------------------------------------------------------
     # 7) Fast-only 학습용 slow decision 생성 방식
