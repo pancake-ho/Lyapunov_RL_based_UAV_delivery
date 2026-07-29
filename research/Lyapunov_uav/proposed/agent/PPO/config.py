@@ -33,7 +33,7 @@ class FastTrainConfig:
 
     # None이면 fast_train.py에서 자동 이름 생성
     run_name: Optional[str] = (
-        "fast_final_static_cat5e4_seed2026"
+        "fast_mixed_seed2026"
     )
 
     checkpoint: Optional[str] = None
@@ -136,6 +136,8 @@ class FastTrainConfig:
         ...
     ] = (
         (1, 0.0),
+        (51, 1e-4),
+        (101, 5e-4),
     )
 
     # --------------------------------------------------------------

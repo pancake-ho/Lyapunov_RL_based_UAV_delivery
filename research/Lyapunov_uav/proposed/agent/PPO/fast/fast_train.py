@@ -63,12 +63,17 @@ from agent.PPO.common.utils import ScalarLogger, save_json
 from agent.PPO.fast.fast_agent import FastPPOAgent, FastPPOConfig as AgentPPOConfig
 
 
-def build_env_config() -> EnvConfig:
+def build_env_config(
+    train_cfg: FastTrainConfig,
+) -> EnvConfig:
     """
     EnvConfig는 proposed/config.py 기준 그대로 사용한다.
-    fast_train.py에서는 시스템 상수를 override하지 않는다.
+    fast_train.py에서는 시스템 상수를 override하지 않고,
+    재현성을 위해 학습 seed만 환경 seed로 전달한다.
     """
-    return EnvConfig()
+    return EnvConfig(
+        seed=int(train_cfg.seed)
+    )
 
 
 def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
@@ -278,9 +283,6 @@ def sample_random_slow_action(
             f"uav_cached_content shape mismatch: expected {(u,)}, got {uav_cached_content.shape}"
         )
 
-    uav_user_cap = int(getattr(cfg, "uav_user_cap", n))
-    uav_user_cap = max(1, min(uav_user_cap, n))
-
     # 2) UAV scheduling: UAV index == region index
     for uav_idx in range(u):
         if rng.random() >= uav_hire_prob:
@@ -303,13 +305,6 @@ def sample_random_slow_action(
             selected_users = np.asarray(
                 [int(rng.choice(candidate_users))],
                 dtype=np.int64,
-            )
-
-        if selected_users.size > uav_user_cap:
-            selected_users = rng.choice(
-                selected_users,
-                size=uav_user_cap,
-                replace=False,
             )
 
         uav_hiring[uav_idx] = 1
@@ -684,6 +679,23 @@ def extract_info_metrics(
     )
 
     return {
+        "one_slot_dpp_cost": float(
+            fast_components.get(
+                "one_slot_dpp_cost",
+                -float(
+                    fast_components.get(
+                        "fast_reward",
+                        0.0,
+                    )
+                ),
+            )
+        ),
+        "queue_playback_term": float(
+            fast_components.get(
+                "queue_playback_term",
+                0.0,
+            )
+        ),
         "sum_delivery": float(
             fast_components.get(
                 "sum_delivery",
@@ -862,7 +874,7 @@ def train(train_cfg: FastTrainConfig) -> None:
         deterministic=bool(train_cfg.deterministic_torch),
     )
 
-    env_cfg = build_env_config()
+    env_cfg = build_env_config(train_cfg)
     ppo_cfg = build_agent_ppo_config(train_cfg)
 
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 10007)
@@ -971,6 +983,7 @@ def train(train_cfg: FastTrainConfig) -> None:
         )
 
         ep_reward = 0.0
+        ep_dpp_cost = 0.0
         ep_delivery = 0.0
         ep_quality = 0.0
         ep_stall = 0.0
@@ -988,6 +1001,7 @@ def train(train_cfg: FastTrainConfig) -> None:
         ep_quality_degradation = 0.0
 
         ep_video_delivery_term = 0.0
+        ep_queue_playback_term = 0.0
         ep_battery_consume_term = 0.0
         ep_battery_charge_term = 0.0
         ep_quality_degradation_term = 0.0
@@ -1061,6 +1075,7 @@ def train(train_cfg: FastTrainConfig) -> None:
             metrics = extract_info_metrics(info)
 
             ep_reward += raw_reward
+            ep_dpp_cost += metrics["one_slot_dpp_cost"]
             ep_delivery += metrics["sum_delivery"]
             ep_quality += metrics["sum_quality"]
             ep_stall += metrics["stall_sum"]
@@ -1081,6 +1096,9 @@ def train(train_cfg: FastTrainConfig) -> None:
 
             ep_video_delivery_term += (
                 metrics["video_delivery_term"]
+            )
+            ep_queue_playback_term += (
+                metrics["queue_playback_term"]
             )
             ep_battery_consume_term += (
                 metrics["battery_consume_term"]
@@ -1245,6 +1263,7 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "global_slot": global_slot,
                 "episode_steps": ep_steps,
                 "episode_reward": ep_reward,
+                "episode_dpp_cost": ep_dpp_cost,
                 "episode_delivery": ep_delivery,
                 "episode_quality": ep_quality,
                 "episode_stall": ep_stall,
@@ -1275,6 +1294,9 @@ def train(train_cfg: FastTrainConfig) -> None:
 
                 "episode_video_delivery_term":
                     ep_video_delivery_term,
+
+                "episode_queue_playback_term":
+                    ep_queue_playback_term,
 
                 "episode_battery_consume_term":
                     ep_battery_consume_term,
@@ -1319,6 +1341,7 @@ def train(train_cfg: FastTrainConfig) -> None:
             f"ep={episode_idx}/{train_cfg.num_episodes} "
             f"steps={ep_steps} "
             f"reward={ep_reward:.4f} "
+            f"dpp_cost={ep_dpp_cost:.4f} "
             f"delivery={ep_delivery:.4f} "
             f"quality={ep_quality:.4f} "
             f"stall={ep_stall:.4f}",
@@ -1429,7 +1452,7 @@ def train(train_cfg: FastTrainConfig) -> None:
 def evaluate(train_cfg: FastTrainConfig) -> None:
     set_seed(int(train_cfg.seed), deterministic=True)
 
-    env_cfg = build_env_config()
+    env_cfg = build_env_config(train_cfg)
 
     target_move_prob = float(
         train_cfg.mobility_curriculum[-1][1]
@@ -1506,6 +1529,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         )
 
         ep_reward = 0.0
+        ep_dpp_cost = 0.0
         ep_delivery = 0.0
         ep_quality = 0.0
         ep_stall = 0.0
@@ -1524,6 +1548,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
         ep_quality_degradation = 0.0
 
         ep_video_delivery_term = 0.0
+        ep_queue_playback_term = 0.0
         ep_battery_consume_term = 0.0
         ep_battery_charge_term = 0.0
         ep_quality_degradation_term = 0.0
@@ -1599,6 +1624,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             metrics = extract_info_metrics(info)
 
             ep_reward += float(reward)
+            ep_dpp_cost += metrics["one_slot_dpp_cost"]
             ep_delivery += metrics["sum_delivery"]
             ep_quality += metrics["sum_quality"]
             ep_stall += metrics["stall_sum"]
@@ -1619,6 +1645,9 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
 
             ep_video_delivery_term += (
                 metrics["video_delivery_term"]
+            )
+            ep_queue_playback_term += (
+                metrics["queue_playback_term"]
             )
             ep_battery_consume_term += (
                 metrics["battery_consume_term"]
@@ -1756,6 +1785,8 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     ep_steps,
                 "episode_reward":
                     ep_reward,
+                "episode_dpp_cost":
+                    ep_dpp_cost,
                 "episode_delivery":
                     ep_delivery,
                 "episode_quality":
@@ -1790,6 +1821,8 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     ep_charging_slots,
                 "episode_outage_slots":
                     ep_outage_slots,
+                "episode_queue_playback_term":
+                    ep_queue_playback_term,
                 "episode_active_action_dims_mean":
                     ep_active_action_dims_mean,
                 "episode_active_action_ratio_mean":
@@ -1809,6 +1842,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             f"ep={episode_idx}/{train_cfg.eval_episodes} "
             f"steps={ep_steps} "
             f"reward={ep_reward:.4f} "
+            f"dpp_cost={ep_dpp_cost:.4f} "
             f"delivery={ep_delivery:.4f} "
             f"quality={ep_quality:.4f} "
             f"stall={ep_stall:.4f}",

@@ -69,8 +69,8 @@ class JointHRLConfig:
     rsu_init_logit: float = 0.0
     hiring_init_logit: float = 0.0
     uav_init_logit: float = 0.0
-    # min_logit: float = -20.0
-    # max_logit: float = 20.0
+    min_logit: float = -20.0
+    max_logit: float = 20.0
 
     obs_norm: bool = True
     adv_norm: bool = True

@@ -243,7 +243,6 @@ class ScalarLogger:
 
     TensorBoard 고려하여, 붙이기 전 fast PPOsmoke test 단계에서 사용을 대비
     """
-
     def __init__(self, log_path: str | os.PathLike[str]) -> None:
         self.log_path = Path(log_path)
         ensure_dir(self.log_path.parent)

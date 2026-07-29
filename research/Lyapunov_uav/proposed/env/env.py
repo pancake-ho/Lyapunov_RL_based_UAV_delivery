@@ -97,13 +97,13 @@ class Env:
 
         # round-level reward accumulator
         self.round_fast_reward_sum = 0.0
+        self.round_fast_dpp_cost_sum = 0.0
         self.round_quality_sum = 0.0
         self.round_delivery_sum = 0.0
         self.round_stall_sum = 0.0
         self.round_battery_consume_sum = 0.0
         self.round_battery_charge_sum = 0.0
     
-
     @property
     def E(self) -> np.ndarray:
         """
@@ -491,6 +491,7 @@ class Env:
         (slot별 fast reward component을 누적)
         """
         self.round_fast_reward_sum = 0.0
+        self.round_fast_dpp_cost_sum = 0.0
         self.round_quality_sum = 0.0
         self.round_delivery_sum = 0.0
         self.round_stall_sum = 0.0
@@ -860,15 +861,17 @@ class Env:
         battery_step_info: list[Dict[str, Any]],
     ) -> Tuple[float, Dict[str, Any]]:
         """
-        Scaled Fast-timescale DPP reward 계산을 수행하는 함수.
+        Fast-timescale의 정확한 one-slot DPP cost와 그 음수 reward를 계산한다.
 
-        다음과 같은 산식을 가짐:
+        J^F(t)
+        = alpha_Z * sum_n Z_n(t)[b-d_n(t)]
+          + alpha_B * sum_u B_u(t)e_u(t)
+          - alpha_B * sum_u B_u(t)e_u^c(t)
+          + V * sum_n[P_bar*d_n(t)-q_n(t)]
 
-            R_L(t)
-            = alpha_Z * sum_n Z_n(t)d_n(t)
-                - alpha_B * sum_u B_u(t)e_u(t)
-                + alpha_B * sum_u B_u(t)e_c(t)
-                - V * sum_n[P_bar*d_n(t) - q_n(t)]
+        Fast PPO reward는 R^F(t)=-J^F(t)로 둔다. 환경은 raw DPP
+        단위를 유지하며 PPO 전용 reward scaling은 fast_train.py에서만
+        적용한다.
         """
         prev_Q_arr = np.asarray(prev_Q, dtype=np.float32)
         next_Q_arr = np.asarray(next_Q, dtype=np.float32)
@@ -901,6 +904,7 @@ class Env:
         alpha_B = float(self.cfg.alpha_B)
         V = float(self.cfg.V)
         P_bar = float(max(self.cfg.quality_weights))
+        playback_rate = float(self.cfg.playback_rate)
 
         # quality degradation
         quality_degradation_arr = P_bar * delivered_arr - quality_arr
@@ -925,6 +929,7 @@ class Env:
         ).astype(np.float32)
         
         # raw formulation terms
+        raw_queue_playback_term = -float(np.sum(prev_Z_arr * playback_rate))
         raw_video_delivery_term = float(np.sum(prev_Z_arr * delivered_arr))
         raw_battery_consume_term = -float(np.sum(prev_B_arr * consumed_soc_arr))
         raw_battery_charge_term = float(np.sum(prev_B_arr * charged_soc_arr))
@@ -932,17 +937,51 @@ class Env:
         raw_quality_degradation_term = float(np.sum(quality_degradation_arr))
 
         # scaled reward terms
+        # reward contributions
+        queue_playback_term = alpha_Z * raw_queue_playback_term
         video_delivery_term = alpha_Z * raw_video_delivery_term
         battery_consume_term = alpha_B * raw_battery_consume_term
         battery_charge_term = alpha_B * raw_battery_charge_term
         quality_degradation_term = -V * raw_quality_degradation_term
 
         fast_reward = float(
-            video_delivery_term
+            queue_playback_term
+            + video_delivery_term
             + battery_consume_term
             + battery_charge_term
             + quality_degradation_term
         )
+        one_slot_dpp_cost = -fast_reward
+
+        # Positive/negative DPP breakdown for audit and slow candidate COST.
+        video_queue_dpp_cost_term = float(
+            alpha_Z
+            * np.sum(
+                prev_Z_arr
+                * (playback_rate - delivered_arr)
+            )
+        )
+        battery_consume_dpp_cost_term = -battery_consume_term
+        battery_charge_dpp_cost_term = -battery_charge_term
+        quality_degradation_dpp_cost_term = -quality_degradation_term
+
+        reconstructed_dpp_cost = float(
+            video_queue_dpp_cost_term
+            + battery_consume_dpp_cost_term
+            + battery_charge_dpp_cost_term
+            + quality_degradation_dpp_cost_term
+        )
+        if not np.isclose(
+            one_slot_dpp_cost,
+            reconstructed_dpp_cost,
+            rtol=1e-6,
+            atol=1e-4,
+        ):
+            raise RuntimeError(
+                "one-slot DPP cost reconstruction mismatch: "
+                f"reward_based={one_slot_dpp_cost}, "
+                f"term_sum={reconstructed_dpp_cost}"
+            )
 
         sum_delivery = float(np.sum(delivered_arr))
         sum_quality = float(np.sum(quality_arr))
@@ -968,13 +1007,18 @@ class Env:
         )
 
         term_abs_sum = float(
-            abs(video_delivery_term)
+            abs(queue_playback_term)
+            + abs(video_delivery_term)
             + abs(battery_consume_term)
             + abs(battery_charge_term)
             + abs(quality_degradation_term)
             + 1e-8
         )
 
+        queue_playback_term_share = (
+            abs(queue_playback_term)
+            / term_abs_sum
+        )
         delivery_term_share = (
             abs(video_delivery_term)
             / term_abs_sum
@@ -1018,6 +1062,8 @@ class Env:
             "charged_soc_per_uav":
                 charged_soc_arr.copy(),
 
+            "raw_queue_playback_term":
+                raw_queue_playback_term,
             "raw_video_delivery_term":
                 raw_video_delivery_term,
             "raw_battery_consume_term":
@@ -1029,6 +1075,8 @@ class Env:
             "raw_quality_degradation_term":
                 raw_quality_degradation_term,
 
+            "queue_playback_term":
+                queue_playback_term,
             "video_delivery_term":
                 video_delivery_term,
             "battery_consume_term":
@@ -1039,8 +1087,19 @@ class Env:
                 quality_degradation_term,
 
             "fast_reward": fast_reward,
+            "one_slot_dpp_cost":
+                one_slot_dpp_cost,
+            "video_queue_dpp_cost_term":
+                video_queue_dpp_cost_term,
+            "battery_consume_dpp_cost_term":
+                battery_consume_dpp_cost_term,
+            "battery_charge_dpp_cost_term":
+                battery_charge_dpp_cost_term,
+            "quality_degradation_dpp_cost_term":
+                quality_degradation_dpp_cost_term,
 
             "P_bar": P_bar,
+            "playback_rate": playback_rate,
             "sum_delivery": sum_delivery,
             "sum_quality": sum_quality,
             "sum_quality_degradation":
@@ -1055,6 +1114,8 @@ class Env:
             "quality_degradation_per_chunk":
                 quality_degradation_per_chunk,
 
+            "queue_playback_term_share":
+                queue_playback_term_share,
             "delivery_term_share":
                 delivery_term_share,
             "battery_consume_term_share":
@@ -1108,6 +1169,13 @@ class Env:
               + sum_{t in T_r} R_L(t)
         """
         self.round_fast_reward_sum += float(fast_reward)
+        one_slot_dpp_cost = float(
+            reward_components.get(
+                "one_slot_dpp_cost",
+                -float(fast_reward),
+            )
+        )
+        self.round_fast_dpp_cost_sum += one_slot_dpp_cost
         self.round_quality_sum += float(reward_components.get("sum_quality", 0.0))
         self.round_delivery_sum += float(reward_components.get("sum_delivery", 0.0))
         self.round_battery_consume_sum += float(reward_components.get("battery_consume_term", 0.0))
@@ -1123,6 +1191,9 @@ class Env:
                 "is_round_boundary": False,
                 "slow_reward": 0.0,
                 "round_fast_reward_sum_so_far": float(self.round_fast_reward_sum),
+                "round_fast_dpp_cost_sum_so_far": float(
+                    self.round_fast_dpp_cost_sum
+                ),
                 "round_quality_sum_so_far": float(self.round_quality_sum),
                 "round_delivery_sum_so_far": float(self.round_delivery_sum),
                 "round_battery_consume_sum_so_far": float(self.round_battery_consume_sum),
@@ -1134,12 +1205,32 @@ class Env:
             return 0.0, components
         
         slow_reward = float(hire_cost) + float(self.round_fast_reward_sum)
+        round_dpp_cost = float(
+            -float(hire_cost)
+            + self.round_fast_dpp_cost_sum
+        )
+
+        if not np.isclose(
+            slow_reward,
+            -round_dpp_cost,
+            rtol=1e-6,
+            atol=1e-3,
+        ):
+            raise RuntimeError(
+                "round DPP cost/reward mismatch: "
+                f"slow_reward={slow_reward}, "
+                f"round_dpp_cost={round_dpp_cost}"
+            )
 
         components = {
             "is_round_boundary": True,
             "slow_reward": float(slow_reward),
 
             "round_fast_reward_sum": float(self.round_fast_reward_sum),
+            "round_fast_dpp_cost_sum": float(
+                self.round_fast_dpp_cost_sum
+            ),
+            "round_dpp_cost": round_dpp_cost,
             "round_quality_sum": float(self.round_quality_sum),
             "round_delivery_sum": float(self.round_delivery_sum),
             "round_battery_consume_sum": float(
