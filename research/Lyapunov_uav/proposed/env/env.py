@@ -230,6 +230,18 @@ class Env:
         mobility_speed_scale은 학습용 정적/약한 이동 ablation에만 사용하며,
         기본값 1.0에서는 30--60 km/h를 그대로 사용한다.
         """
+        if str(self.cfg.mobility_mode) == "fsmc":
+            expected_mps = (
+                float(self.cfg.move_prob)
+                * float(self.cfg.region_len)
+                / float(self.cfg.battery.slot_duration)
+            )
+            return np.full(
+                size,
+                expected_mps,
+                dtype=np.float32,
+            )
+
         low_kmh = float(self.cfg.speed_min_kmh)
         high_kmh = float(self.cfg.speed_max_kmh)
         sampled_kmh = self.rng.uniform(
@@ -254,25 +266,39 @@ class Env:
                 f"현재 값: {self.road_length_m}"
             )
 
-        self.user_position_m = self.rng.uniform(
-            low=0.0,
-            high=self.road_length_m,
-            size=self.num_user,
-        ).astype(np.float32)
+        if str(self.cfg.mobility_mode) == "fsmc":
+            self.user_region = self.rng.integers(
+                low=0,
+                high=self.num_rsu,
+                size=self.num_user,
+                dtype=np.int32,
+            )
+            self.user_position_m = (
+                (
+                    self.user_region.astype(np.float32)
+                    + 0.5
+                )
+                * float(self.cfg.region_len)
+            ).astype(np.float32)
+        else:
+            self.user_position_m = self.rng.uniform(
+                low=0.0,
+                high=self.road_length_m,
+                size=self.num_user,
+            ).astype(np.float32)
+            self.user_region = np.floor(
+                self.user_position_m
+                / float(self.cfg.region_len)
+            ).astype(np.int32)
+            self.user_region = np.clip(
+                self.user_region,
+                0,
+                self.num_rsu - 1,
+            ).astype(np.int32)
 
         self.user_speed_mps = self._sample_user_speed_mps(
             self.num_user
         )
-
-        self.user_region = np.floor(
-            self.user_position_m
-            / float(self.cfg.region_len)
-        ).astype(np.int32)
-        self.user_region = np.clip(
-            self.user_region,
-            0,
-            self.num_rsu - 1,
-        ).astype(np.int32)
     
     def _sample_local_distance(self, channel_cfg, size: tuple[int, ...]) -> np.ndarray:
         """
@@ -323,20 +349,21 @@ class Env:
         entered_mask: np.ndarray,
     ) -> None:
         """
-        road를 떠난 차량 index에 새 차량이 들어오면 이전 차량의
-        association을 승계하지 않도록 한다.
+        Slow action arrays must remain bitwise fixed for the complete round.
 
-        단순 region crossing은 이 함수를 호출하지 않으므로 scheduling은
-        round 끝까지 유지된다. 새 차량은 다음 round에서 다시 scheduling된다.
+        A replacement vehicle must not inherit the departed vehicle's
+        association. Mark it invalid in the effective service mask without
+        mutating the raw round-level decision phi_{un}(r). The next slow
+        decision resets validity at the following round boundary.
         """
         departed_users = np.flatnonzero(
             np.asarray(entered_mask, dtype=np.int32) > 0
         )
         if departed_users.size == 0:
             return
-
-        self.rsu_scheduling[:, departed_users] = 0
-        self.uav_scheduling[:, departed_users] = 0
+        self.round_user_association_valid[
+            departed_users
+        ] = 0
 
     def _update_user_mobility(self) -> Dict[str, np.ndarray]:
         """
@@ -479,7 +506,18 @@ class Env:
         region을 넘어가더라도 association을 제거하지 않으며, 실제 전송량은
         slot별 distance/channel capacity constraint가 결정한다.
         """
-        return self.rsu_scheduling.copy().astype(np.int32)
+        valid = np.asarray(
+            getattr(
+                self,
+                "round_user_association_valid",
+                np.ones(self.num_user, dtype=np.int32),
+            ),
+            dtype=np.int32,
+        )
+        return (
+            self.rsu_scheduling
+            * valid[None, :]
+        ).astype(np.int32)
 
     def _get_effective_uav_connection_matrix(self) -> np.ndarray:
         """
@@ -515,6 +553,17 @@ class Env:
             * self.uav_hiring[:, None]
             * residual_user_mask[None, :]
             * cache_match
+            * np.asarray(
+                getattr(
+                    self,
+                    "round_user_association_valid",
+                    np.ones(
+                        self.num_user,
+                        dtype=np.int32,
+                    ),
+                ),
+                dtype=np.int32,
+            )[None, :]
         )
 
         return effective_link.astype(np.int32)
@@ -659,6 +708,10 @@ class Env:
         self.uav_scheduling = np.zeros(
             (self.num_uav, self.num_user), dtype=np.int32
         )
+        self.round_user_association_valid = np.ones(
+            self.num_user,
+            dtype=np.int32,
+        )
 
         # content 초기화
         self.requested_content = self._sample_requested_content()
@@ -770,6 +823,10 @@ class Env:
             * self.uav_hiring[:, None]
             * uav_region_mask
         ).astype(np.int32)
+        self.round_user_association_valid = np.ones(
+            self.num_user,
+            dtype=np.int32,
+        )
 
         self._start_new_round()
 

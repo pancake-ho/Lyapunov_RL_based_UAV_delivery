@@ -18,21 +18,24 @@ class SlowDPPConfig:
 
     # Trusted checkpoint produced by this repository.
     fast_checkpoint: str = (
-        "fast/fast_final_static_cat5e4_seed2026/"
-        "checkpoints/fast_ppo_ep200.pt"
+        "joint/slow_dpp_fast_ppo_joint_seed2026/"
+        "checkpoints/joint_fast_ppo_final.pt"
     )
 
-    # A slow episode contains 10 one-hour rounds = 36,000 fast slots.
-    num_episodes: int = 100
+    # Frozen final evaluation: 10 one-hour rounds per episode.
+    num_episodes: int = 10
     rounds_per_episode: int = 10
-    move_prob: float = 0.0005
+    move_prob: float = 1e-4
 
     # Fixed algorithm: region-wise coordinate minimization. Each candidate
     # is evaluated by a complete T-slot rollout of the frozen fast PPO.
-    max_coordinate_sweeps: int = 20
-    forecast_scenarios: int = 1
+    max_coordinate_sweeps: int = 10
+    forecast_scenarios: int = 4
     forecast_seed_offset: int = 10_000_000
-    max_region_candidates: int = 4096
+    forecast_fast_deterministic: bool = True
+    max_exact_region_candidates: int = 8192
+    dpp_tie_atol: float = 1e-3
+    dpp_tie_rtol: float = 1e-9
 
     log_every_episodes: int = 1
 
@@ -46,7 +49,7 @@ class SlowDPPConfig:
             "rounds_per_episode",
             "max_coordinate_sweeps",
             "forecast_scenarios",
-            "max_region_candidates",
+            "max_exact_region_candidates",
             "log_every_episodes",
         ):
             if int(getattr(self, name)) <= 0:
@@ -57,6 +60,10 @@ class SlowDPPConfig:
 
         if int(self.forecast_seed_offset) < 0:
             raise ValueError("forecast_seed_offset must be nonnegative.")
+
+        for name in ("dpp_tie_atol", "dpp_tie_rtol"):
+            if float(getattr(self, name)) < 0.0:
+                raise ValueError(f"{name} must be nonnegative.")
 
         if not self.fast_checkpoint:
             raise ValueError("fast_checkpoint must not be empty.")

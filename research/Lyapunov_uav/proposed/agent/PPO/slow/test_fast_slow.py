@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, Dict
 
 import numpy as np
 
@@ -13,163 +15,369 @@ if str(PROPOSED_ROOT) not in sys.path:
 
 from config import EnvConfig  # noqa: E402
 from env.env import Env  # noqa: E402
-from agent.PPO.common import (  # noqa: E402
-    infer_fast_obs_dim,
-    infer_slow_obs_dim,
-    split_env_reset,
-    split_env_step,
+from agent.PPO.slow.slow_config import (  # noqa: E402
+    SlowDPPConfig,
 )
-from agent.PPO.fast.fast_agent import (  # noqa: E402
-    FastPPOAgent,
-    FastPPOConfig,
+from agent.PPO.slow.slow_dpp_controller import (  # noqa: E402
+    SlowDPPController,
 )
-from agent.PPO.slow.slow_agent import (  # noqa: E402
-    SlowPPOAgent,
-    SlowPPOConfig,
-)
+
+
+class ZeroFastAgent:
+    """Torch-free deterministic fast agent for the controller smoke test."""
+
+    def __init__(self, env_cfg: EnvConfig) -> None:
+        self.cfg = env_cfg
+
+    def select_action(
+        self,
+        _obs: Dict[str, Any],
+        deterministic: bool,
+        update_norm: bool,
+    ) -> Dict[str, Any]:
+        if not deterministic:
+            raise AssertionError(
+                "Forecast fast action must be deterministic."
+            )
+        if update_norm:
+            raise AssertionError(
+                "Forecast must not update the observation normalizer."
+            )
+
+        m = int(self.cfg.num_rsu)
+        n = int(self.cfg.num_user)
+        u = int(self.cfg.num_uav)
+        return {
+            "env_action": {
+                "rsu_chunks": np.zeros(
+                    (m, n),
+                    dtype=np.int32,
+                ),
+                "rsu_layers": np.zeros(
+                    (m, n),
+                    dtype=np.int32,
+                ),
+                "uav_chunks": np.zeros(
+                    (u, n),
+                    dtype=np.int32,
+                ),
+                "uav_layers": np.zeros(
+                    (u, n),
+                    dtype=np.int32,
+                ),
+                "uav_power": np.zeros(
+                    (u, n),
+                    dtype=np.float32,
+                ),
+                "playback": np.ones(
+                    n,
+                    dtype=np.float32,
+                ),
+            },
+            "active_action_dims": 0,
+            "active_action_ratio": 0.0,
+            "service_rate": 0.0,
+            "mean_requested_chunks": 0.0,
+            "action_saturation_ratio": 0.0,
+            **{
+                f"layer_{layer}_ratio": 0.0
+                for layer in range(
+                    1,
+                    int(self.cfg.layer) + 1,
+                )
+            },
+        }
+
+
+def _small_env_config() -> EnvConfig:
+    base = EnvConfig()
+    return replace(
+        base,
+        num_user=4,
+        num_rsu=2,
+        num_uav=2,
+        slow_T=2,
+        episode_slots=2,
+        mobility_mode="fsmc",
+        move_prob=0.0,
+        seed=2026,
+    )
+
+
+def _small_dpp_config() -> SlowDPPConfig:
+    return SlowDPPConfig(
+        device="cpu",
+        num_episodes=1,
+        rounds_per_episode=1,
+        forecast_scenarios=1,
+        max_exact_region_candidates=128,
+        max_coordinate_sweeps=4,
+    )
+
+
+def _prepare_known_state(env: Env) -> None:
+    env.user_region = np.asarray(
+        [0, 0, 1, 1],
+        dtype=np.int32,
+    )
+    env.requested_content = np.asarray(
+        [0, 1, 0, 1],
+        dtype=np.int32,
+    )
+    env.uav_cached_content = np.asarray(
+        [0, 0],
+        dtype=np.int32,
+    )
+
+
+def _assert_feasible(
+    env: Env,
+    action: Dict[str, np.ndarray],
+) -> None:
+    rsu = np.asarray(
+        action["rsu_scheduling"],
+        dtype=np.int32,
+    )
+    hiring = np.asarray(
+        action["uav_hiring"],
+        dtype=np.int32,
+    )
+    uav = np.asarray(
+        action["uav_scheduling"],
+        dtype=np.int32,
+    )
+
+    provider_count = rsu.sum(axis=0) + uav.sum(axis=0)
+    if np.any(provider_count > 1):
+        raise AssertionError(
+            "RSU/UAV exclusivity was violated."
+        )
+    if np.any(uav > hiring[:, None]):
+        raise AssertionError(
+            "UAV scheduling without employment was selected."
+        )
+
+    region = np.asarray(env.user_region, dtype=np.int32)
+    requested = np.asarray(
+        env.requested_content,
+        dtype=np.int32,
+    )
+    cached = np.asarray(
+        env.uav_cached_content,
+        dtype=np.int32,
+    )
+    for user_idx in range(int(env.num_user)):
+        if rsu[:, user_idx].sum() > 0:
+            provider = int(
+                np.flatnonzero(rsu[:, user_idx])[0]
+            )
+            if provider != int(region[user_idx]):
+                raise AssertionError(
+                    "Cross-region RSU link was selected."
+                )
+        if uav[:, user_idx].sum() > 0:
+            provider = int(
+                np.flatnonzero(uav[:, user_idx])[0]
+            )
+            if provider != int(region[user_idx]):
+                raise AssertionError(
+                    "Cross-region UAV link was selected."
+                )
+            if int(cached[provider]) != int(
+                requested[user_idx]
+            ):
+                raise AssertionError(
+                    "Cache-incompatible UAV link was selected."
+                )
 
 
 def run_contract_smoke_test() -> None:
-    """
-    Exercise one complete high-level transition with a short test horizon.
-
-    The production scenario keeps slow_T=3600.  This smoke test uses slow_T=8
-    only to test the boundary contract quickly; it does not change or validate
-    the research timescale itself.
-    """
-    env_cfg = replace(
-        EnvConfig(),
-        slow_T=8,
-        episode_slots=8,
-        move_prob=0.0,
-        seed=9876,
-    )
+    env_cfg = _small_env_config()
+    dpp_cfg = _small_dpp_config()
     env = Env(env_cfg)
-    fast_obs, _ = split_env_reset(env.reset())
-    slow_obs = env.get_slow_obs()
+    env.reset()
+    _prepare_known_state(env)
 
-    slow_agent = SlowPPOAgent(
+    controller = SlowDPPController(
         env_cfg=env_cfg,
-        obs_dim=infer_slow_obs_dim(slow_obs),
-        ppo_cfg=SlowPPOConfig(
-            rollout_rounds=8,
-            batch_size=4,
-            normalize_obs=False,
-            device="cpu",
-            rsu_init_logit=0.0,
-            hiring_init_logit=0.0,
-            uav_init_logit=0.0,
-        ),
+        dpp_cfg=dpp_cfg,
     )
-    fast_agent = FastPPOAgent(
-        env_cfg=env_cfg,
-        obs_dim=infer_fast_obs_dim(fast_obs),
-        ppo_cfg=FastPPOConfig(
-            rollout_steps=8,
-            batch_size=4,
-            normalize_obs=False,
-            device="cpu",
-        ),
+    fast_agent = ZeroFastAgent(env_cfg)
+
+    base = controller._initial_rsu_first_action(env)
+    region_zero_candidates = list(
+        controller._iter_region_candidates(
+            env=env,
+            base_action=base,
+            region_idx=0,
+        )
     )
-
-    selected_slow = slow_agent.select_action(
-        slow_obs,
-        context=env,
-        deterministic=True,
-        update_norm=False,
+    expected_count = controller._region_assignment_count(
+        env,
+        0,
     )
-    if int(selected_slow["action_info"]["projection_count"]) != 0:
-        raise AssertionError("slow action required post-sampling projection.")
+    if len(region_zero_candidates) != expected_count:
+        raise AssertionError(
+            "Exact region candidate enumeration is incomplete."
+        )
+    if expected_count != 10:
+        raise AssertionError(
+            f"Unexpected known-state candidate count: {expected_count}"
+        )
 
-    binary = np.asarray(
-        selected_slow["binary_action"], dtype=np.float32
+    has_idle_hire_candidate = any(
+        int(candidate["uav_hiring"][0]) == 1
+        and int(
+            candidate["uav_scheduling"][0].sum()
+        )
+        == 0
+        for candidate in region_zero_candidates
     )
-    mask = np.asarray(
-        selected_slow["action_mask"], dtype=np.float32
+    if not has_idle_hire_candidate:
+        raise AssertionError(
+            "mu was derived from phi instead of being jointly enumerated."
+        )
+
+    selected = controller.select_action(
+        env=env,
+        fast_agent=fast_agent,
     )
-    if np.any(binary * (1.0 - mask) != 0.0):
-        raise AssertionError("slow action has non-zero bits outside its mask.")
+    action = selected["env_action"]
+    _assert_feasible(env, action)
 
-    env_action = selected_slow["env_action"]
-    rsu = np.asarray(env_action["rsu_scheduling"], dtype=np.int32)
-    hiring = np.asarray(env_action["uav_hiring"], dtype=np.int32)
-    uav = np.asarray(env_action["uav_scheduling"], dtype=np.int32)
-    if np.any(uav > hiring[:, None]):
-        raise AssertionError("phi_un=1 while mu_u=0.")
-    if np.any(rsu.sum(axis=0) + uav.sum(axis=0) > 1):
-        raise AssertionError("per-user slow scheduling is not exclusive.")
+    predicted_cost = float(
+        selected["predicted_round_dpp_cost"]
+    )
+    if not math.isfinite(predicted_cost):
+        raise AssertionError(
+            "Selected forecast DPP cost is not finite."
+        )
+    if int(action["uav_hiring"].sum()) != 0:
+        raise AssertionError(
+            "Zero-service smoke test should not hire a UAV."
+        )
+    if int(action["rsu_scheduling"].sum()) != int(
+        env_cfg.num_user
+    ):
+        raise AssertionError(
+            "Exact DPP ties must follow RSU priority."
+        )
 
-    env.apply_slow_action(env_action)
-    fixed_rsu = env.rsu_scheduling.copy()
-    fixed_hiring = env.uav_hiring.copy()
-    fixed_uav = env.uav_scheduling.copy()
+    applied = env.apply_slow_action(action)
+    fixed_rsu = applied.rsu_scheduling.copy()
+    fixed_hiring = applied.uav_hiring.copy()
+    fixed_uav = applied.uav_scheduling.copy()
 
-    boundary_info = None
+    boundary_info: Dict[str, Any] | None = None
     for slot in range(int(env_cfg.slow_T)):
         selected_fast = fast_agent.select_action(
-            fast_obs,
+            env.get_fast_obs(),
             deterministic=True,
             update_norm=False,
         )
-        fast_obs, _, terminated, truncated, info = split_env_step(
-            env.step(selected_fast["env_action"])
+        _, _, terminated, truncated, info = env.step(
+            selected_fast["env_action"]
         )
 
+        if terminated:
+            raise AssertionError(
+                "Environment terminated unexpectedly."
+            )
         if slot + 1 < int(env_cfg.slow_T):
-            if not np.array_equal(env.rsu_scheduling, fixed_rsu):
-                raise AssertionError("RSU slow action changed within a round.")
-            if not np.array_equal(env.uav_hiring, fixed_hiring):
+            if not np.array_equal(
+                env.rsu_scheduling,
+                fixed_rsu,
+            ):
                 raise AssertionError(
-                    "UAV hiring action changed within a round."
+                    "RSU slow action changed inside a round."
                 )
-            if not np.array_equal(env.uav_scheduling, fixed_uav):
-                raise AssertionError("UAV slow action changed within a round.")
+            if not np.array_equal(
+                env.uav_hiring,
+                fixed_hiring,
+            ):
+                raise AssertionError(
+                    "UAV employment changed inside a round."
+                )
+            if not np.array_equal(
+                env.uav_scheduling,
+                fixed_uav,
+            ):
+                raise AssertionError(
+                    "UAV scheduling changed inside a round."
+                )
 
         if bool(info.get("is_round_boundary", False)):
-            boundary_info = info
-        if terminated:
-            raise AssertionError("unexpected termination in smoke test.")
-        if truncated and slot + 1 < int(env_cfg.slow_T):
-            raise AssertionError("episode truncated before round boundary.")
+            boundary_info = dict(info)
+            break
+        if truncated:
+            raise AssertionError(
+                "Episode truncated before the round boundary."
+            )
 
     if boundary_info is None:
-        raise AssertionError("no slow round boundary was produced.")
-
-    reward_components = boundary_info.get("reward_components", {})
-    slow_components = reward_components.get(
-        "slow_reward_components", {}
-    )
-    if not bool(slow_components.get("is_round_boundary", False)):
-        raise AssertionError("slow reward missing at round boundary.")
-
-    observed = float(reward_components.get("slow_reward", np.nan))
-    expected = float(slow_components["hire_cost"]) + float(
-        slow_components["round_fast_reward_sum"]
-    )
-    tolerance = 1e-3 + 1e-6 * abs(expected)
-    if not np.isfinite(observed) or abs(observed - expected) > tolerance:
         raise AssertionError(
-            "slow reward identity failed: "
-            f"observed={observed}, expected={expected}, "
-            f"tolerance={tolerance}"
+            "No complete slow round was produced."
         )
 
-    required_info = {
-        "transmitted_rsu_per_user",
-        "transmitted_uav_per_user",
-        "battery_step_info",
-        "prev_connection_state",
-        "next_connection_state",
-    }
-    missing = sorted(required_info - set(boundary_info))
-    if missing:
+    reward_components = dict(
+        boundary_info.get("reward_components", {})
+    )
+    slow_reward = float(
+        reward_components.get("slow_reward", np.nan)
+    )
+    slow_components = dict(
+        reward_components.get(
+            "slow_reward_components",
+            {},
+        )
+    )
+    round_dpp_cost = float(
+        slow_components.get("round_dpp_cost", np.nan)
+    )
+    if not bool(
+        slow_components.get("is_round_boundary", False)
+    ):
         raise AssertionError(
-            f"boundary info is missing required metrics: {missing}"
+            "Slow reward was not emitted at the boundary."
+        )
+    if not np.isclose(
+        slow_reward,
+        -round_dpp_cost,
+        rtol=1e-6,
+        atol=1e-3,
+    ):
+        raise AssertionError(
+            "R_H(r)=-J^S(r) identity failed."
+        )
+
+    invalid = {
+        "rsu_scheduling": np.zeros(
+            (2, 4),
+            dtype=np.int32,
+        ),
+        "uav_hiring": np.asarray(
+            [1, 0],
+            dtype=np.int32,
+        ),
+        "uav_scheduling": np.zeros(
+            (2, 4),
+            dtype=np.int32,
+        ),
+    }
+    invalid["uav_scheduling"][0, 1] = 1
+    try:
+        controller._validate_action(env, invalid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            "Cache-incompatible UAV action was accepted."
         )
 
     print(
-        "[PASS] fast/slow contract smoke test: "
-        "mask, exclusivity, fixed round action, and reward identity"
+        "[PASS] slow DPP contract: exact joint candidate enumeration, "
+        "explicit employment, region/cache/exclusivity feasibility, "
+        "fixed round action, forecast boundary, and R_H=-J^S"
     )
 
 

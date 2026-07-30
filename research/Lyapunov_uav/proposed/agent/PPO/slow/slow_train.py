@@ -34,7 +34,7 @@ from agent.PPO.slow.slow_config import (  # noqa: E402
 from agent.PPO.slow.slow_dpp_controller import (  # noqa: E402
     SlowDPPController,
 )
-from agent.PPO.slow.slow_metrics import HRLMetrics  # noqa: E402
+from agent.PPO.slow.slow_metrics import SlowDPPMetrics  # noqa: E402
 
 
 def _resolve_path(path: str | Path) -> Path:
@@ -145,9 +145,9 @@ def _build_frozen_fast_agent(
 def _run_fast_round(
     env: Env,
     fast_agent: FastPPOAgent,
-) -> Tuple[HRLMetrics, Dict[str, Any], bool, bool]:
+) -> Tuple[SlowDPPMetrics, Dict[str, Any], bool, bool]:
     fast_obs = env.get_fast_obs()
-    metrics = HRLMetrics(
+    metrics = SlowDPPMetrics(
         fast_layer_ratios=np.zeros(int(env.cfg.layer), dtype=np.float64)
     )
     boundary_info: Optional[Dict[str, Any]] = None
@@ -246,7 +246,7 @@ def run(run_cfg: SlowDPPConfig) -> None:
     episode_logger = ScalarLogger(run_dir / "episode_metrics.csv")
     round_logger = ScalarLogger(run_dir / "round_metrics.csv")
 
-    aggregate = HRLMetrics(
+    aggregate = SlowDPPMetrics(
         fast_layer_ratios=np.zeros(int(env_cfg.layer), dtype=np.float64)
     )
     global_round = 0
@@ -276,7 +276,7 @@ def run(run_cfg: SlowDPPConfig) -> None:
 
     for episode in range(1, int(run_cfg.num_episodes) + 1):
         split_env_reset(env.reset())
-        episode_metrics = HRLMetrics(
+        episode_metrics = SlowDPPMetrics(
             fast_layer_ratios=np.zeros(
                 int(env_cfg.layer),
                 dtype=np.float64,
@@ -311,6 +311,8 @@ def run(run_cfg: SlowDPPConfig) -> None:
                 slow_reward=slow_reward,
                 slow_components=slow_components,
                 slow_selected=selected,
+                predicted_cost=predicted_round_dpp_cost,
+                realized_cost=realized_round_dpp_cost,
             )
             episode_metrics.merge(round_metrics)
             aggregate.merge(round_metrics)
@@ -326,6 +328,11 @@ def run(run_cfg: SlowDPPConfig) -> None:
                     "global_slot": int(global_slot),
                     "predicted_round_dpp_cost": (
                         predicted_round_dpp_cost
+                    ),
+                    "predicted_round_dpp_cost_std": float(
+                        selected[
+                            "predicted_round_dpp_cost_std"
+                        ]
                     ),
                     "realized_round_dpp_cost": (
                         realized_round_dpp_cost

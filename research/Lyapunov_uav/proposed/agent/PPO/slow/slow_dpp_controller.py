@@ -6,6 +6,7 @@ from itertools import product
 from typing import Any, Dict, Iterator, Mapping, Tuple
 
 import numpy as np
+import torch
 
 from agent.PPO.common import split_env_step
 from agent.PPO.fast.fast_agent import FastPPOAgent
@@ -71,7 +72,7 @@ class SlowDPPController:
         return b"|".join(
             np.asarray(action[name], dtype=np.int8).tobytes()
             for name in (
-                "rsu_scehduling", "uav_hiring", "uav_scheduling",
+                "rsu_scheduling", "uav_hiring", "uav_scheduling",
             )
         )
     
@@ -80,7 +81,23 @@ class SlowDPPController:
         hiring = np.asarray(action["uav_hiring"], dtype=np.int32)
         uav = np.asarray(action["uav_scheduling"], dtype=np.int32)
 
-        self._is_binary("rsu_sceduling", rsu)
+        if rsu.shape != (self.num_rsu, self.num_user):
+            raise ValueError(
+                "rsu_scheduling has an invalid shape: "
+                f"{rsu.shape}"
+            )
+        if hiring.shape != (self.num_uav,):
+            raise ValueError(
+                "uav_hiring has an invalid shape: "
+                f"{hiring.shape}"
+            )
+        if uav.shape != (self.num_uav, self.num_user):
+            raise ValueError(
+                "uav_scheduling has an invalid shape: "
+                f"{uav.shape}"
+            )
+
+        self._is_binary("rsu_scheduling", rsu)
         self._is_binary("uav_hiring", hiring)
         self._is_binary("uav_scheduling", uav)
 
@@ -101,6 +118,13 @@ class SlowDPPController:
             raise ValueError("UAV slow action violates the cache constraint.")
         if np.any(uav > hiring[:, None]):
             raise ValueError("UAV scheduling requires uav_hiring=1.")
+        if np.any(
+            uav.sum(axis=1)
+            > int(self.env_cfg.uav_user_cap)
+        ):
+            raise ValueError(
+                "UAV slow candidates exceed uav_user_cap."
+            )
         
         provider_count = rsu.sum(axis=0) + uav.sum(axis=0)
         if np.any(provider_count > 1):
@@ -108,14 +132,7 @@ class SlowDPPController:
                 "A user cannot be an RSU and UAV slow candidate together."
             )
 
-        has_uav_candidate = (uav.sum(axis=1) > 0).astype(np.int32)
-        if not np.array_equal(hiring, has_uav_candidate):
-            raise ValueError(
-                "uav_hiring must be 1 iff its region has at least one "
-                "UAV-user candidate."
-            )
-    
-    def _init_rsu_first_action(self, env: Env) -> SlowEnvAction:
+    def _initial_rsu_first_action(self, env: Env) -> SlowEnvAction:
         """
         RSU (scheduling) action 초기화 수행
         """
@@ -134,13 +151,35 @@ class SlowDPPController:
         cached = np.asarray(env.uav_cached_content, dtype=np.int32)
         users = np.flatnonzero(region == int(region_idx))
 
-        count = 1
-        for user_idx in users:
-            if int(requested[user_idx]) == int(cached[region_idx]):
-                count *= 3
-            else:
-                count *= 2
-        return count
+        compatible = int(
+            np.sum(requested[users] == cached[region_idx])
+        )
+        incompatible = int(users.size) - compatible
+        cap = min(
+            compatible,
+            int(self.env_cfg.uav_user_cap),
+        )
+
+        assignment_count = 0
+        for uav_count in range(cap + 1):
+            assignment_count += (
+                math.comb(compatible, uav_count)
+                * (
+                    2
+                    ** (
+                        compatible
+                        - uav_count
+                        + incompatible
+                    )
+                )
+            )
+
+        # When no user is assigned to the UAV, both mu=0 and mu=1 are
+        # feasible. The assignment_count above contains that case once.
+        no_uav_assignments = 2 ** int(users.size)
+        return int(
+            assignment_count + no_uav_assignments
+        )
 
     def _iter_region_candidates(self, env: Env, base_action: Mapping[str, np.ndarray], region_idx: int) -> Iterator[SlowEnvAction]:
         region = np.asarray(env.user_region, dtype=np.int32)
@@ -149,13 +188,24 @@ class SlowDPPController:
         users = np.flatnonzero(region == int(region_idx))
 
         candidate_count = self._region_assignment_count(env, region_idx)
-        if candidate_count > int(self.dpp_cfg.max_region_candidates):
+        candidate_limit = int(
+            getattr(
+                self.dpp_cfg,
+                "max_exact_region_candidates",
+                getattr(
+                    self.dpp_cfg,
+                    "max_region_candidates",
+                    0,
+                ),
+            )
+        )
+        if candidate_count > candidate_limit:
             raise RuntimeError(
                 "The exact local assignment set exceeds the configured "
                 "safety limit: "
                 f"region={region_idx}, users={users.size}, "
                 f"candidates={candidate_count}, "
-                f"limit={self.dpp_cfg.max_region_candidates}."
+                f"limit={candidate_limit}."
             )
 
         choices = []
@@ -168,24 +218,42 @@ class SlowDPPController:
         assignments = product(*choices) if choices else [tuple()]
 
         for labels in assignments:
-            action = self._copy_action(base_action)
-            action["rsu_scheduling"][region_idx, :] = 0
-            action["uav_scheduling"][region_idx, :] = 0
-            action["uav_hiring"][region_idx] = 0
+            uav_count = sum(
+                int(label) == self.UAV
+                for label in labels
+            )
+            if uav_count > int(self.env_cfg.uav_user_cap):
+                continue
 
-            for user_idx, label in zip(users, labels):
-                if int(label) == self.RSU:
-                    action["rsu_scheduling"][region_idx, user_idx] = 1
-                elif int(label) == self.UAV:
-                    action["uav_scheduling"][region_idx, user_idx] = 1
-                elif int(label) != self.UNSCHEDULED:
-                    raise RuntimeError(f"Unknown provider label: {label}")
+            # phi=1 requires mu=1. With phi=0, mu remains an independent
+            # feasible decision and both employment values are enumerated.
+            hiring_choices = (1,) if uav_count > 0 else (0, 1)
+            for hiring_value in hiring_choices:
+                action = self._copy_action(base_action)
+                action["rsu_scheduling"][region_idx, :] = 0
+                action["uav_scheduling"][region_idx, :] = 0
+                action["uav_hiring"][region_idx] = int(
+                    hiring_value
+                )
 
-            if np.any(action["uav_scheduling"][region_idx, :] == 1):
-                action["uav_hiring"][region_idx] = 1
+                for user_idx, label in zip(users, labels):
+                    if int(label) == self.RSU:
+                        action["rsu_scheduling"][
+                            region_idx,
+                            user_idx,
+                        ] = 1
+                    elif int(label) == self.UAV:
+                        action["uav_scheduling"][
+                            region_idx,
+                            user_idx,
+                        ] = 1
+                    elif int(label) != self.UNSCHEDULED:
+                        raise RuntimeError(
+                            f"Unknown provider label: {label}"
+                        )
 
-            self._validate_action(env, action)
-            yield action
+                self._validate_action(env, action)
+                yield action
     
     def _forecast_seed(self, env: Env, scenario_idx: int) -> int:
         # Forecast randomness is independent from env.rng, so candidate
@@ -251,30 +319,81 @@ class SlowDPPController:
         boundary_info: Dict[str, Any] | None = None
         outage_slots = 0
 
-        for _ in range(int(trial.slow_T)):
-            selected = fast_agent.select_action(
-                fast_obs,
-                deterministic=True,
-                update_norm=False,
+        deterministic = bool(
+            getattr(
+                self.dpp_cfg,
+                "forecast_fast_deterministic",
+                True,
             )
-            next_obs, _, terminated, truncated, info = split_env_step(
-                trial.step(selected["env_action"])
-            )
-            outage_slots += int(
-                np.asarray(
-                    info.get("outage", []),
-                    dtype=np.int32,
-                ).sum()
-            )
-            fast_obs = next_obs
-
-            if bool(info.get("is_round_boundary", False)):
-                boundary_info = info
-                break
-            if terminated or truncated:
-                raise RuntimeError(
-                    "Forecast episode ended before a complete slow round."
+        )
+        device = getattr(
+            fast_agent,
+            "device",
+            torch.device("cpu"),
+        )
+        cuda_devices = []
+        if (
+            torch.cuda.is_available()
+            and getattr(device, "type", "cpu") == "cuda"
+        ):
+            cuda_devices = [
+                (
+                    torch.cuda.current_device()
+                    if device.index is None
+                    else int(device.index)
                 )
+            ]
+
+        forecast_seed = self._forecast_seed(
+            env,
+            scenario_idx,
+        )
+        # A scenario uses common environment and Fast-policy randomness for
+        # every candidate. fork_rng also prevents forecast rollouts from
+        # consuming the actual joint-training RNG stream.
+        with torch.random.fork_rng(
+            devices=cuda_devices,
+            enabled=True,
+        ):
+            torch.manual_seed(forecast_seed)
+            if cuda_devices:
+                torch.cuda.manual_seed_all(
+                    forecast_seed
+                )
+
+            for _ in range(int(trial.slow_T)):
+                selected = fast_agent.select_action(
+                    fast_obs,
+                    deterministic=deterministic,
+                    update_norm=False,
+                )
+                (
+                    next_obs,
+                    _,
+                    terminated,
+                    truncated,
+                    info,
+                ) = split_env_step(
+                    trial.step(selected["env_action"])
+                )
+                outage_slots += int(
+                    np.asarray(
+                        info.get("outage", []),
+                        dtype=np.int32,
+                    ).sum()
+                )
+                fast_obs = next_obs
+
+                if bool(
+                    info.get("is_round_boundary", False)
+                ):
+                    boundary_info = info
+                    break
+                if terminated or truncated:
+                    raise RuntimeError(
+                        "Forecast episode ended before a complete "
+                        "slow round."
+                    )
 
         if boundary_info is None:
             raise RuntimeError(
@@ -332,14 +451,17 @@ class SlowDPPController:
 
         if any(not math.isfinite(value) for value in scenario_costs):
             mean_cost = math.inf
+            std_cost = math.inf
         else:
             mean_cost = float(np.mean(scenario_costs))
+            std_cost = float(np.std(scenario_costs))
             self._finite_candidate_requests += 1
 
         result = (
             float(mean_cost),
             {
                 "mean_round_dpp_cost": float(mean_cost),
+                "std_round_dpp_cost": float(std_cost),
                 "scenario_costs": tuple(float(x) for x in scenario_costs),
                 "scenarios": scenario_info,
             },
@@ -349,22 +471,47 @@ class SlowDPPController:
 
     def _tie_break_key(
         self,
-        score: float,
         action: Mapping[str, np.ndarray],
     ) -> Tuple[Any, ...]:
         rsu = np.asarray(action["rsu_scheduling"], dtype=np.int32)
         hiring = np.asarray(action["uav_hiring"], dtype=np.int32)
         uav = np.asarray(action["uav_scheduling"], dtype=np.int32)
 
-        # DPP cost is primary. Exact ties follow the system priority:
+        # Near-equal DPP costs follow a deterministic structural priority:
         # fewer hired UAVs, more RSU candidates, fewer UAV candidates.
         return (
-            float(score),
             int(hiring.sum()),
             -int(rsu.sum()),
             int(uav.sum()),
             self._action_key(action),
         )
+
+    def _candidate_is_better(
+        self,
+        candidate_score: float,
+        candidate: Mapping[str, np.ndarray],
+        incumbent_score: float,
+        incumbent: Mapping[str, np.ndarray],
+    ) -> bool:
+        if not math.isfinite(candidate_score):
+            return False
+        if not math.isfinite(incumbent_score):
+            return True
+
+        atol = float(getattr(self.dpp_cfg, "dpp_tie_atol", 1e-3))
+        rtol = float(getattr(self.dpp_cfg, "dpp_tie_rtol", 1e-9))
+        tolerance = atol + rtol * max(
+            abs(float(candidate_score)),
+            abs(float(incumbent_score)),
+        )
+
+        if float(candidate_score) < float(incumbent_score) - tolerance:
+            return True
+        if abs(float(candidate_score) - float(incumbent_score)) <= tolerance:
+            return self._tie_break_key(candidate) < self._tie_break_key(
+                incumbent
+            )
+        return False
 
     @staticmethod
     def _same_action(
@@ -385,6 +532,7 @@ class SlowDPPController:
         env: Env,
         action: Mapping[str, np.ndarray],
         score: float,
+        score_std: float,
         sweeps_completed: int,
     ) -> Dict[str, Any]:
         rsu = np.asarray(action["rsu_scheduling"], dtype=np.int32)
@@ -398,6 +546,7 @@ class SlowDPPController:
         return {
             "controller": "round_dpp_coordinate_descent",
             "predicted_round_dpp_cost": float(score),
+            "predicted_round_dpp_cost_std": float(score_std),
             "coordinate_sweeps_completed": int(sweeps_completed),
             "coordinate_converged": 1,
             "candidate_requests": int(self._candidate_requests),
@@ -451,7 +600,6 @@ class SlowDPPController:
             for region_idx in range(self.num_rsu):
                 best_action = current
                 best_score = current_score
-                best_key = self._tie_break_key(best_score, best_action)
 
                 for candidate in self._iter_region_candidates(
                     env=env,
@@ -463,11 +611,14 @@ class SlowDPPController:
                         fast_agent=fast_agent,
                         action=candidate,
                     )
-                    candidate_key = self._tie_break_key(score, candidate)
-                    if candidate_key < best_key:
+                    if self._candidate_is_better(
+                        candidate_score=score,
+                        candidate=candidate,
+                        incumbent_score=best_score,
+                        incumbent=best_action,
+                    ):
                         best_action = candidate
                         best_score = score
-                        best_key = candidate_key
 
                 if not self._same_action(current, best_action):
                     changed_in_sweep = True
@@ -489,10 +640,19 @@ class SlowDPPController:
         if not math.isfinite(current_score):
             raise RuntimeError("Selected slow DPP cost is not finite.")
 
+        _, current_score_info = self._score_action(
+            env=env,
+            fast_agent=fast_agent,
+            action=current,
+        )
+        current_score_std = float(
+            current_score_info["std_round_dpp_cost"]
+        )
         action_info = self._build_action_info(
             env=env,
             action=current,
             score=current_score,
+            score_std=current_score_std,
             sweeps_completed=sweeps_completed,
         )
 
@@ -500,4 +660,5 @@ class SlowDPPController:
             "env_action": self._copy_action(current),
             "action_info": action_info,
             "predicted_round_dpp_cost": float(current_score),
+            "predicted_round_dpp_cost_std": float(current_score_std),
         }

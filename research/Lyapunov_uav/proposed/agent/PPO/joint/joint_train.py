@@ -38,7 +38,7 @@ from agent.PPO.fast.fast_agent import (  # noqa: E402
 from agent.PPO.slow.slow_dpp_controller import (  # noqa: E402
     SlowDPPController,
 )
-from agent.PPO.slow.slow_joint_config import (  # noqa: E402
+from agent.PPO.joint.joint_config import (  # noqa: E402
     SlowJointTrainConfig,
     get_slow_joint_train_config,
 )
@@ -127,10 +127,14 @@ def _make_env_config(
     checkpoint_extra: Mapping[str, Any],
 ) -> EnvConfig:
     """
-    Reconstruct the Fast-pretraining environment.
+    Reconstruct compatible system/channel state, then apply the final
+    formulation's explicit timescale, mobility, hiring-cost, and battery-round
+    overrides.
 
-    Only seed and episode horizon are changed. slow_T, mobility, channel,
-    battery, queue, and reward coefficients remain checkpoint-identical.
+    The source Fast policy was pretrained with slow_T=2 and continuous
+    mobility. That metadata is checked rather than silently treated as the
+    final joint environment. A joint-resume checkpoint must already contain
+    the final environment.
     """
     saved = checkpoint_extra.get("env_config")
     if not isinstance(saved, Mapping):
@@ -148,11 +152,15 @@ def _make_env_config(
                 nested,
             )
 
-    battery = values.get("battery")
-    if isinstance(battery, Mapping):
-        values["battery"] = _filtered_dataclass(
+    battery_value = values.get("battery")
+    if isinstance(battery_value, Mapping):
+        battery_value = _filtered_dataclass(
             BatteryConfig,
-            battery,
+            battery_value,
+        )
+    if not isinstance(battery_value, BatteryConfig):
+        raise RuntimeError(
+            "Checkpoint env_config has no valid battery metadata."
         )
 
     allowed = {field.name for field in fields(EnvConfig)}
@@ -168,9 +176,73 @@ def _make_env_config(
         raise ValueError(
             "Checkpoint env_config has an invalid slow_T."
         )
-    values["episode_slots"] = (
-        saved_slow_t
-        * int(run_cfg.rounds_per_episode)
+    saved_mobility_mode = str(
+        values.get("mobility_mode", "")
+    ).lower()
+    is_joint_resume = (
+        checkpoint_extra.get("trainer_kind")
+        == JOINT_TRAINER_KIND
+    )
+    if is_joint_resume:
+        if saved_slow_t != int(run_cfg.final_slow_T):
+            raise RuntimeError(
+                "Joint resume slow_T mismatch: "
+                f"checkpoint={saved_slow_t}, "
+                f"configured={run_cfg.final_slow_T}"
+            )
+        if saved_mobility_mode != str(
+            run_cfg.final_mobility_mode
+        ):
+            raise RuntimeError(
+                "Joint resume mobility-mode mismatch: "
+                f"checkpoint={saved_mobility_mode!r}, "
+                f"configured={run_cfg.final_mobility_mode!r}"
+            )
+    else:
+        if saved_slow_t != int(
+            run_cfg.expected_source_slow_T
+        ):
+            raise RuntimeError(
+                "Unexpected Fast-only source slow_T: "
+                f"checkpoint={saved_slow_t}, "
+                f"expected={run_cfg.expected_source_slow_T}"
+            )
+        if saved_mobility_mode != str(
+            run_cfg.expected_source_mobility_mode
+        ):
+            raise RuntimeError(
+                "Unexpected Fast-only source mobility mode: "
+                f"checkpoint={saved_mobility_mode!r}, "
+                "expected="
+                f"{run_cfg.expected_source_mobility_mode!r}"
+            )
+
+    battery_values = {
+        item.name: getattr(battery_value, item.name)
+        for item in fields(BatteryConfig)
+    }
+    battery_values["target_service_slots_per_round"] = int(
+        run_cfg.final_target_service_slots_per_round
+    )
+    values["battery"] = BatteryConfig(**battery_values)
+
+    values.update(
+        {
+            "slow_T": int(run_cfg.final_slow_T),
+            "episode_slots": (
+                int(run_cfg.final_slow_T)
+                * int(run_cfg.rounds_per_episode)
+            ),
+            "mobility_mode": str(
+                run_cfg.final_mobility_mode
+            ),
+            "move_prob": float(
+                run_cfg.final_move_prob
+            ),
+            "uav_hiring_cost": float(
+                run_cfg.final_uav_hiring_cost
+            ),
+        }
     )
 
     env_cfg = EnvConfig(**values)
@@ -200,6 +272,15 @@ def _build_fast_agent(
             extra.get("ppo_config", {}),
         )
     )
+    policy_type = str(extra.get("policy_type", ""))
+    if policy_type not in (
+        "",
+        "conditional_mixed_categorical_gaussian_v1",
+    ):
+        raise ValueError(
+            "Joint training requires the mixed categorical/Gaussian Fast "
+            f"policy; checkpoint policy_type={policy_type!r}."
+        )
 
     allowed = {field.name for field in fields(FastPPOConfig)}
     config_values = {
@@ -207,7 +288,32 @@ def _build_fast_agent(
         for key, value in saved_config.items()
         if key in allowed
     }
-    config_values["device"] = str(run_cfg.device)
+    config_values.update(
+        {
+            "device": str(run_cfg.device),
+            "rollout_steps": int(
+                run_cfg.fast_rollout_steps
+            ),
+            "batch_size": int(
+                run_cfg.fast_batch_size
+            ),
+            "update_epochs": int(
+                run_cfg.fast_update_epochs
+            ),
+            "lr": float(run_cfg.fast_lr),
+            "clip_coef": float(
+                run_cfg.fast_clip_coef
+            ),
+            "target_kl": (
+                None
+                if run_cfg.fast_target_kl is None
+                else float(run_cfg.fast_target_kl)
+            ),
+            "max_grad_norm": float(
+                run_cfg.fast_max_grad_norm
+            ),
+        }
+    )
     config_values.setdefault(
         "hidden_dims",
         tuple(
@@ -259,10 +365,10 @@ def _build_fast_agent(
             "A normalized Fast policy cannot be continued safely."
         )
 
-    if int(agent.ppo_cfg.rollout_steps) % int(env_cfg.slow_T) != 0:
+    if int(agent.ppo_cfg.rollout_steps) != int(env_cfg.slow_T):
         raise ValueError(
-            "PPO rollout_steps must be divisible by slow_T so every "
-            "Fast update occurs at a completed slow-round boundary: "
+            "PPO rollout_steps must equal slow_T so every Fast update uses "
+            "exactly one completed slow round: "
             f"rollout_steps={agent.ppo_cfg.rollout_steps}, "
             f"slow_T={env_cfg.slow_T}"
         )

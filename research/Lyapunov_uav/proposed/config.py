@@ -107,7 +107,7 @@ class BatteryConfig:
 
     # time slot
     slot_duration: float = 1.0
-    target_service_slots_per_round: int = 2
+    target_service_slots_per_round: int = 3600
 
     # SoC conversion term
     # None으로 설정되면, SoC 단위 사용 X
@@ -167,9 +167,8 @@ class EnvConfig:
     uav_user_cap: int = 2
     
     # IoTJ reference: 0.05 s/slot, 25 slots/round = 1.25 s/round.
-    # 현재 연구는 1 s/slot을 유지하므로, two-timescale 분리를 보존하는
-    # 최소 정수값인 2 slots/round (= 2 s/round)를 사용한다.
-    slow_T: int = 2
+    # 현재 연구는 1 s/slot, 1h slot round 유지
+    slow_T: int = 3600
     episode_slots: Optional[int] = None
     N0: int = 3
 
@@ -184,11 +183,11 @@ class EnvConfig:
     # Mobility
     # 기본 모드는 논문과 동일하게 일정 속도로 이동하는 continuous model.
     # move_prob은 과거 FSMC 실행과의 호환성을 위해서만 남긴다.
-    mobility_mode: str = "continuous"
-    speed_min_kmh: float = 30.0
-    speed_max_kmh: float = 60.0
+    mobility_mode: str = "fsmc"
+    speed_min_kmh: float = 0.018
+    speed_max_kmh: float = 0.018
     mobility_speed_scale: float = 1.0
-    move_prob: float = 0.0
+    move_prob: float = 1e-4
     region_len: float = 50.0
 
     # Channel
@@ -253,11 +252,8 @@ class EnvConfig:
     alpha_Z: float = 1.0
     alpha_B: float = 30.0
 
-    # slow-timescale decision에 반영.
-    # 기존 3600-slot round에서 5000이던 상대 weight를 2-slot round에
-    # 맞춰 시간 비율로 보존: 5000 * (2 / 3600) = 2.777...
     # 물리적인 화폐 비용이 아니라 DPP objective scaling 값이다.
-    uav_hiring_cost: float = 2.7777777777777777
+    uav_hiring_cost: float = 5000.0
     hire_weight: float = 1.0
 
     # Lyapunov trade-off parameter
