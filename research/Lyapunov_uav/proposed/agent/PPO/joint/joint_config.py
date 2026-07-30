@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict, dataclass, replace
 from typing import Dict, Optional, Tuple
@@ -8,84 +9,118 @@ from typing import Dict, Optional, Tuple
 @dataclass(frozen=True)
 class SlowJointTrainConfig:
     """
-    Slow DPP + Fast PPO online joint-training settings.
+    Slow-DPP + Fast-PPO from-scratch joint-training settings.
+
+    A fresh run initializes the Fast actor, critic, optimizer, observation
+    normalizer, and rollout buffer from scratch. The Fast-only experiment is
+    not used as a source checkpoint. The only supported load path is an exact
+    resume checkpoint produced by this joint trainer.
     """
 
+    # ------------------------------------------------------------------
+    # 1) Reproducibility / device
+    # ------------------------------------------------------------------
     seed: int = 2026
     deterministic_torch: bool = True
     device: str = "cuda"
 
+    # ------------------------------------------------------------------
+    # 2) Output / exact resume
+    # ------------------------------------------------------------------
     output_root: str = "joint"
-    run_name: str = "slow_dpp_fast_ppo_joint_seed2026"
+    run_name: str = "slow_dpp_fast_ppo_scratch_long_seed2026"
 
-    # Fast-only pretraining checkpoint. Network shape, observation normalizer,
-    # entropy coefficients, gamma/GAE, and PPO reward scale are restored from
-    # this trusted checkpoint. Final joint environment/timescale values below
-    # intentionally override the pretraining environment.
-    fast_checkpoint: str = (
-        "fast/"
-        "fast_mixed_seed2026_continuous_mobility_slot1s_noklstop/"
-        "checkpoints/fast_ppo_final.pt"
-    )
-
-    # Set this only when resuming a checkpoint produced by slow_joint_train.py.
-    # The saved environment, PPO buffer, RNG, optimizer, episode, and pending
-    # slow action are restored.
+    # Set this only to resume a checkpoint produced by this trainer.
+    # A fresh run must leave it as None.
     resume_checkpoint: Optional[str] = None
-    load_pretrained_optimizer: bool = False
 
-    # Final formulation: 1 s/slot, 3,600 slots/round, 10 rounds/episode.
-    num_episodes: int = 10
+    # ------------------------------------------------------------------
+    # 3) Final joint-training horizon and environment contract
+    # ------------------------------------------------------------------
+    # 100 episodes x 10 rounds x 3,600 slots:
+    #   - 1,000 realized Slow rounds
+    #   - 3,600,000 actual Fast slots
+    #   - 1,000 Fast-PPO updates
+    #
+    # The current trainer additionally performs provisional Slow selections
+    # for PPO bootstrap. With 10 rounds/episode, this yields approximately
+    # 1,900 Slow-DPP selections over the complete run.
+    num_episodes: int = 100
     rounds_per_episode: int = 10
+
+    # Final formulation: 1 second/slot and 3,600 slots/Slow round.
     final_slow_T: int = 3_600
     final_mobility_mode: str = "fsmc"
     final_move_prob: float = 1e-4
     final_uav_hiring_cost: float = 5_000.0
     final_target_service_slots_per_round: int = 3_600
 
-    # The source checkpoint used for this run was trained with the following
-    # environment. These values are guards, not final formulation values.
-    expected_source_slow_T: int = 2
-    expected_source_mobility_mode: str = "continuous"
-
-    # Expected round-DPP estimator used during training. K=1 keeps exact
-    # candidate enumeration but uses one common-random-number forecast sample.
-    # Use K>=4 for final evaluation after training, not for the first full run.
+    # ------------------------------------------------------------------
+    # 4) Non-learning Slow-DPP controller
+    # ------------------------------------------------------------------
+    # K=1 is the training-time compute compromise. All candidates use common
+    # random numbers. Use K>=4 only for final frozen-policy evaluation.
     forecast_scenarios: int = 1
     forecast_seed_offset: int = 20_000_000
     forecast_fast_deterministic: bool = False
 
     # Region-local candidates are exhaustively enumerated. Exceeding this
-    # fail-fast guard raises an error; it never prunes to top-k.
-    max_exact_region_candidates: int = 8192
+    # guard raises an error; it never prunes candidates to top-k.
+    max_exact_region_candidates: int = 8_192
 
     # Whole-system coordinate minimization over complete region candidates.
+    # The loop exits early as soon as a full sweep makes no change.
     max_coordinate_sweeps: int = 10
     dpp_tie_atol: float = 1e-3
     dpp_tie_rtol: float = 1e-9
 
-    # One Fast-PPO update is performed after each complete slow round.
+    # ------------------------------------------------------------------
+    # 5) Fast-PPO rollout and optimization
+    # ------------------------------------------------------------------
+    # One complete Slow round is one Fast rollout and one PPO update.
+    # 3,600 / 450 = 8 minibatches/epoch; 4 epochs = at most 32 optimizer
+    # steps per completed Slow round.
     fast_rollout_steps: int = 3_600
     fast_batch_size: int = 450
     fast_update_epochs: int = 4
-    fast_lr: float = 3e-5
+
+    fast_gamma: float = 0.99
+    fast_gae_lambda: float = 0.95
+
+    # From-scratch learning rate follows the verified Fast-only setting.
+    # target_kl protects a long joint run from rare oversized PPO updates.
+    fast_lr: float = 6e-5
     fast_clip_coef: float = 0.15
     fast_target_kl: Optional[float] = 0.03
     fast_max_grad_norm: float = 0.5
 
-    # Save an exact-resume joint checkpoint after this many PPO updates and at
-    # every episode boundary.
-    save_every_updates: int = 5
+    fast_value_coef: float = 0.5
+    fast_categorical_entropy_coef: float = 1e-4
+    fast_power_entropy_coef: float = 1e-5
+
+    fast_normalize_obs: bool = True
+    fast_normalize_adv: bool = True
+
+    fast_hidden_dims: Tuple[int, ...] = (256, 256)
+    fast_init_log_std: float = -1.0
+
+    fast_use_value_huber_loss: bool = True
+    fast_use_value_clip: bool = True
+    fast_value_clip_coef: float = 0.5
+    fast_fail_on_nan: bool = True
+
+    # Env returns raw DPP reward. Only the PPO buffer uses this scale.
+    ppo_reward_scale: float = 1e-4
+
+    # ------------------------------------------------------------------
+    # 6) Logging / exact-resume checkpoints
+    # ------------------------------------------------------------------
+    # Ten updates equal one configured episode. The trainer also saves at
+    # every episode boundary, while a Slurm signal triggers a boundary-safe
+    # checkpoint independently of this interval.
+    save_every_updates: int = 10
     log_every_rounds: int = 1
     log_every_episodes: int = 1
-
-    # If None, restore the value from the Fast-only checkpoint's train_config.
-    # Do not silently change reward scale between pretraining and joint train.
-    ppo_reward_scale: Optional[float] = None
-
-    # Used only for old checkpoints that lack Fast PPO metadata.
-    fast_hidden_dims_fallback: Tuple[int, ...] = (256, 256)
-    fast_init_log_std_fallback: float = -1.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -106,70 +141,120 @@ class SlowJointTrainConfig:
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive.")
 
+        if not str(self.output_root).strip():
+            raise ValueError("output_root must not be empty.")
+        if not str(self.run_name).strip():
+            raise ValueError("run_name must not be empty.")
+        if not str(self.device).strip():
+            raise ValueError("device must not be empty.")
+
         if int(self.forecast_seed_offset) < 0:
             raise ValueError(
                 "forecast_seed_offset must be nonnegative."
             )
         for name in ("dpp_tie_atol", "dpp_tie_rtol"):
-            if float(getattr(self, name)) < 0.0:
-                raise ValueError(f"{name} must be nonnegative.")
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"{name} must be finite and nonnegative."
+                )
+
         if not 0.0 <= float(self.final_move_prob) <= 1.0:
             raise ValueError(
                 "final_move_prob must be in [0, 1]."
             )
         if self.final_mobility_mode != "fsmc":
             raise ValueError(
-                "The final formulation requires final_mobility_mode='fsmc'."
+                "The final formulation requires "
+                "final_mobility_mode='fsmc'."
             )
-        if float(self.final_uav_hiring_cost) < 0.0:
+        if (
+            not math.isfinite(float(self.final_uav_hiring_cost))
+            or float(self.final_uav_hiring_cost) < 0.0
+        ):
             raise ValueError(
-                "final_uav_hiring_cost must be nonnegative."
+                "final_uav_hiring_cost must be finite and nonnegative."
             )
+        if int(self.final_target_service_slots_per_round) != int(
+            self.final_slow_T
+        ):
+            raise ValueError(
+                "final_target_service_slots_per_round must equal "
+                "final_slow_T for the current full-round service target."
+            )
+
         if int(self.fast_rollout_steps) != int(self.final_slow_T):
             raise ValueError(
                 "fast_rollout_steps must equal final_slow_T so one update "
-                "uses exactly one completed slow round."
+                "uses exactly one completed Slow round."
+            )
+        if int(self.fast_batch_size) > int(self.fast_rollout_steps):
+            raise ValueError(
+                "fast_batch_size must not exceed fast_rollout_steps."
             )
         if int(self.fast_rollout_steps) % int(self.fast_batch_size) != 0:
             raise ValueError(
                 "fast_rollout_steps must be divisible by fast_batch_size."
             )
-        if float(self.fast_lr) <= 0.0:
-            raise ValueError("fast_lr must be positive.")
+
+        for name in (
+            "fast_lr",
+            "fast_max_grad_norm",
+            "fast_value_clip_coef",
+            "ppo_reward_scale",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(
+                    f"{name} must be finite and positive."
+                )
+
+        for name in (
+            "fast_value_coef",
+            "fast_categorical_entropy_coef",
+            "fast_power_entropy_coef",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"{name} must be finite and nonnegative."
+                )
+
+        if not 0.0 < float(self.fast_gamma) <= 1.0:
+            raise ValueError("fast_gamma must be in (0, 1].")
+        if not 0.0 < float(self.fast_gae_lambda) <= 1.0:
+            raise ValueError(
+                "fast_gae_lambda must be in (0, 1]."
+            )
         if not 0.0 < float(self.fast_clip_coef) < 1.0:
-            raise ValueError("fast_clip_coef must be in (0, 1).")
+            raise ValueError(
+                "fast_clip_coef must be in (0, 1)."
+            )
         if (
             self.fast_target_kl is not None
-            and float(self.fast_target_kl) <= 0.0
+            and (
+                not math.isfinite(float(self.fast_target_kl))
+                or float(self.fast_target_kl) <= 0.0
+            )
         ):
             raise ValueError(
-                "fast_target_kl must be None or positive."
+                "fast_target_kl must be None or finite and positive."
             )
-        if float(self.fast_max_grad_norm) <= 0.0:
+
+        if not self.fast_hidden_dims:
             raise ValueError(
-                "fast_max_grad_norm must be positive."
-            )
-        if not self.fast_checkpoint:
-            raise ValueError(
-                "fast_checkpoint must not be empty."
-            )
-        if (
-            self.ppo_reward_scale is not None
-            and float(self.ppo_reward_scale) <= 0.0
-        ):
-            raise ValueError(
-                "ppo_reward_scale must be None or positive."
-            )
-        if not self.fast_hidden_dims_fallback:
-            raise ValueError(
-                "fast_hidden_dims_fallback must not be empty."
+                "fast_hidden_dims must not be empty."
             )
         if any(
             int(value) <= 0
-            for value in self.fast_hidden_dims_fallback
+            for value in self.fast_hidden_dims
         ):
             raise ValueError(
-                "fast_hidden_dims_fallback entries must be positive."
+                "fast_hidden_dims entries must be positive."
+            )
+        if not math.isfinite(float(self.fast_init_log_std)):
+            raise ValueError(
+                "fast_init_log_std must be finite."
             )
 
     def to_dict(self) -> Dict[str, object]:
@@ -178,17 +263,9 @@ class SlowJointTrainConfig:
 
 def get_slow_joint_train_config() -> SlowJointTrainConfig:
     cfg = SlowJointTrainConfig()
-    fast_checkpoint = os.environ.get(
-        "JOINT_FAST_CHECKPOINT"
-    )
     resume_checkpoint = os.environ.get(
         "JOINT_RESUME_CHECKPOINT"
     )
-    if fast_checkpoint:
-        cfg = replace(
-            cfg,
-            fast_checkpoint=fast_checkpoint,
-        )
     if resume_checkpoint:
         cfg = replace(
             cfg,

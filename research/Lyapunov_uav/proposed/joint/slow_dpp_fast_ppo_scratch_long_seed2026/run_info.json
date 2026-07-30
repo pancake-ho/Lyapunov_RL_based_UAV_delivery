@@ -1,0 +1,10 @@
+{
+  "trainer_kind": "slow_dpp_fast_ppo_scratch_v2",
+  "fast_initialization": "random_from_scratch",
+  "loaded_resume_checkpoint": null,
+  "fast_only_checkpoint_used": false,
+  "slow_policy": "none",
+  "slow_controller": "round_dpp_coordinate_minimization",
+  "fast_policy": "online_mixed_action_ppo",
+  "ppo_reward_scale": 0.0001
+}
