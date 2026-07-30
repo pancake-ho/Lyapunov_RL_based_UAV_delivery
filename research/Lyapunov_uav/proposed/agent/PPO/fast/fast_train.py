@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import copy
 import csv
+import hashlib
+import itertools
+import json
+import math
+import os
+import pickle
 import sys
 import time
-from dataclasses import asdict, replace
+import types
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 import numpy as np
+import torch
 
 import matplotlib
 matplotlib.use("Agg")
@@ -15,15 +25,6 @@ import matplotlib.pyplot as plt
 
 
 def _find_proposed_root(start: Optional[Path] = None) -> Path:
-    """
-    proposed root를 자동 탐색함.
-
-    기대 구조:
-        proposed/
-            config.py
-            env/
-            agent/
-    """
     cur = (start or Path(__file__).resolve()).resolve()
     if cur.is_file():
         cur = cur.parent
@@ -37,300 +38,120 @@ def _find_proposed_root(start: Optional[Path] = None) -> Path:
             return parent
 
     raise RuntimeError(
-        "proposed root를 찾지 못했습니다.\n"
-        "fast_train.py가 research/Lyapunov_uav/proposed/agent/PPO/fast/ 아래에 있는지 확인하세요."
+        "proposed root를 찾지 못했습니다. fast_train.py의 위치를 확인하세요."
     )
 
 
 PROPOSED_ROOT = _find_proposed_root()
-
 if str(PROPOSED_ROOT) not in sys.path:
     sys.path.insert(0, str(PROPOSED_ROOT))
 
-
 from config import EnvConfig
+from env.action_types import SlowAction
 from env.env import Env
+from env.validators import (
+    parse_slow_action,
+    validate_slow_action_strict,
+)
 
 from agent.PPO.config import FastTrainConfig, get_fast_ppo_config
 from agent.PPO.common import (
+    ensure_dir,
     infer_fast_obs_dim,
+    set_seed,
     split_env_reset,
     split_env_step,
-    set_seed,
-    ensure_dir,
 )
 from agent.PPO.common.utils import ScalarLogger, save_json
-from agent.PPO.fast.fast_agent import FastPPOAgent, FastPPOConfig as AgentPPOConfig
+from agent.PPO.fast.fast_agent import (
+    FastPPOAgent,
+    FastPPOConfig as AgentPPOConfig,
+)
 
 
-def build_env_config(
-    train_cfg: FastTrainConfig,
-    rounds_per_episode: int,
-) -> EnvConfig:
+# ======================================================================
+# Configuration / common utilities
+# ======================================================================
+def build_env_config() -> EnvConfig:
     """
-    proposed/config.py의 시스템 상수는 유지하고,
-    실행별 seed 및 multi-round episode horizon만 명시.
+    System/environment parameter source remains proposed/config.py.
+
+    Battery round-feasibility horizon was 5 while slow_T was 3600 in the
+    original branch. The joint trainer aligns them without introducing a
+    separate configuration file.
     """
-    rounds = int(rounds_per_episode)
-    if rounds <= 0:
-        raise ValueError(
-            "rounds_per_episode는 양수 값을 가져야 합니다."
-        )
-
-    base = EnvConfig()
-    episode_slots = int(base.slow_T) * rounds
-
-    return replace(
-        base,
-        seed=int(train_cfg.seed),
-        episode_slots=episode_slots,
-    )
+    cfg = EnvConfig()
+    cfg.battery.target_service_slots_per_round = int(cfg.slow_T)
+    return cfg
 
 
 def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
-    hidden_dims = train_cfg.hidden_dims
-
-    if hidden_dims is None:
-        hidden_dims = [256, 256]
-
     return AgentPPOConfig(
-        rollout_steps=int(
-            train_cfg.rollout_slots
-        ),
-        update_epochs=int(
-            train_cfg.update_epochs
-        ),
-        batch_size=int(
-            train_cfg.batch_size
-        ),
-
-        gamma=float(
-            train_cfg.gamma
-        ),
-        gae_lambda=float(
-            train_cfg.gae_lambda
-        ),
-
-        lr=float(
-            train_cfg.lr
-        ),
-        max_grad_norm=float(
-            train_cfg.max_grad_norm
-        ),
-
-        clip_coef=float(
-            train_cfg.clip_coef
-        ),
-        value_coef=float(
-            train_cfg.value_coef
-        ),
-
+        rollout_steps=int(train_cfg.rollout_slots),
+        update_epochs=int(train_cfg.update_epochs),
+        batch_size=int(train_cfg.batch_size),
+        gamma=float(train_cfg.gamma),
+        gae_lambda=float(train_cfg.gae_lambda),
+        lr=float(train_cfg.lr),
+        max_grad_norm=float(train_cfg.max_grad_norm),
+        clip_coef=float(train_cfg.clip_coef),
+        value_coef=float(train_cfg.value_coef),
         categorical_entropy_coef=float(
-            train_cfg
-            .categorical_entropy_coef
+            train_cfg.categorical_entropy_coef
         ),
-        power_entropy_coef=float(
-            train_cfg
-            .power_entropy_coef
-        ),
-
+        power_entropy_coef=float(train_cfg.power_entropy_coef),
         target_kl=(
             None
             if train_cfg.target_kl is None
-            else float(
-                train_cfg.target_kl
-            )
+            else float(train_cfg.target_kl)
         ),
-
-        normalize_obs=bool(
-            train_cfg.obs_norm
-        ),
-        normalize_adv=bool(
-            train_cfg.adv_norm
-        ),
-
-        hidden_dims=tuple(
-            int(x)
-            for x
-            in hidden_dims
-        ),
-
-        init_log_std=float(
-            train_cfg.init_log_std
-        ),
-
-        use_value_huber_loss=bool(
-            train_cfg
-            .use_value_huber_loss
-        ),
-        use_value_clip=bool(
-            train_cfg.use_value_clip
-        ),
-        value_clip_coef=float(
-            train_cfg.value_clip_coef
-        ),
-
-        fail_on_nan=bool(
-            train_cfg.fail_on_nan
-        ),
-        device=str(
-            train_cfg.device
-        ),
+        normalize_obs=bool(train_cfg.obs_norm),
+        normalize_adv=bool(train_cfg.adv_norm),
+        hidden_dims=tuple(int(x) for x in train_cfg.hidden_dims),
+        init_log_std=float(train_cfg.init_log_std),
+        use_value_huber_loss=bool(train_cfg.use_value_huber_loss),
+        use_value_clip=bool(train_cfg.use_value_clip),
+        value_clip_coef=float(train_cfg.value_clip_coef),
+        fail_on_nan=bool(train_cfg.fail_on_nan),
+        device=str(train_cfg.device),
     )
 
 
-def make_run_dir(train_cfg: FastTrainConfig, env_cfg: EnvConfig) -> Path:
+def _resolve_checkpoint(path: Optional[str]) -> Optional[Path]:
+    if path is None:
+        return None
+    result = Path(os.path.expandvars(os.path.expanduser(path)))
+    if not result.is_absolute():
+        result = PROPOSED_ROOT / result
+    return result.resolve()
+
+
+def make_run_dir(
+    train_cfg: FastTrainConfig,
+    env_cfg: EnvConfig,
+) -> Path:
     if train_cfg.run_name is None:
         run_name = (
-            f"fast_ppo_{train_cfg.mode}"
-            f"_ep{int(train_cfg.num_episodes)}"
-            f"_slowT{int(env_cfg.slow_T)}"
+            f"{train_cfg.slow_decision_mode}_fastppo_"
+            f"{train_cfg.mode}_ep{train_cfg.num_episodes}_"
+            f"slowT{env_cfg.slow_T}"
         )
     else:
         run_name = str(train_cfg.run_name)
 
     output_root = Path(train_cfg.output_root)
-
     if not output_root.is_absolute():
         output_root = PROPOSED_ROOT / output_root
 
     run_dir = output_root / run_name
-
-    ensure_dir(run_dir)
-    ensure_dir(run_dir / "checkpoints")
-    ensure_dir(run_dir / "logs")
-    ensure_dir(run_dir / "figures")
-
-    return run_dir
-
-
-def get_episode_mobility_speed_scale(
-    train_cfg: FastTrainConfig,
-    episode_idx: int,
-) -> float:
-    """
-    1-based episode index에 해당하는 mobility speed scale을 반환한다.
-    """
-    episode_idx = int(episode_idx)
-
-    selected_scale = float(
-        train_cfg.mobility_speed_curriculum[0][1]
-    )
-
-    for start_episode, speed_scale in (
-        train_cfg.mobility_speed_curriculum
+    for path in (
+        run_dir,
+        run_dir / "checkpoints",
+        run_dir / "logs",
+        run_dir / "figures",
     ):
-        if episode_idx < int(start_episode):
-            break
-        selected_scale = float(speed_scale)
-
-    return selected_scale
-
-
-def sample_random_slow_action(
-    env: Env,
-    rng: np.random.Generator,
-    train_cfg: FastTrainConfig,
-) -> Dict[str, Any]:
-    """
-    Fast-only PPO 학습용 random slow-timescale action 생성.
-    slow policy는 아직 학습하지 않고, PPO/config.py의 확률값으로 round마다 slow condition을 샘플링한다.
-    """
-    if train_cfg.slow_decision_mode != "random":
-        raise ValueError("현재 fast-only 학습에서는 slow_decision_mode='random'만 지원합니다.")
-
-    cfg = env.cfg
-
-    m = int(cfg.num_rsu)
-    n = int(cfg.num_user)
-    u = int(cfg.num_uav)
-
-    if m <= 0 or n <= 0 or u <= 0:
-        raise ValueError(
-            f"유효하지 않은 숫자입니다: num_rsu={m}, num_uav={u}, num_user={n}"
-        )
-    
-    if m != u:
-        raise ValueError(
-            "현재 fast-only random slow action은 num_rsu == num_uav 가정을 사용합니다. "
-            f"num_rsu={m}, num_uav={u}"
-        )
-
-    user_region = np.asarray(env.user_region, dtype=np.int32)
-
-    if user_region.shape != (n,):
-        raise ValueError(
-            f"user_region shape mismatch: expected {(n,)}, got {user_region.shape}"
-        )
-
-    rsu_user_prob = float(train_cfg.random_rsu_user_prob)
-    uav_hire_prob = float(train_cfg.random_uav_hire_prob)
-    uav_user_prob = float(train_cfg.random_uav_user_prob)
-
-    rsu_scheduling = np.zeros((m, n), dtype=np.int32)
-    uav_hiring = np.zeros(u, dtype=np.int32)
-    uav_scheduling = np.zeros((u, n), dtype=np.int32)
-
-    # 1) RSU scheduling: user의 현재 region RSU만 후보로 사용
-    for user_idx in range(n):
-        region_idx = int(user_region[user_idx])
-        if region_idx < 0 or region_idx >= m:
-            continue
-
-        if rng.random() < rsu_user_prob:
-            rsu_scheduling[region_idx, user_idx] = 1
-
-    rsu_served_user = (rsu_scheduling.sum(axis=0) > 0)
-
-    requested_content = np.asarray(env.requested_content, dtype=np.int32)
-    uav_cached_content = np.asarray(env.uav_cached_content, dtype=np.int32)
-
-    if requested_content.shape != (n,):
-        raise ValueError(
-            f"requested_content shape mismatch: expected {(n,)}, got {requested_content.shape}"
-        )
-    if uav_cached_content.shape != (u,):
-        raise ValueError(
-            f"uav_cached_content shape mismatch: expected {(u,)}, got {uav_cached_content.shape}"
-        )
-
-    # 2) UAV scheduling: UAV index == region index
-    for uav_idx in range(u):
-        if rng.random() >= uav_hire_prob:
-            continue
-
-        same_region_mask = user_region == uav_idx
-        residual_mask = ~rsu_served_user
-        cache_match_mask = requested_content == uav_cached_content[uav_idx]
-
-        candidate_mask = same_region_mask & residual_mask & cache_match_mask
-        candidate_users = np.flatnonzero(candidate_mask)
-
-        if candidate_users.size == 0:
-            continue
-
-        selected_mask = rng.random(candidate_users.size) < uav_user_prob
-        selected_users = candidate_users[selected_mask]
-
-        if selected_users.size == 0:
-            selected_users = np.asarray(
-                [int(rng.choice(candidate_users))],
-                dtype=np.int64,
-            )
-
-        uav_hiring[uav_idx] = 1
-        uav_scheduling[uav_idx, np.asarray(selected_users, dtype=np.int64)] = 1
-
-    # scheduling 없는 UAV는 hiring 제거
-    active_hire = (uav_scheduling.sum(axis=1) > 0).astype(np.int32)
-    uav_hiring = uav_hiring * active_hire
-    uav_scheduling = uav_scheduling * uav_hiring[:, None]
-
-    return {
-        "rsu_scheduling": rsu_scheduling.astype(np.int32),
-        "uav_hiring": uav_hiring.astype(np.int32),
-        "uav_scheduling": uav_scheduling.astype(np.int32),
-    }
+        ensure_dir(path)
+    return run_dir
 
 
 def save_configs(
@@ -342,7 +163,10 @@ def save_configs(
     action_dim: int,
 ) -> None:
     save_json(train_cfg.to_dict(), run_dir / "train_config.json")
-    save_json(env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg), run_dir / "env_config.json")
+    save_json(
+        env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg),
+        run_dir / "env_config.json",
+    )
     save_json(asdict(ppo_cfg), run_dir / "ppo_config.json")
     save_json(
         {
@@ -350,1820 +174,1451 @@ def save_configs(
             "obs_dim": int(obs_dim),
             "action_dim": int(action_dim),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "algorithm": (
+                "pretrained Fast-PPO -> frozen round-wise Slow-DPP forecast "
+                "-> real Fast round -> one PPO update"
+            ),
+            "slow_solver": "complete-action region-coordinate minimization",
+            "global_optimum_guaranteed": False,
         },
         run_dir / "run_info.json",
     )
 
 
-def reset_env(
-    env: Env,
-    slow_rng: np.random.Generator,
+def get_episode_move_prob(
     train_cfg: FastTrainConfig,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    fast-only episode reset.
-
-    절차:
-        1) env.reset()
-        2) 현재 user_region/content 기준 random slow action 생성
-        3) env.apply_slow_action()
-        4) env.get_fast_obs() 반환
-
-    반환 obs에는 raw slow scheduling matrix를 붙이지 않는다.
-    get_fast_obs()가 이미 connection state를 제공하기 때문이다.
-    """
-    obs, info = split_env_reset(env.reset())
-
-    slow_action = sample_random_slow_action(
-        env=env,
-        rng=slow_rng,
-        train_cfg=train_cfg,
-    )
-
-    env.apply_slow_action(slow_action)
-
-    obs = env.get_fast_obs()
-
-    info = dict(info)
-    info["random_slow_action"] = {
-        "rsu_scheduling": np.asarray(slow_action["rsu_scheduling"], dtype=np.int32).copy(),
-        "uav_hiring": np.asarray(slow_action["uav_hiring"], dtype=np.int32).copy(),
-        "uav_scheduling": np.asarray(slow_action["uav_scheduling"], dtype=np.int32).copy(),
-    }
-    info["random_rsu_links"] = int(np.sum(slow_action["rsu_scheduling"]))
-    info["random_hired_uav"] = int(np.sum(slow_action["uav_hiring"]))
-    info["random_uav_links"] = int(np.sum(slow_action["uav_scheduling"]))
-
-    return obs, info
+    episode_idx: int,
+) -> float:
+    selected = float(train_cfg.mobility_curriculum[0][1])
+    for start_episode, move_prob in train_cfg.mobility_curriculum:
+        if int(episode_idx) < int(start_episode):
+            break
+        selected = float(move_prob)
+    return selected
 
 
-def apply_random_slow_action_for_current_round(
-    env: Env,
-    slow_rng: np.random.Generator,
+def _assert_joint_config(
     train_cfg: FastTrainConfig,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    round boundary에서 random slow-timescale decision을 새로 적용한다.
-
-    현재 fast-only 학습에서는 slow policy를 아직 학습하지 않으므로,
-    각 round마다 random slow condition을 샘플링한다.
-    """
-    slow_action = sample_random_slow_action(
-        env=env,
-        rng=slow_rng,
-        train_cfg=train_cfg,
-    )
-
-    applied_slow_action = env.apply_slow_action(slow_action)
-    obs = env.get_fast_obs()
-
-    info = {
-        "random_slow_action": {
-            "rsu_scheduling": np.asarray(applied_slow_action.rsu_scheduling, dtype=np.int32).copy(),
-            "uav_hiring": np.asarray(applied_slow_action.uav_hiring, dtype=np.int32).copy(),
-            "uav_scheduling": np.asarray(applied_slow_action.uav_scheduling, dtype=np.int32).copy(),
-        },
-        "random_rsu_links": int(np.sum(applied_slow_action.rsu_scheduling)),
-        "random_hired_uav": int(np.sum(applied_slow_action.uav_hiring)),
-        "random_uav_links": int(np.sum(applied_slow_action.uav_scheduling)),
-    }
-
-    return obs, info
-
-
-def _read_scalar_csv(csv_path: Path) -> Dict[str, list[float]]:
-    data: Dict[str, list[float]] = {}
-
-    if not csv_path.exists():
-        return data
-
-    with csv_path.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-
-        if reader.fieldnames is None:
-            return data
-
-        for name in reader.fieldnames:
-            data[name] = []
-
-        for row in reader:
-            for key, value in row.items():
-                if key is None:
-                    continue
-                try:
-                    data.setdefault(key, []).append(float(value))
-                except (TypeError, ValueError):
-                    pass
-
-    return data
-
-
-def _moving_average(values: list[float], window: int) -> np.ndarray:
-    arr = np.asarray(values, dtype=np.float32)
-
-    if arr.size == 0:
-        return arr
-
-    if window <= 1 or arr.size < window:
-        return arr
-
-    kernel = np.ones(window, dtype=np.float32) / float(window)
-    return np.convolve(arr, kernel, mode="valid")
-
-
-def save_training_plots(
-    run_dir: Path,
-    smooth_window: int = 20,
+    env_cfg: EnvConfig,
 ) -> None:
-    figures_dir = run_dir / "figures"
-    ensure_dir(figures_dir)
+    if train_cfg.slow_decision_mode != "dpp":
+        return
 
-    episodes_csv = run_dir / "logs" / "episodes.csv"
-    updates_csv = run_dir / "logs" / "updates.csv"
-
-    ep_data = _read_scalar_csv(episodes_csv)
-    update_data = _read_scalar_csv(updates_csv)
-
-    if "episode" in ep_data and "episode_reward" in ep_data:
-        x = np.asarray(ep_data["episode"], dtype=np.float32)
-        y = np.asarray(ep_data["episode_reward"], dtype=np.float32)
-
-        plt.figure()
-        plt.plot(x, y, label="episode_reward")
-
-        y_ma = _moving_average(ep_data["episode_reward"], smooth_window)
-        if y_ma.size > 0 and y_ma.size <= x.size:
-            x_ma = x[-y_ma.size:]
-            plt.plot(x_ma, y_ma, label=f"moving_avg_{smooth_window}")
-
-        plt.xlabel("Episode")
-        plt.ylabel("Reward")
-        plt.title("Fast PPO Episode Reward")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(figures_dir / "episode_reward.png", dpi=200)
-        plt.close()
-
-    component_keys = [
-        "episode_delivery",
-        "episode_quality",
-        "episode_stall",
-        "episode_consumed_soc",
-        "episode_charged_soc",
-        "episode_outage",
-        "episode_min_soc",
-        "episode_mean_soc",
-        "episode_max_B",
-        "episode_mean_B",
-        "episode_charging_slots",
-        "episode_outage_slots",
-    ]
-
-    if "episode" in ep_data:
-        x = np.asarray(ep_data["episode"], dtype=np.float32)
-
-        plt.figure()
-        plotted = False
-
-        for key in component_keys:
-            if key not in ep_data:
-                continue
-
-            y = np.asarray(ep_data[key], dtype=np.float32)
-
-            if y.size != x.size:
-                continue
-
-            plt.plot(x, y, label=key)
-            plotted = True
-
-        if plotted:
-            plt.xlabel("Episode")
-            plt.ylabel("Value")
-            plt.title("Fast PPO Episode Metrics")
-            plt.legend()
-            plt.grid(True)
-            plt.tight_layout()
-            plt.savefig(figures_dir / "episode_metrics.png", dpi=200)
-
-        plt.close()
-
-    if "update" in update_data:
-        x = np.asarray(update_data["update"], dtype=np.float32)
-
-        loss_keys = [
-            "policy_loss",
-            "value_loss",
-            "categorical_entropy",
-            "power_entropy",
-            "entropy_bonus",
-            "approx_kl",
-            "clipfrac",
-            "explained_variance",
-            "active_action_dims_mean",
-            "active_action_ratio_mean",
-            "early_stopped",
-            "completed_minibatches",
-        ]
-
-        plt.figure()
-        plotted = False
-
-        for key in loss_keys:
-            if key not in update_data:
-                continue
-
-            y = np.asarray(update_data[key], dtype=np.float32)
-
-            if y.size != x.size:
-                continue
-
-            plt.plot(x, y, label=key)
-            plotted = True
-
-        if plotted:
-            plt.xlabel("Update")
-            plt.ylabel("Value")
-            plt.title("Fast PPO Update Metrics")
-            plt.legend()
-            plt.grid(True)
-            plt.tight_layout()
-            plt.savefig(figures_dir / "update_metrics.png", dpi=200)
-
-        plt.close()
+    if int(train_cfg.rollout_slots) != int(env_cfg.slow_T):
+        raise ValueError(
+            "Joint mode requires rollout_slots == env.slow_T: "
+            f"{train_cfg.rollout_slots} != {env_cfg.slow_T}."
+        )
+    if int(train_cfg.dpp_forecast_horizon) != int(env_cfg.slow_T):
+        raise ValueError(
+            "Joint mode requires dpp_forecast_horizon == env.slow_T: "
+            f"{train_cfg.dpp_forecast_horizon} != {env_cfg.slow_T}."
+        )
+    if not bool(train_cfg.freeze_obs_norm_within_round):
+        raise ValueError(
+            "Joint mode requires observation normalizer to remain fixed "
+            "within every round."
+        )
 
 
-def extract_info_metrics(
+# ======================================================================
+# Formulation-v6 reward/cost mapping
+# ======================================================================
+def formulation_reward_from_env_step(
+    *,
+    env_reward: float,
     info: Dict[str, Any],
-) -> Dict[str, float]:
-    reward_components = info.get(
-        "reward_components",
-        {},
+    env_cfg: EnvConfig,
+) -> Tuple[float, float]:
+    """
+    Current Env reward contains
+
+        alpha_Z * sum Z_n(t)d_n(t)
+        - alpha_B * sum B_u(t)e_u(t)
+        + alpha_B * sum B_u(t)e_c(t)
+        - V * degradation(t).
+
+    Formulation v6 uses alpha_Z * Z_n(t)(d_n(t)-b_n(t)); therefore the
+    action-independent one-slot term -alpha_Z * Z_n(t)b_n(t) is restored.
+
+    Returns:
+        formulation_reward, slot_dpp_cost (= -formulation_reward)
+    """
+    prev_z = np.asarray(info.get("prev_Z", []), dtype=np.float64)
+    playback = np.asarray(info.get("playback", []), dtype=np.float64)
+    if prev_z.shape != (int(env_cfg.num_user),):
+        raise ValueError(f"prev_Z shape mismatch: {prev_z.shape}")
+    if playback.shape != (int(env_cfg.num_user),):
+        raise ValueError(f"playback shape mismatch: {playback.shape}")
+
+    queue_playback_term = float(env_cfg.alpha_Z) * float(
+        np.dot(prev_z, playback)
     )
-    fast_components = reward_components.get(
-        "fast_reward_components",
-        {},
+    formulation_reward = float(env_reward) - queue_playback_term
+    slot_dpp_cost = -formulation_reward
+
+    if not np.isfinite(formulation_reward):
+        raise RuntimeError("Formulation reward is NaN or Inf.")
+    return formulation_reward, slot_dpp_cost
+
+
+def _hiring_cost(
+    env: Env,
+    slow_action: Dict[str, np.ndarray],
+) -> float:
+    mu = np.asarray(slow_action["uav_hiring"], dtype=np.float64)
+    raw = np.asarray(env._hire_cost(), dtype=np.float64)  # existing Env API
+    if raw.shape != mu.shape:
+        raise ValueError(
+            f"hiring cost shape mismatch: mu={mu.shape}, cost={raw.shape}"
+        )
+    return float(getattr(env.cfg, "hire_weight", 1.0)) * float(
+        np.dot(mu, raw)
     )
 
-    stall_arr = np.asarray(
-        info.get("stall", []),
-        dtype=np.float32,
+
+# ======================================================================
+# Strict feasible random action (Fast pretraining baseline)
+# ======================================================================
+def sample_random_slow_action(
+    env: Env,
+    rng: np.random.Generator,
+    train_cfg: FastTrainConfig,
+) -> Dict[str, np.ndarray]:
+    if train_cfg.slow_decision_mode != "random":
+        raise ValueError("sample_random_slow_action is for random mode only.")
+
+    cfg = env.cfg
+    m, n, u = int(cfg.num_rsu), int(cfg.num_user), int(cfg.num_uav)
+    if m != u:
+        raise ValueError("One-UAV-per-region requires num_rsu == num_uav.")
+
+    region = np.asarray(env.user_region, dtype=np.int32)
+    requested = np.asarray(env.requested_content, dtype=np.int32)
+    cached = np.asarray(env.uav_cached_content, dtype=np.int32)
+
+    y = np.zeros((m, n), dtype=np.int32)
+    mu = np.zeros(u, dtype=np.int32)
+    phi = np.zeros((u, n), dtype=np.int32)
+
+    # RSU scheduling with hard capacity.
+    for mm in range(m):
+        users = np.flatnonzero(region == mm)
+        sampled = users[
+            rng.random(users.size) < float(train_cfg.random_rsu_user_prob)
+        ]
+        if sampled.size > int(cfg.rsu_capacity):
+            sampled = rng.choice(
+                sampled,
+                size=int(cfg.rsu_capacity),
+                replace=False,
+            )
+        y[mm, np.asarray(sampled, dtype=np.int64)] = 1
+
+    rsu_users = y.sum(axis=0) > 0
+    for uu in range(u):
+        if rng.random() >= float(train_cfg.random_uav_hire_prob):
+            continue
+        candidates = np.flatnonzero(
+            (region == uu)
+            & (~rsu_users)
+            & (requested == cached[uu])
+        )
+        if candidates.size == 0:
+            continue
+        selected = candidates[
+            rng.random(candidates.size)
+            < float(train_cfg.random_uav_user_prob)
+        ]
+        if selected.size == 0:
+            selected = np.asarray([rng.choice(candidates)], dtype=np.int64)
+        if selected.size > int(cfg.uav_user_cap):
+            selected = rng.choice(
+                selected,
+                size=int(cfg.uav_user_cap),
+                replace=False,
+            )
+        phi[uu, np.asarray(selected, dtype=np.int64)] = 1
+        mu[uu] = 1
+
+    action = {
+        "rsu_scheduling": y,
+        "uav_hiring": mu,
+        "uav_scheduling": phi,
+    }
+    parsed = parse_slow_action(action, cfg)
+    validate_slow_action_strict(
+        parsed,
+        cfg,
+        user_region=region,
+        requested_content=requested,
+        uav_cached_content=cached,
+        forbid_empty_hiring=True,
     )
-    playback_arr = np.asarray(
-        info.get("playback", []),
-        dtype=np.float32,
+    return action
+
+
+# ======================================================================
+# Slow-DPP complete-action candidate construction
+# ======================================================================
+@dataclass(frozen=True)
+class RegionSlowCandidate:
+    rsu_users: Tuple[int, ...]
+    uav_users: Tuple[int, ...]
+
+
+@dataclass
+class SlowSelectionResult:
+    action: Dict[str, np.ndarray]
+    predicted_round_cost: float
+    solver_mode: str
+    coordinate_sweeps: int
+    candidate_requests: int
+    unique_candidates: int
+    finite_candidates: int
+    forecast_seconds: float
+    policy_seconds: float
+    env_seconds: float
+    mean_gpu_batch: float
+
+
+def _region_candidates(
+    env: Env,
+    region_idx: int,
+    train_cfg: FastTrainConfig,
+) -> list[RegionSlowCandidate]:
+    cfg = env.cfg
+    users = tuple(
+        int(x)
+        for x in np.flatnonzero(
+            np.asarray(env.user_region, dtype=np.int32) == int(region_idx)
+        )
+    )
+    requested = np.asarray(env.requested_content, dtype=np.int32)
+    cached = np.asarray(env.uav_cached_content, dtype=np.int32)
+
+    result: list[RegionSlowCandidate] = []
+    rsu_cap = min(int(cfg.rsu_capacity), len(users))
+
+    for rsu_size in range(rsu_cap + 1):
+        for rsu_subset in itertools.combinations(users, rsu_size):
+            rsu_set = set(rsu_subset)
+            eligible_uav = tuple(
+                nn
+                for nn in users
+                if nn not in rsu_set
+                and int(requested[nn]) == int(cached[region_idx])
+            )
+            uav_cap = min(int(cfg.uav_user_cap), len(eligible_uav))
+            for uav_size in range(uav_cap + 1):
+                for uav_subset in itertools.combinations(
+                    eligible_uav, uav_size
+                ):
+                    result.append(
+                        RegionSlowCandidate(
+                            rsu_users=tuple(int(x) for x in rsu_subset),
+                            uav_users=tuple(int(x) for x in uav_subset),
+                        )
+                    )
+                    if len(result) > int(
+                        train_cfg.dpp_max_region_candidates
+                    ):
+                        raise RuntimeError(
+                            "Region candidate count exceeds the configured "
+                            "exact-enumeration limit. Do not silently truncate "
+                            "the feasible set. "
+                            f"region={region_idx}, limit="
+                            f"{train_cfg.dpp_max_region_candidates}."
+                        )
+    return result
+
+
+def _zero_slow_action(env: Env) -> Dict[str, np.ndarray]:
+    return {
+        "rsu_scheduling": np.zeros(
+            (env.num_rsu, env.num_user), dtype=np.int32
+        ),
+        "uav_hiring": np.zeros(env.num_uav, dtype=np.int32),
+        "uav_scheduling": np.zeros(
+            (env.num_uav, env.num_user), dtype=np.int32
+        ),
+    }
+
+
+def _replace_region_candidate(
+    base_action: Dict[str, np.ndarray],
+    region_idx: int,
+    local: RegionSlowCandidate,
+) -> Dict[str, np.ndarray]:
+    action = {
+        key: np.asarray(value).copy()
+        for key, value in base_action.items()
+    }
+    action["rsu_scheduling"][region_idx, :] = 0
+    action["uav_scheduling"][region_idx, :] = 0
+    action["uav_hiring"][region_idx] = 0
+
+    if local.rsu_users:
+        action["rsu_scheduling"][
+            region_idx, np.asarray(local.rsu_users, dtype=np.int64)
+        ] = 1
+    if local.uav_users:
+        action["uav_hiring"][region_idx] = 1
+        action["uav_scheduling"][
+            region_idx, np.asarray(local.uav_users, dtype=np.int64)
+        ] = 1
+    return action
+
+
+def _validate_candidate(
+    env: Env,
+    action: Dict[str, np.ndarray],
+    train_cfg: FastTrainConfig,
+) -> SlowAction:
+    parsed = parse_slow_action(action, env.cfg)
+    validate_slow_action_strict(
+        parsed,
+        env.cfg,
+        user_region=np.asarray(env.user_region, dtype=np.int32),
+        requested_content=np.asarray(
+            env.requested_content, dtype=np.int32
+        ),
+        uav_cached_content=np.asarray(
+            env.uav_cached_content, dtype=np.int32
+        ),
+        forbid_empty_hiring=bool(train_cfg.dpp_forbid_empty_hiring),
+    )
+    return parsed
+
+
+def _candidate_key(action: Dict[str, np.ndarray]) -> bytes:
+    return b"|".join(
+        np.asarray(action[key], dtype=np.int8).tobytes()
+        for key in (
+            "rsu_scheduling",
+            "uav_hiring",
+            "uav_scheduling",
+        )
     )
 
-    stall_sum = (
-        float(np.sum(stall_arr))
-        if stall_arr.size > 0
+
+def _env_state_digest(env: Env) -> str:
+    payload = (
+        int(env.t),
+        int(env.episode),
+        int(env.round_idx),
+        int(env.round_slot),
+        np.asarray(env.queue).copy(),
+        np.asarray(env.user_region).copy(),
+        np.asarray(env.rsu_scheduling).copy(),
+        np.asarray(env.uav_hiring).copy(),
+        np.asarray(env.uav_scheduling).copy(),
+        np.asarray(env.requested_content).copy(),
+        np.asarray(env.uav_cached_content).copy(),
+        np.asarray(env.E).copy(),
+        np.asarray(env.Y).copy(),
+        np.asarray(env.outage).copy(),
+        np.asarray(env.charging_state).copy(),
+        copy.deepcopy(env.rng.bit_generator.state),
+    )
+    return hashlib.sha256(
+        pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+    ).hexdigest()
+
+
+def _model_parameter_digest(agent: FastPPOAgent) -> str:
+    hasher = hashlib.sha256()
+    with torch.no_grad():
+        for tensor in agent.model.state_dict().values():
+            hasher.update(
+                tensor.detach().cpu().contiguous().numpy().tobytes()
+            )
+    return hasher.hexdigest()
+
+
+def _forecast_scenario_seed(
+    env: Env,
+    train_cfg: FastTrainConfig,
+    scenario_idx: int,
+) -> int:
+    return int(
+        int(train_cfg.seed)
+        + 1_000_003 * int(env.episode)
+        + 10_007 * int(env.round_idx)
+        + 101 * int(scenario_idx)
+    )
+
+
+def _install_mean_rsu_channel(shadow_env: Env) -> None:
+    """Deterministic E[pathloss * lognormal shadowing * Rayleigh power]."""
+
+    def mean_compute_gain(
+        channel_self,
+        distance: Optional[float] = None,
+        rng: Optional[np.random.Generator] = None,
+    ) -> float:
+        del rng
+        d = channel_self.effective_distance(distance)
+        pathloss = float(d ** (-float(channel_self.beta)))
+        log10_factor = math.log(10.0) / 10.0
+        mu_db = float(channel_self.shadowing_mu_db)
+        sigma_db = float(channel_self.shadowing_sigma_db)
+        shadowing_mean = math.exp(
+            log10_factor * mu_db
+            + 0.5 * (log10_factor * sigma_db) ** 2
+        )
+        # E[|CN(0,1)|^2] = 1.
+        return float(pathloss * shadowing_mean)
+
+    shadow_env.rsu_channel.compute_gain = types.MethodType(
+        mean_compute_gain,
+        shadow_env.rsu_channel,
+    )
+
+
+def _make_shadow_env(
+    base_env: Env,
+    action: Dict[str, np.ndarray],
+    train_cfg: FastTrainConfig,
+    scenario_idx: int,
+) -> Env:
+    shadow = copy.deepcopy(base_env)
+    shadow.rng = np.random.default_rng(
+        _forecast_scenario_seed(base_env, train_cfg, scenario_idx)
+    )
+    if bool(train_cfg.dpp_use_mean_rsu_channel):
+        _install_mean_rsu_channel(shadow)
+
+    shadow.apply_slow_action(action)
+    return shadow
+
+
+def _step_shadow(
+    item: Tuple[Env, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
+    env, action = item
+    return split_env_step(env.step(action))
+
+
+class SlowDPPEvaluator:
+    """Current frozen Fast policy로 complete slow actions의 round DPP 평가."""
+
+    def __init__(
+        self,
+        env: Env,
+        agent: FastPPOAgent,
+        train_cfg: FastTrainConfig,
+    ) -> None:
+        self.env = env
+        self.agent = agent
+        self.train_cfg = train_cfg
+        self.cache: Dict[bytes, float] = {}
+        self.candidate_requests = 0
+        self.finite_candidates = 0
+        self.policy_seconds = 0.0
+        self.env_seconds = 0.0
+        self.gpu_batch_sizes: list[int] = []
+
+    def evaluate(
+        self,
+        actions: Sequence[Dict[str, np.ndarray]],
+    ) -> list[float]:
+        self.candidate_requests += len(actions)
+        scores: list[Optional[float]] = [None] * len(actions)
+        missing_indices: list[int] = []
+        missing_actions: list[Dict[str, np.ndarray]] = []
+
+        for idx, action in enumerate(actions):
+            _validate_candidate(self.env, action, self.train_cfg)
+            key = _candidate_key(action)
+            if key in self.cache:
+                scores[idx] = self.cache[key]
+            else:
+                missing_indices.append(idx)
+                missing_actions.append(action)
+
+        batch_limit = int(self.train_cfg.dpp_candidate_batch_size)
+        for start in range(0, len(missing_actions), batch_limit):
+            batch_actions = missing_actions[start : start + batch_limit]
+            batch_scores = self._evaluate_uncached_batch(batch_actions)
+            for local_idx, score in enumerate(batch_scores):
+                global_missing_idx = start + local_idx
+                original_idx = missing_indices[global_missing_idx]
+                scores[original_idx] = float(score)
+                key = _candidate_key(batch_actions[local_idx])
+                self.cache[key] = float(score)
+                if np.isfinite(score):
+                    self.finite_candidates += 1
+
+        if any(score is None for score in scores):
+            raise RuntimeError("Internal DPP score assignment failure.")
+        return [float(score) for score in scores]  # type: ignore[arg-type]
+
+    def _evaluate_uncached_batch(
+        self,
+        actions: Sequence[Dict[str, np.ndarray]],
+    ) -> np.ndarray:
+        count = len(actions)
+        scenario_costs = np.zeros(
+            (int(self.train_cfg.dpp_forecast_scenarios), count),
+            dtype=np.float64,
+        )
+
+        workers = int(self.train_cfg.dpp_forecast_workers)
+        executor: Optional[ThreadPoolExecutor]
+        executor = (
+            ThreadPoolExecutor(max_workers=workers)
+            if workers > 1 and count > 1
+            else None
+        )
+
+        try:
+            for scenario_idx in range(
+                int(self.train_cfg.dpp_forecast_scenarios)
+            ):
+                shadows = [
+                    _make_shadow_env(
+                        self.env,
+                        action,
+                        self.train_cfg,
+                        scenario_idx,
+                    )
+                    for action in actions
+                ]
+                observations = [shadow.get_fast_obs() for shadow in shadows]
+                invalid = np.zeros(count, dtype=bool)
+                accumulated = np.zeros(count, dtype=np.float64)
+
+                for slot_idx in range(
+                    int(self.train_cfg.dpp_forecast_horizon)
+                ):
+                    policy_start = time.perf_counter()
+                    selected = self.agent.select_env_actions_batch(
+                        observations,
+                        deterministic=bool(
+                            self.train_cfg.dpp_deterministic_fast_forecast
+                        ),
+                        update_norm=False,
+                    )
+                    if self.agent.device.type == "cuda":
+                        torch.cuda.synchronize(self.agent.device)
+                    self.policy_seconds += time.perf_counter() - policy_start
+                    self.gpu_batch_sizes.append(count)
+
+                    step_items = list(zip(shadows, selected["env_actions"]))
+                    env_start = time.perf_counter()
+                    if executor is None:
+                        results = [_step_shadow(item) for item in step_items]
+                    else:
+                        results = list(executor.map(_step_shadow, step_items))
+                    self.env_seconds += time.perf_counter() - env_start
+
+                    next_observations: list[Dict[str, Any]] = []
+                    for idx, result in enumerate(results):
+                        next_obs, reward, terminated, truncated, info = result
+                        expected_boundary = (
+                            slot_idx
+                            == int(self.train_cfg.dpp_forecast_horizon) - 1
+                        )
+                        actual_boundary = bool(
+                            info.get("is_round_boundary", False)
+                        )
+                        if actual_boundary != expected_boundary:
+                            raise RuntimeError(
+                                "Forecast round boundary mismatch: "
+                                f"slot={slot_idx}, actual={actual_boundary}."
+                            )
+                        if terminated or truncated:
+                            invalid[idx] = True
+
+                        _, slot_cost = formulation_reward_from_env_step(
+                            env_reward=reward,
+                            info=info,
+                            env_cfg=self.env.cfg,
+                        )
+                        accumulated[idx] += slot_cost
+
+                        if bool(
+                            self.train_cfg.dpp_reject_forecast_outage
+                        ) and np.any(
+                            np.asarray(
+                                info.get("outage", []), dtype=np.int32
+                            )
+                            > 0
+                        ):
+                            invalid[idx] = True
+                        next_observations.append(next_obs)
+                    observations = next_observations
+
+                accumulated[invalid] = np.inf
+                scenario_costs[scenario_idx] = accumulated
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
+
+        mean_fast_cost = np.mean(scenario_costs, axis=0)
+        for idx, action in enumerate(actions):
+            if np.isfinite(mean_fast_cost[idx]):
+                mean_fast_cost[idx] += _hiring_cost(self.env, action)
+        return mean_fast_cost
+
+
+def select_slow_action_dpp(
+    env: Env,
+    agent: FastPPOAgent,
+    train_cfg: FastTrainConfig,
+) -> SlowSelectionResult:
+    if int(env.round_slot) != 0:
+        raise RuntimeError(
+            f"Slow-DPP must run at round boundary, got {env.round_slot}."
+        )
+
+    env_digest_before = _env_state_digest(env)
+    model_digest_before = _model_parameter_digest(agent)
+    normalizer_state_before = (
+        copy.deepcopy(agent.obs_normalizer.state_dict())
+        if agent.obs_normalizer is not None
+        else None
+    )
+
+    wall_start = time.perf_counter()
+    agent.model.eval()
+    evaluator = SlowDPPEvaluator(env, agent, train_cfg)
+
+    current_action = _zero_slow_action(env)
+    current_score = evaluator.evaluate([current_action])[0]
+    if not np.isfinite(current_score):
+        raise RuntimeError("All-zero initial slow action produced nonfinite cost.")
+
+    completed_sweeps = 0
+    for sweep_idx in range(int(train_cfg.dpp_coordinate_sweeps)):
+        sweep_improved = False
+        for region_idx in range(int(env.num_rsu)):
+            local_candidates = _region_candidates(
+                env,
+                region_idx,
+                train_cfg,
+            )
+            trial_actions = [
+                _replace_region_candidate(
+                    current_action,
+                    region_idx,
+                    local,
+                )
+                for local in local_candidates
+            ]
+            trial_scores = np.asarray(
+                evaluator.evaluate(trial_actions), dtype=np.float64
+            )
+            finite = np.flatnonzero(np.isfinite(trial_scores))
+            if finite.size == 0:
+                continue
+
+            best_idx = int(finite[np.argmin(trial_scores[finite])])
+            best_score = float(trial_scores[best_idx])
+            if (
+                best_score
+                < current_score
+                - float(train_cfg.dpp_improvement_tolerance)
+            ):
+                current_action = trial_actions[best_idx]
+                current_score = best_score
+                sweep_improved = True
+
+        completed_sweeps = sweep_idx + 1
+        if not sweep_improved:
+            break
+
+    _validate_candidate(env, current_action, train_cfg)
+    wall_seconds = time.perf_counter() - wall_start
+
+    if _env_state_digest(env) != env_digest_before:
+        raise RuntimeError("Slow forecast mutated the real environment.")
+    if _model_parameter_digest(agent) != model_digest_before:
+        raise RuntimeError("Slow forecast mutated Fast policy parameters.")
+    if agent.obs_normalizer is not None:
+        after = agent.obs_normalizer.state_dict()
+        if pickle.dumps(after) != pickle.dumps(normalizer_state_before):
+            raise RuntimeError("Slow forecast mutated observation normalizer.")
+
+    mean_batch = (
+        float(np.mean(evaluator.gpu_batch_sizes))
+        if evaluator.gpu_batch_sizes
         else 0.0
     )
+    return SlowSelectionResult(
+        action=current_action,
+        predicted_round_cost=float(current_score),
+        solver_mode="region_coordinate_complete_action",
+        coordinate_sweeps=int(completed_sweeps),
+        candidate_requests=int(evaluator.candidate_requests),
+        unique_candidates=int(len(evaluator.cache)),
+        finite_candidates=int(evaluator.finite_candidates),
+        forecast_seconds=float(wall_seconds),
+        policy_seconds=float(evaluator.policy_seconds),
+        env_seconds=float(evaluator.env_seconds),
+        mean_gpu_batch=mean_batch,
+    )
 
-    prev_connection_state = info.get(
-        "prev_connection_state",
-        {},
-    )
-    connection_type = np.asarray(
-        prev_connection_state.get(
-            "connection_type",
-            [],
-        ),
-        dtype=np.int32,
-    )
 
-    if (
-        stall_arr.shape
-        == playback_arr.shape
-        == connection_type.shape
-    ):
-        scheduled_mask = (
-            connection_type > 0
-        )
-        unscheduled_mask = (
-            ~scheduled_mask
-        )
+# ======================================================================
+# Metrics / plots
+# ======================================================================
+def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
+    reward_components = info.get("reward_components", {})
+    fast = reward_components.get("fast_reward_components", {})
 
-        scheduled_stall = float(
-            np.sum(
-                stall_arr[scheduled_mask]
-            )
-        )
-        scheduled_playback = float(
-            np.sum(
-                playback_arr[scheduled_mask]
-            )
-        )
-
-        unscheduled_stall = float(
-            np.sum(
-                stall_arr[unscheduled_mask]
-            )
-        )
-        unscheduled_playback = float(
-            np.sum(
-                playback_arr[unscheduled_mask]
-            )
-        )
-    else:
-        scheduled_stall = 0.0
-        scheduled_playback = 0.0
-        unscheduled_stall = 0.0
-        unscheduled_playback = 0.0
-
-    next_E = np.asarray(
-        info.get("next_E", []),
-        dtype=np.float32,
-    )
-    next_B = np.asarray(
-        info.get("next_B", []),
-        dtype=np.float32,
-    )
-    charging_state = np.asarray(
-        info.get("charging_state", []),
-        dtype=np.float32,
-    )
-    outage = np.asarray(
-        info.get("outage", []),
-        dtype=np.float32,
-    )
+    stall = np.asarray(info.get("stall", []), dtype=np.float64)
+    next_e = np.asarray(info.get("next_E", []), dtype=np.float64)
+    outage = np.asarray(info.get("outage", []), dtype=np.float64)
+    charging = np.asarray(info.get("charging_state", []), dtype=np.float64)
 
     return {
-        "one_slot_dpp_cost": float(
-            fast_components.get(
-                "one_slot_dpp_cost",
-                -float(
-                    fast_components.get(
-                        "fast_reward",
-                        0.0,
-                    )
-                ),
-            )
+        "delivery": float(fast.get("sum_delivery", 0.0)),
+        "quality": float(fast.get("sum_quality", 0.0)),
+        "quality_degradation": float(
+            fast.get("sum_quality_degradation", 0.0)
         ),
-        "queue_playback_term": float(
-            fast_components.get(
-                "queue_playback_term",
-                0.0,
-            )
+        "consumed_soc": float(fast.get("sum_consumed_soc", 0.0)),
+        "charged_soc": float(fast.get("sum_charged_soc", 0.0)),
+        "stall": float(np.sum(stall)) if stall.size else 0.0,
+        "min_soc": float(np.min(next_e)) if next_e.size else 0.0,
+        "outage_slots": float(np.sum(outage)) if outage.size else 0.0,
+        "charging_slots": (
+            float(np.sum(charging)) if charging.size else 0.0
         ),
-        "sum_delivery": float(
-            fast_components.get(
-                "sum_delivery",
-                0.0,
-            )
-        ),
-        "sum_quality": float(
-            fast_components.get(
-                "sum_quality",
-                0.0,
-            )
-        ),
-        "sum_quality_degradation": float(
-            fast_components.get(
-                "sum_quality_degradation",
-                0.0,
-            )
-        ),
-        "quality_per_chunk": float(
-            fast_components.get(
-                "quality_per_chunk",
-                0.0,
-            )
-        ),
-        "quality_degradation_per_chunk": float(
-            fast_components.get(
-                "quality_degradation_per_chunk",
-                0.0,
-            )
-        ),
-
         "video_delivery_term": float(
-            fast_components.get(
-                "video_delivery_term",
-                0.0,
-            )
+            fast.get("video_delivery_term", 0.0)
         ),
         "battery_consume_term": float(
-            fast_components.get(
-                "battery_consume_term",
-                0.0,
-            )
+            fast.get("battery_consume_term", 0.0)
         ),
         "battery_charge_term": float(
-            fast_components.get(
-                "battery_charge_term",
-                0.0,
-            )
+            fast.get("battery_charge_term", 0.0)
         ),
         "quality_degradation_term": float(
-            fast_components.get(
-                "quality_degradation_term",
-                0.0,
-            )
-        ),
-
-        "delivery_term_share": float(
-            fast_components.get(
-                "delivery_term_share",
-                0.0,
-            )
-        ),
-        "battery_consume_term_share": float(
-            fast_components.get(
-                "battery_consume_term_share",
-                0.0,
-            )
-        ),
-        "battery_charge_term_share": float(
-            fast_components.get(
-                "battery_charge_term_share",
-                0.0,
-            )
-        ),
-        "quality_term_share": float(
-            fast_components.get(
-                "quality_term_share",
-                0.0,
-            )
-        ),
-
-        "sum_consumed_soc": float(
-            fast_components.get(
-                "sum_consumed_soc",
-                0.0,
-            )
-        ),
-        "sum_charged_soc": float(
-            fast_components.get(
-                "sum_charged_soc",
-                0.0,
-            )
-        ),
-
-        "num_hired_uav": float(
-            fast_components.get(
-                "num_hired_uav",
-                0.0,
-            )
-        ),
-        "num_charging_uav": float(
-            fast_components.get(
-                "num_charging_uav",
-                0.0,
-            )
-        ),
-        "num_outage_uav": float(
-            fast_components.get(
-                "num_outage_uav",
-                0.0,
-            )
-        ),
-
-        "stall_sum": stall_sum,
-        "scheduled_stall": (
-            scheduled_stall
-        ),
-        "scheduled_playback": (
-            scheduled_playback
-        ),
-        "scheduled_stall_rate": (
-            scheduled_stall
-            / scheduled_playback
-            if scheduled_playback > 0.0
-            else 0.0
-        ),
-        "unscheduled_stall": (
-            unscheduled_stall
-        ),
-        "unscheduled_playback": (
-            unscheduled_playback
-        ),
-        "unscheduled_stall_rate": (
-            unscheduled_stall
-            / unscheduled_playback
-            if unscheduled_playback > 0.0
-            else 0.0
-        ),
-
-        "min_soc": (
-            float(np.min(next_E))
-            if next_E.size > 0
-            else 0.0
-        ),
-        "mean_soc": (
-            float(np.mean(next_E))
-            if next_E.size > 0
-            else 0.0
-        ),
-        "max_B": (
-            float(np.max(next_B))
-            if next_B.size > 0
-            else 0.0
-        ),
-        "mean_B": (
-            float(np.mean(next_B))
-            if next_B.size > 0
-            else 0.0
-        ),
-        "charging_slots": (
-            float(np.sum(charging_state))
-            if charging_state.size > 0
-            else 0.0
-        ),
-        "outage_slots": (
-            float(np.sum(outage))
-            if outage.size > 0
-            else 0.0
+            fast.get("quality_degradation_term", 0.0)
         ),
     }
 
 
+def _read_scalar_csv(path: Path) -> Dict[str, list[float]]:
+    result: Dict[str, list[float]] = {}
+    if not path.exists():
+        return result
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            for key, value in row.items():
+                try:
+                    result.setdefault(str(key), []).append(float(value))
+                except (TypeError, ValueError):
+                    pass
+    return result
+
+
+def save_training_plots(run_dir: Path, smooth_window: int = 5) -> None:
+    del smooth_window
+    data = _read_scalar_csv(run_dir / "logs" / "episodes.csv")
+    if "episode" not in data:
+        return
+
+    x = np.asarray(data["episode"], dtype=np.float64)
+    for key in (
+        "episode_formulation_reward",
+        "episode_delivery",
+        "episode_stall",
+        "episode_prediction_gap_mean",
+    ):
+        if key not in data or len(data[key]) != len(x):
+            continue
+        plt.figure()
+        plt.plot(x, np.asarray(data[key], dtype=np.float64))
+        plt.xlabel("Episode")
+        plt.ylabel(key)
+        plt.title(key)
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(run_dir / "figures" / f"{key}.png", dpi=200)
+        plt.close()
+
+
+# ======================================================================
+# Agent initialization / checkpoint
+# ======================================================================
+def _initialize_agent(
+    env: Env,
+    initial_obs: Dict[str, Any],
+    train_cfg: FastTrainConfig,
+    ppo_cfg: AgentPPOConfig,
+) -> FastPPOAgent:
+    agent = FastPPOAgent(
+        env_cfg=env.cfg,
+        obs_dim=infer_fast_obs_dim(initial_obs),
+        ppo_cfg=ppo_cfg,
+    )
+
+    if train_cfg.fail_if_cuda_unavailable and agent.device.type != "cuda":
+        raise RuntimeError(
+            "CUDA was required but the Fast-PPO agent is not on CUDA."
+        )
+
+    checkpoint = _resolve_checkpoint(train_cfg.checkpoint)
+    if train_cfg.legacy_transfer:
+        if checkpoint is None:
+            raise ValueError("legacy_transfer requires checkpoint.")
+        agent.load_legacy_transfer(checkpoint)
+    elif train_cfg.resume:
+        if checkpoint is None:
+            raise ValueError("resume requires checkpoint.")
+        agent.load(checkpoint, strict=True, load_optimizer=True)
+    elif checkpoint is not None:
+        # Pretrained initialization followed by online round-wise fine-tuning.
+        agent.load(
+            checkpoint,
+            strict=True,
+            load_optimizer=bool(train_cfg.load_optimizer_on_warm_start),
+        )
+    elif (
+        train_cfg.slow_decision_mode == "dpp"
+        and train_cfg.require_pretrained_fast_for_dpp
+    ):
+        raise ValueError("DPP mode requires a pretrained Fast-PPO checkpoint.")
+
+    return agent
+
+
+# ======================================================================
+# Round execution
+# ======================================================================
+def _select_and_apply_slow_action(
+    env: Env,
+    agent: FastPPOAgent,
+    train_cfg: FastTrainConfig,
+    slow_rng: np.random.Generator,
+) -> Tuple[Dict[str, Any], Dict[str, float]]:
+    if train_cfg.slow_decision_mode == "dpp":
+        selected = select_slow_action_dpp(env, agent, train_cfg)
+        env.apply_slow_action(selected.action)
+        return env.get_fast_obs(), {
+            "predicted_round_cost": selected.predicted_round_cost,
+            "candidate_requests": float(selected.candidate_requests),
+            "unique_candidates": float(selected.unique_candidates),
+            "finite_candidates": float(selected.finite_candidates),
+            "coordinate_sweeps": float(selected.coordinate_sweeps),
+            "forecast_seconds": selected.forecast_seconds,
+            "forecast_policy_seconds": selected.policy_seconds,
+            "forecast_env_seconds": selected.env_seconds,
+            "forecast_mean_gpu_batch": selected.mean_gpu_batch,
+            "num_rsu_links": float(
+                np.sum(selected.action["rsu_scheduling"])
+            ),
+            "num_hired_uav": float(
+                np.sum(selected.action["uav_hiring"])
+            ),
+            "num_uav_links": float(
+                np.sum(selected.action["uav_scheduling"])
+            ),
+        }
+
+    action = sample_random_slow_action(env, slow_rng, train_cfg)
+    env.apply_slow_action(action)
+    return env.get_fast_obs(), {
+        "predicted_round_cost": float("nan"),
+        "candidate_requests": 0.0,
+        "unique_candidates": 0.0,
+        "finite_candidates": 0.0,
+        "coordinate_sweeps": 0.0,
+        "forecast_seconds": 0.0,
+        "forecast_policy_seconds": 0.0,
+        "forecast_env_seconds": 0.0,
+        "forecast_mean_gpu_batch": 0.0,
+        "num_rsu_links": float(np.sum(action["rsu_scheduling"])),
+        "num_hired_uav": float(np.sum(action["uav_hiring"])),
+        "num_uav_links": float(np.sum(action["uav_scheduling"])),
+    }
+
+
+def _execute_real_round_train(
+    env: Env,
+    agent: FastPPOAgent,
+    obs: Dict[str, Any],
+    train_cfg: FastTrainConfig,
+) -> Tuple[Dict[str, Any], Dict[str, float], Dict[str, float]]:
+    if len(agent.buffer) != 0:
+        raise RuntimeError("PPO buffer must be empty at real round start.")
+
+    model_digest_before = _model_parameter_digest(agent)
+    raw_obs_batch: list[np.ndarray] = []
+
+    totals = {
+        "formulation_reward": 0.0,
+        "round_fast_cost": 0.0,
+        "delivery": 0.0,
+        "quality": 0.0,
+        "quality_degradation": 0.0,
+        "stall": 0.0,
+        "consumed_soc": 0.0,
+        "charged_soc": 0.0,
+        "outage_slots": 0.0,
+        "charging_slots": 0.0,
+        "min_soc": float("inf"),
+        "service_rate": 0.0,
+        "requested_chunks": 0.0,
+        "active_action_dims": 0.0,
+        "active_action_ratio": 0.0,
+        "action_saturation_ratio": 0.0,
+    }
+
+    real_start = time.perf_counter()
+    agent.model.train()
+
+    for slot_idx in range(int(env.slow_T)):
+        # The normalizer and model are fixed for the whole round.
+        selected = agent.select_action(
+            obs,
+            deterministic=False,
+            update_norm=False,
+        )
+        raw_obs_batch.append(selected["raw_obs_vec"])
+
+        next_obs, env_reward, terminated, truncated, info = split_env_step(
+            env.step(selected["env_action"])
+        )
+        expected_boundary = slot_idx == int(env.slow_T) - 1
+        if bool(info.get("is_round_boundary", False)) != expected_boundary:
+            raise RuntimeError(
+                f"Real round boundary mismatch at slot {slot_idx}."
+            )
+        if terminated or truncated:
+            raise RuntimeError(
+                "Environment terminated/truncated inside fixed real round."
+            )
+
+        formulation_reward, slot_cost = formulation_reward_from_env_step(
+            env_reward=env_reward,
+            info=info,
+            env_cfg=env.cfg,
+        )
+        is_segment_terminal = bool(expected_boundary)
+
+        agent.store_transition(
+            obs_vec=selected["obs_vec"],
+            raw_action=selected["raw_action"],
+            action_mask=selected["action_mask"],
+            reward=(
+                formulation_reward * float(train_cfg.ppo_reward_scale)
+            ),
+            done=is_segment_terminal,
+            value=float(selected["value"]),
+            log_prob=float(selected["log_prob"]),
+        )
+
+        metrics = extract_info_metrics(info)
+        totals["formulation_reward"] += formulation_reward
+        totals["round_fast_cost"] += slot_cost
+        for key in (
+            "delivery",
+            "quality",
+            "quality_degradation",
+            "stall",
+            "consumed_soc",
+            "charged_soc",
+            "outage_slots",
+            "charging_slots",
+        ):
+            totals[key] += metrics[key]
+        totals["min_soc"] = min(totals["min_soc"], metrics["min_soc"])
+        totals["service_rate"] += float(selected.get("service_rate", 0.0))
+        totals["requested_chunks"] += float(
+            selected.get("mean_requested_chunks", 0.0)
+        )
+        totals["active_action_dims"] += float(
+            selected["active_action_dims"]
+        )
+        totals["active_action_ratio"] += float(
+            selected["active_action_ratio"]
+        )
+        totals["action_saturation_ratio"] += float(
+            selected["action_saturation_ratio"]
+        )
+        obs = next_obs
+
+    real_seconds = time.perf_counter() - real_start
+    if len(agent.buffer) != int(env.slow_T) or not agent.buffer.is_full:
+        raise RuntimeError(
+            "One completed real round must exactly fill the PPO buffer: "
+            f"len={len(agent.buffer)}, expected={env.slow_T}."
+        )
+    if _model_parameter_digest(agent) != model_digest_before:
+        raise RuntimeError("Fast policy changed inside a real round.")
+
+    # Round is a finite-horizon Fast subproblem under one fixed slow action.
+    agent.finish_rollout(last_obs=obs, last_done=True)
+    update_start = time.perf_counter()
+    update_logs = agent.update()
+    update_seconds = time.perf_counter() - update_start
+
+    # Only real observations update statistics, and only after the old-policy
+    # PPO update has consumed the round buffer.
+    if bool(train_cfg.freeze_obs_norm_within_round):
+        agent.update_obs_normalizer(np.stack(raw_obs_batch, axis=0))
+
+    denominator = float(max(int(env.slow_T), 1))
+    for key in (
+        "service_rate",
+        "requested_chunks",
+        "active_action_dims",
+        "active_action_ratio",
+        "action_saturation_ratio",
+    ):
+        totals[key] /= denominator
+
+    if not np.isfinite(totals["min_soc"]):
+        totals["min_soc"] = 0.0
+
+    totals["hiring_cost"] = _hiring_cost(
+        env,
+        {
+            "uav_hiring": env.uav_hiring,
+            "rsu_scheduling": env.rsu_scheduling,
+            "uav_scheduling": env.uav_scheduling,
+        },
+    )
+    totals["realized_round_cost"] = (
+        totals["round_fast_cost"] + totals["hiring_cost"]
+    )
+    totals["real_round_seconds"] = real_seconds
+    totals["real_slots_per_second"] = float(env.slow_T) / max(
+        real_seconds, 1e-12
+    )
+    totals["ppo_update_seconds"] = update_seconds
+    return obs, totals, update_logs
+
+
+def _execute_real_round_eval(
+    env: Env,
+    agent: FastPPOAgent,
+    obs: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, float]]:
+    totals = {
+        "formulation_reward": 0.0,
+        "round_fast_cost": 0.0,
+        "delivery": 0.0,
+        "quality": 0.0,
+        "quality_degradation": 0.0,
+        "stall": 0.0,
+        "outage_slots": 0.0,
+        "min_soc": float("inf"),
+    }
+    agent.model.eval()
+
+    for slot_idx in range(int(env.slow_T)):
+        selected = agent.select_action(
+            obs,
+            deterministic=True,
+            update_norm=False,
+        )
+        next_obs, env_reward, terminated, truncated, info = split_env_step(
+            env.step(selected["env_action"])
+        )
+        expected_boundary = slot_idx == int(env.slow_T) - 1
+        if bool(info.get("is_round_boundary", False)) != expected_boundary:
+            raise RuntimeError("Evaluation round boundary mismatch.")
+        if terminated or truncated:
+            raise RuntimeError("Evaluation terminated inside a round.")
+
+        reward, cost = formulation_reward_from_env_step(
+            env_reward=env_reward,
+            info=info,
+            env_cfg=env.cfg,
+        )
+        metrics = extract_info_metrics(info)
+        totals["formulation_reward"] += reward
+        totals["round_fast_cost"] += cost
+        for key in (
+            "delivery",
+            "quality",
+            "quality_degradation",
+            "stall",
+            "outage_slots",
+        ):
+            totals[key] += metrics[key]
+        totals["min_soc"] = min(totals["min_soc"], metrics["min_soc"])
+        obs = next_obs
+
+    totals["hiring_cost"] = _hiring_cost(
+        env,
+        {
+            "uav_hiring": env.uav_hiring,
+            "rsu_scheduling": env.rsu_scheduling,
+            "uav_scheduling": env.uav_scheduling,
+        },
+    )
+    totals["realized_round_cost"] = (
+        totals["round_fast_cost"] + totals["hiring_cost"]
+    )
+    if not np.isfinite(totals["min_soc"]):
+        totals["min_soc"] = 0.0
+    return obs, totals
+
+
+# ======================================================================
+# Train / evaluate
+# ======================================================================
 def train(train_cfg: FastTrainConfig) -> None:
     set_seed(
         int(train_cfg.seed),
         deterministic=bool(train_cfg.deterministic_torch),
     )
-
-    env_cfg = build_env_config(
-        train_cfg,
-        rounds_per_episode=int(
-            train_cfg.rounds_per_episode
-        ),
-    )
+    env_cfg = build_env_config()
+    _assert_joint_config(train_cfg, env_cfg)
     ppo_cfg = build_agent_ppo_config(train_cfg)
 
-    slow_rng = np.random.default_rng(int(train_cfg.seed) + 10007)
-
     env = Env(env_cfg)
-
-    obs, reset_info = reset_env(
-        env=env,
-        slow_rng=slow_rng,
-        train_cfg=train_cfg,
-    )
-
-    obs_dim = infer_fast_obs_dim(obs)
-
-    agent = FastPPOAgent(
-        env_cfg=env_cfg,
-        obs_dim=obs_dim,
-        ppo_cfg=ppo_cfg,
-    )
-
-    if train_cfg.legacy_transfer:
-        if train_cfg.checkpoint is None:
-            raise ValueError(
-                "legacy_transfer=True이면 "
-                "checkpoint가 필요합니다."
-            )
-
-        transfer_info = (
-            agent.load_legacy_transfer(
-                train_cfg.checkpoint
-            )
-        )
-
-        print(
-            "[LEGACY TRANSFER] "
-            f"critic tensors="
-            f"{transfer_info['num_transferred_tensors']}",
-            flush=True,
-        )
-
-    elif train_cfg.resume:
-        if train_cfg.checkpoint is None:
-            raise ValueError(
-                "resume=True이면 "
-                "checkpoint가 필요합니다."
-            )
-
-        # 새 mixed policy checkpoint만 resume 가능
-        agent.load(
-            path=train_cfg.checkpoint,
-            strict=True,
-            load_optimizer=True,
-        )
+    initial_obs, reset_info = split_env_reset(env.reset())
+    agent = _initialize_agent(env, initial_obs, train_cfg, ppo_cfg)
 
     run_dir = make_run_dir(train_cfg, env_cfg)
-
     save_configs(
-        run_dir=run_dir,
-        train_cfg=train_cfg,
-        env_cfg=env_cfg,
-        ppo_cfg=ppo_cfg,
-        obs_dim=obs_dim,
+        run_dir,
+        train_cfg,
+        env_cfg,
+        ppo_cfg,
+        obs_dim=agent.obs_dim,
         action_dim=agent.action_dim,
     )
 
     episode_logger = ScalarLogger(run_dir / "logs" / "episodes.csv")
+    round_logger = ScalarLogger(run_dir / "logs" / "rounds.csv")
     update_logger = ScalarLogger(run_dir / "logs" / "updates.csv")
+    slow_rng = np.random.default_rng(int(train_cfg.seed) + 10_007)
 
     print("=" * 100, flush=True)
-    print("[FAST PPO TRAIN START]", flush=True)
-    print(f"proposed_root : {PROPOSED_ROOT}", flush=True)
-    print(f"run_dir       : {run_dir}", flush=True)
-    print(f"device        : {agent.device}", flush=True)
-    print(f"obs_dim       : {obs_dim}", flush=True)
-    print(f"action_dim    : {agent.action_dim}", flush=True)
-    print(f"slow_T        : {env_cfg.slow_T}", flush=True)
-    print(f"episode_slots : {env_cfg.episode_slots}", flush=True)
-    print(
-        f"rounds/episode: {train_cfg.rounds_per_episode}",
-        flush=True,
-    )
-    print(f"rollout_slots : {ppo_cfg.rollout_steps}", flush=True)
-    print(f"reset_info    : {reset_info}", flush=True)
+    print("[SLOW-DPP + FAST-PPO TRAIN START]", flush=True)
+    print(f"branch_basis   : feat/fast-hrl@bf31c6f", flush=True)
+    print(f"run_dir        : {run_dir}", flush=True)
+    print(f"device         : {agent.device}", flush=True)
+    print(f"slow_mode      : {train_cfg.slow_decision_mode}", flush=True)
+    print(f"slow_T         : {env_cfg.slow_T}", flush=True)
+    print(f"rollout_slots  : {ppo_cfg.rollout_steps}", flush=True)
+    print(f"checkpoint     : {_resolve_checkpoint(train_cfg.checkpoint)}", flush=True)
+    print(f"reset_info     : {reset_info}", flush=True)
     print("=" * 100, flush=True)
 
-    global_slot = 0
+    global_real_slot = 0
+    global_round = 0
     update_idx = 0
-    episode_idx = 0
 
-    last_obs = obs
-    last_done = False
+    for episode_idx in range(1, int(train_cfg.num_episodes) + 1):
+        env.cfg.move_prob = get_episode_move_prob(train_cfg, episode_idx)
+        obs, _ = split_env_reset(env.reset())
 
-    while episode_idx < int(train_cfg.num_episodes):
-        current_episode = episode_idx + 1
+        ep = {
+            "reward": 0.0,
+            "delivery": 0.0,
+            "quality": 0.0,
+            "quality_degradation": 0.0,
+            "stall": 0.0,
+            "outage_slots": 0.0,
+            "forecast_seconds": 0.0,
+            "real_seconds": 0.0,
+            "update_seconds": 0.0,
+            "prediction_gap_sum": 0.0,
+            "prediction_gap_count": 0,
+            "min_soc": float("inf"),
+        }
 
-        current_speed_scale = (
-            get_episode_mobility_speed_scale(
-                train_cfg=train_cfg,
-                episode_idx=current_episode,
+        for round_in_episode in range(1, int(train_cfg.rounds_per_episode) + 1):
+            if int(env.round_slot) != 0:
+                raise RuntimeError("Episode loop is not at a round boundary.")
+
+            obs, slow_info = _select_and_apply_slow_action(
+                env,
+                agent,
+                train_cfg,
+                slow_rng,
             )
-        )
+            policy_version = update_idx
 
-        env.cfg.mobility_speed_scale = float(
-            current_speed_scale
-        )
+            obs, realized, update_logs = _execute_real_round_train(
+                env,
+                agent,
+                obs,
+                train_cfg,
+            )
+            update_idx += 1
+            global_round += 1
+            global_real_slot += int(env_cfg.slow_T)
 
-        obs, reset_info = reset_env(
-            env=env,
-            slow_rng=slow_rng,
-            train_cfg=train_cfg,
-        )
-
-        ep_reward = 0.0
-        ep_dpp_cost = 0.0
-        ep_delivery = 0.0
-        ep_quality = 0.0
-        ep_stall = 0.0
-        ep_consumed_soc = 0.0
-        ep_charged_soc = 0.0
-        ep_outage = 0.0
-        ep_steps = 0
-        ep_min_soc = float("inf")
-        ep_mean_soc_sum = 0.0
-        ep_max_B = 0.0
-        ep_mean_B_sum = 0.0
-        ep_charging_slots = 0.0
-        ep_outage_slots = 0.0
-        ep_rounds_completed = 0
-        ep_user_entries = 0
-        ep_region_crossings = 0
-        ep_active_uav_power_sum = 0.0
-        ep_active_uav_power_sq_sum = 0.0
-        ep_active_uav_power_count = 0
-
-        ep_quality_degradation = 0.0
-
-        ep_video_delivery_term = 0.0
-        ep_queue_playback_term = 0.0
-        ep_battery_consume_term = 0.0
-        ep_battery_charge_term = 0.0
-        ep_quality_degradation_term = 0.0
-
-        ep_scheduled_stall = 0.0
-        ep_scheduled_playback = 0.0
-        ep_unscheduled_stall = 0.0
-        ep_unscheduled_playback = 0.0
-
-        ep_active_action_dims = 0.0
-        ep_active_action_ratio = 0.0
-        ep_action_saturation_ratio = 0.0
-
-        ep_horizon = int(env_cfg.slow_T) * int(train_cfg.rounds_per_episode)
-        if int(env_cfg.episode_slots) != ep_horizon:
-            raise RuntimeError(
-                "Environment/trainer episode horizon mismatch: "
-                f"env={env_cfg.episode_slots}, trainer={ep_horizon}"
+            predicted = float(slow_info["predicted_round_cost"])
+            realized_cost = float(realized["realized_round_cost"])
+            gap = (
+                realized_cost - predicted
+                if np.isfinite(predicted)
+                else float("nan")
             )
 
-        ep_service_rate = 0.0
-        ep_mean_requested_chunks = 0.0
-
-        ep_layer_ratios = np.zeros(
-            int(env_cfg.layer) + 1,
-            dtype=np.float64,
-        )
-
-        for _ in range(ep_horizon):
-            selected = agent.select_action(obs)
-
-            selected_uav_power = np.asarray(
-                selected["env_action"]["uav_power"],
-                dtype=np.float64,
+            round_row = {
+                "global_round": global_round,
+                "episode": episode_idx,
+                "round_in_episode": round_in_episode,
+                "policy_version": policy_version,
+                "global_real_slot": global_real_slot,
+                **slow_info,
+                **realized,
+                "prediction_gap": gap,
+            }
+            round_logger.write(round_row)
+            update_logger.write(
+                {
+                    "update": update_idx,
+                    "global_round": global_round,
+                    "episode": episode_idx,
+                    "global_real_slot": global_real_slot,
+                    **update_logs,
+                }
             )
-            active_uav_power = selected_uav_power[
-                selected_uav_power > 0.0
+
+            ep["reward"] += realized["formulation_reward"]
+            ep["delivery"] += realized["delivery"]
+            ep["quality"] += realized["quality"]
+            ep["quality_degradation"] += realized[
+                "quality_degradation"
             ]
-            if active_uav_power.size > 0:
-                ep_active_uav_power_sum += float(
-                    active_uav_power.sum()
-                )
-                ep_active_uav_power_sq_sum += float(
-                    np.square(active_uav_power).sum()
-                )
-                ep_active_uav_power_count += int(
-                    active_uav_power.size
-                )
+            ep["stall"] += realized["stall"]
+            ep["outage_slots"] += realized["outage_slots"]
+            ep["forecast_seconds"] += slow_info["forecast_seconds"]
+            ep["real_seconds"] += realized["real_round_seconds"]
+            ep["update_seconds"] += realized["ppo_update_seconds"]
+            ep["min_soc"] = min(ep["min_soc"], realized["min_soc"])
+            if np.isfinite(gap):
+                ep["prediction_gap_sum"] += gap
+                ep["prediction_gap_count"] += 1
 
-            ep_service_rate += float(
-                selected["service_rate"]
+            print(
+                "[ROUND] "
+                f"ep={episode_idx}/{train_cfg.num_episodes} "
+                f"r={round_in_episode}/{train_cfg.rounds_per_episode} "
+                f"policy_v={policy_version} "
+                f"pred={predicted:.4f} "
+                f"real={realized_cost:.4f} "
+                f"gap={gap:.4f} "
+                f"candidates={int(slow_info['unique_candidates'])} "
+                f"forecast_s={slow_info['forecast_seconds']:.2f} "
+                f"real_sps={realized['real_slots_per_second']:.2f} "
+                f"kl={update_logs['approx_kl']:.6f}",
+                flush=True,
             )
 
-            ep_mean_requested_chunks += float(
-                selected[
-                    "mean_requested_chunks"
-                ]
-            )
-
-            for layer_idx in range(
-                1,
-                int(env_cfg.layer) + 1,
-            ):
-                ep_layer_ratios[
-                    layer_idx
-                ] += float(
-                    selected[
-                        f"layer_{layer_idx}_ratio"
-                    ]
-                )
-
-            next_obs_raw, reward, terminated, truncated, info = split_env_step(
-                env.step(selected["env_action"])
-            )
-
-            is_round_boundary = bool(info.get("is_round_boundary", False))
-
-            ep_done = bool(terminated or truncated or ep_steps + 1 >= ep_horizon)
-
-            if is_round_boundary:
-                ep_rounds_completed += 1
-
-            entered_mask = np.asarray(
-                info.get("region_info", {}).get(
-                    "entered_mask",
-                    np.zeros(int(env_cfg.num_user), dtype=np.int32),
-                ),
-                dtype=np.int32,
-            )
-            ep_user_entries += int(entered_mask.sum())
-            crossing_mask = np.asarray(
-                info.get("region_info", {}).get(
-                    "region_crossing_mask",
-                    np.zeros(
-                        int(env_cfg.num_user),
-                        dtype=np.int32,
-                    ),
-                ),
-                dtype=np.int32,
-            )
-            ep_region_crossings += int(
-                crossing_mask.sum()
-            )
-
-            if ep_done and not is_round_boundary:
-                raise RuntimeError(
-                    "Episode ended inside a slow-timescale round. "
-                    f"ep_steps={ep_steps + 1}, slow_T={env_cfg.slow_T}"
-                )
-
-            # reward scaling
-            raw_reward = float(reward)
-            ppo_reward = raw_reward * float(train_cfg.ppo_reward_scale)
-
-            agent.store_transition(
-                obs_vec=selected["obs_vec"],
-                raw_action=selected["raw_action"],
-                action_mask=selected["action_mask"],
-                reward=ppo_reward,
-                done=ep_done,
-                value=float(selected["value"]),
-                log_prob=float(selected["log_prob"]),
-            )
-
-            metrics = extract_info_metrics(info)
-
-            ep_reward += raw_reward
-            ep_dpp_cost += metrics["one_slot_dpp_cost"]
-            ep_delivery += metrics["sum_delivery"]
-            ep_quality += metrics["sum_quality"]
-            ep_stall += metrics["stall_sum"]
-            ep_consumed_soc += metrics["sum_consumed_soc"]
-            ep_charged_soc += metrics["sum_charged_soc"]
-            ep_outage += metrics["num_outage_uav"]
-
-            ep_min_soc = min(ep_min_soc, metrics["min_soc"])
-            ep_mean_soc_sum += metrics["mean_soc"]
-            ep_max_B = max(ep_max_B, metrics["max_B"])
-            ep_mean_B_sum += metrics["mean_B"]
-            ep_charging_slots += metrics["charging_slots"]
-            ep_outage_slots += metrics["outage_slots"]
-
-            ep_quality_degradation += (
-                metrics["sum_quality_degradation"]
-            )
-
-            ep_video_delivery_term += (
-                metrics["video_delivery_term"]
-            )
-            ep_queue_playback_term += (
-                metrics["queue_playback_term"]
-            )
-            ep_battery_consume_term += (
-                metrics["battery_consume_term"]
-            )
-            ep_battery_charge_term += (
-                metrics["battery_charge_term"]
-            )
-            ep_quality_degradation_term += (
-                metrics["quality_degradation_term"]
-            )
-
-            ep_scheduled_stall += (
-                metrics["scheduled_stall"]
-            )
-            ep_scheduled_playback += (
-                metrics["scheduled_playback"]
-            )
-            ep_unscheduled_stall += (
-                metrics["unscheduled_stall"]
-            )
-            ep_unscheduled_playback += (
-                metrics["unscheduled_playback"]
-            )
-
-            ep_active_action_dims += float(
-                selected["active_action_dims"]
-            )
-            ep_active_action_ratio += float(
-                selected["active_action_ratio"]
-            )
-            ep_action_saturation_ratio += float(
-                selected["action_saturation_ratio"]
-            )
-
-            ep_steps += 1
-            global_slot += 1
-
-            next_obs = next_obs_raw
-
-            if is_round_boundary and not ep_done:
-                next_obs, slow_info = apply_random_slow_action_for_current_round(
-                    env=env,
-                    slow_rng=slow_rng,
-                    train_cfg=train_cfg,
-                )
-                info["next_random_slow_action"] = slow_info 
-
-            last_obs = next_obs
-            last_done = ep_done
-
-            if agent.buffer.is_full:
-                agent.finish_rollout(
-                    last_obs=last_obs,
-                    last_done=last_done,
-                )
-                update_logs = agent.update()
-                update_idx += 1
-
-                update_logger.write(
-                    {
-                        "update": update_idx,
-                        "global_slot": global_slot,
-                        "episode": episode_idx + 1,
-                        **update_logs,
-                    }
-                )
-
-                print(
-                    "[UPDATE] "
-                    f"update={update_idx} "
-                    f"slot={global_slot} "
-                    f"episode={episode_idx + 1} "
-                    f"policy_loss={update_logs['policy_loss']:.6f} "
-                    f"value_loss={update_logs['value_loss']:.6f} "
-                    f"cat_entropy={update_logs['categorical_entropy']:.6f} "
-                    f"power_entropy={update_logs['power_entropy']:.6f} "
-                    f"power_log_std={update_logs['power_log_std_mean']:.6f} "
-                    f"entropy_bonus={update_logs['entropy_bonus']:.6f} "
-                    f"kl={update_logs['approx_kl']:.6f} "
-                    f"clipfrac={update_logs['clipfrac']:.4f} "
-                    f"ev={update_logs['explained_variance']:.4f} "
-                    f"early_stop={int(update_logs['early_stopped'])} "
-                    f"minibatches={int(update_logs['completed_minibatches'])}",
-                    flush=True,
-                )
-
-            obs = next_obs
-
-            if ep_done:
-                break
-
-        episode_idx += 1
-
-        if ep_steps != ep_horizon:
-            raise RuntimeError(
-                "Incomplete training episode: "
-                f"expected_slots={ep_horizon}, actual_slots={ep_steps}"
-            )
-        if ep_rounds_completed != int(train_cfg.rounds_per_episode):
-            raise RuntimeError(
-                "Completed slow-round count mismatch: "
-                f"expected={train_cfg.rounds_per_episode}, "
-                f"actual={ep_rounds_completed}"
-            )
-        if not np.isclose(
-            ep_reward,
-            -ep_dpp_cost,
-            rtol=1e-6,
-            atol=1e-3,
-        ):
-            raise RuntimeError(
-                "Fast reward/DPP cost mismatch: "
-                f"episode_reward={ep_reward}, "
-                f"episode_dpp_cost={ep_dpp_cost}"
-            )
-
-        ep_quality_per_chunk = (
-            ep_quality / ep_delivery
-            if ep_delivery > 0.0
-            else 0.0
+        if not np.isfinite(ep["min_soc"]):
+            ep["min_soc"] = 0.0
+        gap_mean = (
+            ep["prediction_gap_sum"] / ep["prediction_gap_count"]
+            if ep["prediction_gap_count"] > 0
+            else float("nan")
         )
-
-        ep_quality_degradation_per_chunk = (
-            ep_quality_degradation
-            / ep_delivery
-            if ep_delivery > 0.0
-            else 0.0
-        )
-
-        ep_scheduled_stall_rate = (
-            ep_scheduled_stall
-            / ep_scheduled_playback
-            if ep_scheduled_playback > 0.0
-            else 0.0
-        )
-
-        ep_unscheduled_stall_rate = (
-            ep_unscheduled_stall
-            / ep_unscheduled_playback
-            if ep_unscheduled_playback > 0.0
-            else 0.0
-        )
-
-        ep_active_action_dims_mean = (
-            ep_active_action_dims
-            / max(ep_steps, 1)
-        )
-
-        ep_active_action_ratio_mean = (
-            ep_active_action_ratio
-            / max(ep_steps, 1)
-        )
-
-        ep_action_saturation_ratio_mean = (
-            ep_action_saturation_ratio
-            / max(ep_steps, 1)
-        )
-
-        ep_service_rate /= max(
-            ep_steps,
-            1,
-        )
-
-        ep_mean_requested_chunks /= max(
-            ep_steps,
-            1,
-        )
-
-        ep_layer_ratios /= float(
-            max(ep_steps, 1)
-        )
-
-        if ep_steps > 0:
-            ep_mean_soc = ep_mean_soc_sum / float(ep_steps)
-            ep_mean_B = ep_mean_B_sum / float(ep_steps)
-        else:
-            ep_mean_soc = 0.0
-            ep_mean_B = 0.0
-
-        if not np.isfinite(ep_min_soc):
-            ep_min_soc = 0.0
-
-        if ep_active_uav_power_count > 0:
-            ep_active_uav_power_mean = (
-                ep_active_uav_power_sum
-                / float(ep_active_uav_power_count)
-            )
-            ep_active_uav_power_var = max(
-                0.0,
-                ep_active_uav_power_sq_sum
-                / float(ep_active_uav_power_count)
-                - ep_active_uav_power_mean ** 2,
-            )
-            ep_active_uav_power_std = float(
-                np.sqrt(ep_active_uav_power_var)
-            )
-        else:
-            ep_active_uav_power_mean = 0.0
-            ep_active_uav_power_std = 0.0
-
         episode_logger.write(
             {
                 "episode": episode_idx,
-                "global_slot": global_slot,
-                "episode_steps": ep_steps,
-                "episode_reward": ep_reward,
-                "episode_dpp_cost": ep_dpp_cost,
-                "episode_delivery": ep_delivery,
-                "episode_quality": ep_quality,
-                "episode_stall": ep_stall,
-                "episode_consumed_soc": ep_consumed_soc,
-                "episode_charged_soc": ep_charged_soc,
-                "episode_outage": ep_outage,
-                "episode_min_soc": ep_min_soc,
-                "episode_mean_soc": ep_mean_soc,
-                "episode_max_B": ep_max_B,
-                "episode_mean_B": ep_mean_B,
-                "episode_charging_slots": ep_charging_slots,
-                "episode_outage_slots": ep_outage_slots,
-                "episode_rounds_completed":
-                    int(ep_rounds_completed),
-                "episode_user_entries":
-                    int(ep_user_entries),
-                "episode_region_crossings":
-                    int(ep_region_crossings),
-                "mobility_speed_scale":
-                    float(current_speed_scale),
-                "speed_min_kmh":
-                    float(env_cfg.speed_min_kmh),
-                "speed_max_kmh":
-                    float(env_cfg.speed_max_kmh),
-                "episode_quality_per_chunk":
-                    ep_quality_per_chunk,
-
-                "episode_quality_degradation":
-                    ep_quality_degradation,
-
-                "episode_quality_degradation_per_chunk":
-                    ep_quality_degradation_per_chunk,
-
-                "episode_scheduled_stall_rate":
-                    ep_scheduled_stall_rate,
-
-                "episode_unscheduled_stall_rate":
-                    ep_unscheduled_stall_rate,
-
-                "episode_video_delivery_term":
-                    ep_video_delivery_term,
-
-                "episode_queue_playback_term":
-                    ep_queue_playback_term,
-
-                "episode_battery_consume_term":
-                    ep_battery_consume_term,
-
-                "episode_battery_charge_term":
-                    ep_battery_charge_term,
-
-                "episode_quality_degradation_term":
-                    ep_quality_degradation_term,
-
-                "episode_active_action_dims_mean":
-                    ep_active_action_dims_mean,
-
-                "episode_active_action_ratio_mean":
-                    ep_active_action_ratio_mean,
-
-                "episode_action_saturation_ratio_mean":
-                    ep_action_saturation_ratio_mean,
-
-                "episode_active_uav_power_count":
-                    int(ep_active_uav_power_count),
-
-                "episode_active_uav_power_mean":
-                    ep_active_uav_power_mean,
-
-                "episode_active_uav_power_std":
-                    ep_active_uav_power_std,
-    
-                "episode_service_rate":
-                    ep_service_rate,
-
-                "episode_mean_requested_chunks":
-                    ep_mean_requested_chunks,
-
-                "episode_layer_1_ratio":
-                    float(ep_layer_ratios[1]),
-
-                "episode_layer_2_ratio":
-                    float(ep_layer_ratios[2]),
-
-                "episode_layer_3_ratio":
-                    float(ep_layer_ratios[3]),
-
-                "episode_layer_4_ratio":
-                    float(ep_layer_ratios[4]),
+                "global_round": global_round,
+                "global_real_slot": global_real_slot,
+                "move_prob": float(env.cfg.move_prob),
+                "episode_formulation_reward": ep["reward"],
+                "episode_delivery": ep["delivery"],
+                "episode_quality": ep["quality"],
+                "episode_quality_degradation": ep[
+                    "quality_degradation"
+                ],
+                "episode_stall": ep["stall"],
+                "episode_outage_slots": ep["outage_slots"],
+                "episode_min_soc": ep["min_soc"],
+                "episode_forecast_seconds": ep["forecast_seconds"],
+                "episode_real_seconds": ep["real_seconds"],
+                "episode_update_seconds": ep["update_seconds"],
+                "episode_prediction_gap_mean": gap_mean,
             }
         )
 
         print(
             "[EPISODE] "
             f"ep={episode_idx}/{train_cfg.num_episodes} "
-            f"steps={ep_steps} "
-            f"reward={ep_reward:.4f} "
-            f"dpp_cost={ep_dpp_cost:.4f} "
-            f"delivery={ep_delivery:.4f} "
-            f"quality={ep_quality:.4f} "
-            f"stall={ep_stall:.4f} "
-            f"rounds={ep_rounds_completed} "
-            f"entries={ep_user_entries} "
-            f"crossings={ep_region_crossings} "
-            f"uav_power={ep_active_uav_power_mean:.4f}",
-            f"min_soc={ep_min_soc:.2f} ",
-            f"charging_slots={ep_charging_slots:.0f} ",
-            f"outage_slots={ep_outage_slots:.0f}",
+            f"reward={ep['reward']:.4f} "
+            f"delivery={ep['delivery']:.1f} "
+            f"stall={ep['stall']:.1f} "
+            f"gap_mean={gap_mean:.4f} "
+            f"outage_slots={ep['outage_slots']:.0f}",
             flush=True,
         )
+
+        if (
+            int(train_cfg.save_every_episodes) > 0
+            and episode_idx % int(train_cfg.save_every_episodes) == 0
+        ):
+            checkpoint_path = (
+                run_dir
+                / "checkpoints"
+                / f"fast_ppo_joint_ep{episode_idx}.pt"
+            )
+            agent.save(
+                checkpoint_path,
+                extra={
+                    "episode": episode_idx,
+                    "global_round": global_round,
+                    "global_real_slot": global_real_slot,
+                    "update_idx": update_idx,
+                    "slow_decision_mode": train_cfg.slow_decision_mode,
+                    "env_config": (
+                        env_cfg.as_dict()
+                        if hasattr(env_cfg, "as_dict")
+                        else asdict(env_cfg)
+                    ),
+                    "train_config": train_cfg.to_dict(),
+                    "ppo_config": asdict(ppo_cfg),
+                },
+            )
+            print(f"[SAVE] {checkpoint_path}", flush=True)
 
         if (
             int(train_cfg.plot_every_episodes) > 0
             and episode_idx % int(train_cfg.plot_every_episodes) == 0
         ):
             save_training_plots(
-                run_dir=run_dir,
+                run_dir,
                 smooth_window=int(train_cfg.plot_smooth_window),
             )
-            print(f"[PLOT] saved figures to {run_dir / 'figures'}", flush=True)
 
-        if (
-            int(train_cfg.save_every_episodes) > 0
-            and episode_idx % int(train_cfg.save_every_episodes) == 0
-        ):
-            ckpt_path = run_dir / "checkpoints" / f"fast_ppo_ep{episode_idx}.pt"
-            agent.save(
-                ckpt_path,
-                extra={
-                    "episode": episode_idx,
-                    "global_slot": global_slot,
-                    "update_idx": update_idx,
-                    "env_config": env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg),
-                    "train_config": train_cfg.to_dict(),
-                    "ppo_config": asdict(ppo_cfg),
-                },
-            )
-            print(f"[SAVE] {ckpt_path}", flush=True)
+    if len(agent.buffer) != 0:
+        raise RuntimeError("Joint training ended with a nonempty PPO buffer.")
 
-    if len(agent.buffer) > 0:
-        agent.finish_rollout(
-            last_obs=last_obs,
-            last_done=last_done,
-        )
-        update_logs = agent.update()
-        update_idx += 1
-
-        update_logger.write(
-            {
-                "update": update_idx,
-                "global_slot": global_slot,
-                "episode": episode_idx,
-                **update_logs,
-            }
-        )
-
-        print(
-            "[FINAL UPDATE] "
-            f"update={update_idx} "
-            f"slot={global_slot} "
-            f"policy_loss={update_logs['policy_loss']:.6f} "
-            f"value_loss={update_logs['value_loss']:.6f} "
-            f"cat_entropy={update_logs['categorical_entropy']:.6f} "
-            f"power_entropy={update_logs['power_entropy']:.6f} "
-            f"power_log_std={update_logs['power_log_std_mean']:.6f} "
-            f"entropy_bonus={update_logs['entropy_bonus']:.6f} "
-            f"kl={update_logs['approx_kl']:.6f} "
-            f"clipfrac={update_logs['clipfrac']:.4f} "
-            f"ev={update_logs['explained_variance']:.4f} "
-            f"early_stop={int(update_logs['early_stopped'])} "
-            f"minibatches={int(update_logs['completed_minibatches'])}",
-            flush=True,
-        )
-
-    final_ckpt_path = run_dir / "checkpoints" / "fast_ppo_final.pt"
-
+    final_path = run_dir / "checkpoints" / "fast_ppo_joint_final.pt"
     agent.save(
-        final_ckpt_path,
+        final_path,
         extra={
-            "episode": episode_idx,
-            "global_slot": global_slot,
+            "episode": int(train_cfg.num_episodes),
+            "global_round": global_round,
+            "global_real_slot": global_real_slot,
             "update_idx": update_idx,
-            "env_config": env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg),
+            "slow_decision_mode": train_cfg.slow_decision_mode,
             "train_config": train_cfg.to_dict(),
+            "env_config": (
+                env_cfg.as_dict()
+                if hasattr(env_cfg, "as_dict")
+                else asdict(env_cfg)
+            ),
             "ppo_config": asdict(ppo_cfg),
         },
     )
-
     save_json(
         {
-            "episode": episode_idx,
-            "global_slot": global_slot,
-            "update_idx": update_idx,
-            "final_checkpoint": str(final_ckpt_path),
-            "run_dir": str(run_dir),
+            "final_checkpoint": str(final_path),
+            "global_round": global_round,
+            "global_real_slot": global_real_slot,
+            "updates": update_idx,
         },
         run_dir / "train_summary.json",
     )
-
-    save_training_plots(
-        run_dir=run_dir,
-        smooth_window=int(train_cfg.plot_smooth_window),
-    )
-
-    print("=" * 100, flush=True)
-    print("[FAST PPO TRAIN DONE]", flush=True)
-    print(f"final checkpoint: {final_ckpt_path}", flush=True)
-    print("=" * 100, flush=True)
+    save_training_plots(run_dir)
+    print(f"[DONE] final checkpoint: {final_path}", flush=True)
 
 
 def evaluate(train_cfg: FastTrainConfig) -> None:
     set_seed(int(train_cfg.seed), deterministic=True)
-
-    env_cfg = build_env_config(
-        train_cfg,
-        rounds_per_episode=int(
-            train_cfg.eval_rounds_per_episode
-        ),
-    )
-
-    target_speed_scale = float(
-        train_cfg.mobility_speed_curriculum[-1][1]
-    )
-    env_cfg.mobility_speed_scale = target_speed_scale
-
+    env_cfg = build_env_config()
+    _assert_joint_config(train_cfg, env_cfg)
+    env_cfg.move_prob = float(train_cfg.mobility_curriculum[-1][1])
     ppo_cfg = build_agent_ppo_config(train_cfg)
 
-    slow_rng = np.random.default_rng(int(train_cfg.seed) + 20011)
-
     env = Env(env_cfg)
-
-    obs, reset_info = reset_env(
-        env=env,
-        slow_rng=slow_rng,
-        train_cfg=train_cfg,
-    )
-
-    obs_dim = infer_fast_obs_dim(obs)
-
-    agent = FastPPOAgent(
-        env_cfg=env_cfg,
-        obs_dim=obs_dim,
-        ppo_cfg=ppo_cfg,
-    )
-
-    if train_cfg.checkpoint is None:
-        raise ValueError(
-            "eval mode에서는 checkpoint가 반드시 필요합니다."
-        )
-
-    if train_cfg.checkpoint is not None:
-        agent.load(
-            path=train_cfg.checkpoint,
-            strict=True,
-            load_optimizer=False,
-        )
-
+    obs, _ = split_env_reset(env.reset())
+    agent = _initialize_agent(env, obs, train_cfg, ppo_cfg)
     run_dir = make_run_dir(train_cfg, env_cfg)
-
     save_configs(
-        run_dir=run_dir,
-        train_cfg=train_cfg,
-        env_cfg=env_cfg,
-        ppo_cfg=ppo_cfg,
-        obs_dim=obs_dim,
-        action_dim=agent.action_dim,
+        run_dir,
+        train_cfg,
+        env_cfg,
+        ppo_cfg,
+        agent.obs_dim,
+        agent.action_dim,
     )
 
-    eval_logger = ScalarLogger(run_dir / "logs" / "eval_episodes.csv")
-
-    print("=" * 100, flush=True)
-    print("[FAST PPO EVAL START]", flush=True)
-    print(f"proposed_root : {PROPOSED_ROOT}", flush=True)
-    print(f"run_dir       : {run_dir}", flush=True)
-    print(f"device        : {agent.device}", flush=True)
-    print(f"obs_dim       : {obs_dim}", flush=True)
-    print(f"action_dim    : {agent.action_dim}", flush=True)
-    print(f"slow_T        : {env_cfg.slow_T}", flush=True)
-    print(f"episode_slots : {env_cfg.episode_slots}", flush=True)
-    print(
-        f"rounds/episode: {train_cfg.eval_rounds_per_episode}",
-        flush=True,
-    )
-    print(f"checkpoint    : {train_cfg.checkpoint}", flush=True)
-    print(f"reset_info    : {reset_info}", flush=True)
-    print("=" * 100, flush=True)
-
-    rewards: list[float] = []
-    deliveries: list[float] = []
-    qualities: list[float] = []
-    stalls: list[float] = []
+    logger = ScalarLogger(run_dir / "logs" / "eval_episodes.csv")
+    slow_rng = np.random.default_rng(int(train_cfg.seed) + 20_011)
 
     for episode_idx in range(1, int(train_cfg.eval_episodes) + 1):
-        obs, reset_info = reset_env(
-            env=env,
-            slow_rng=slow_rng,
-            train_cfg=train_cfg,
-        )
-
-        ep_reward = 0.0
-        ep_dpp_cost = 0.0
-        ep_delivery = 0.0
-        ep_quality = 0.0
-        ep_stall = 0.0
-        ep_consumed_soc = 0.0
-        ep_charged_soc = 0.0
-        ep_outage = 0.0
-        ep_steps = 0
-        
-        ep_min_soc = float("inf")
-        ep_mean_soc_sum = 0.0
-        ep_max_B = 0.0
-        ep_mean_B_sum = 0.0
-        ep_charging_slots = 0.0
-        ep_outage_slots = 0.0
-        ep_rounds_completed = 0
-        ep_user_entries = 0
-        ep_region_crossings = 0
-        ep_active_uav_power_sum = 0.0
-        ep_active_uav_power_sq_sum = 0.0
-        ep_active_uav_power_count = 0
-
-        ep_quality_degradation = 0.0
-
-        ep_video_delivery_term = 0.0
-        ep_queue_playback_term = 0.0
-        ep_battery_consume_term = 0.0
-        ep_battery_charge_term = 0.0
-        ep_quality_degradation_term = 0.0
-
-        ep_scheduled_stall = 0.0
-        ep_scheduled_playback = 0.0
-        ep_unscheduled_stall = 0.0
-        ep_unscheduled_playback = 0.0
-
-        ep_active_action_dims = 0.0
-        ep_active_action_ratio = 0.0
-        ep_action_saturation_ratio = 0.0
-
-        ep_horizon = int(env_cfg.slow_T) * int(train_cfg.eval_rounds_per_episode)
-        if int(env_cfg.episode_slots) != ep_horizon:
-            raise RuntimeError(
-                "Environment/evaluator episode horizon mismatch: "
-                f"env={env_cfg.episode_slots}, evaluator={ep_horizon}"
-            )
-        ep_service_rate = 0.0
-        ep_mean_requested_chunks = 0.0
-
-        ep_layer_ratios = np.zeros(
-            int(env_cfg.layer) + 1,
-            dtype=np.float64,
-        )
-
-        for _ in range(ep_horizon):
-            selected = agent.select_action(
-                obs=obs,
-                deterministic=True,
-                update_norm=False,
-            )
-
-            selected_uav_power = np.asarray(
-                selected["env_action"]["uav_power"],
-                dtype=np.float64,
-            )
-            active_uav_power = selected_uav_power[
-                selected_uav_power > 0.0
-            ]
-            if active_uav_power.size > 0:
-                ep_active_uav_power_sum += float(
-                    active_uav_power.sum()
-                )
-                ep_active_uav_power_sq_sum += float(
-                    np.square(active_uav_power).sum()
-                )
-                ep_active_uav_power_count += int(
-                    active_uav_power.size
-                )
-
-            ep_service_rate += float(
-                selected["service_rate"]
-            )
-
-            ep_mean_requested_chunks += float(
-                selected[
-                    "mean_requested_chunks"
-                ]
-            )
-
-            for layer_idx in range(
-                1,
-                int(env_cfg.layer) + 1,
-            ):
-                ep_layer_ratios[
-                    layer_idx
-                ] += float(
-                    selected[
-                        f"layer_{layer_idx}_ratio"
-                    ]
-                )
-
-            next_obs_raw, reward, terminated, truncated, info = split_env_step(
-                env.step(selected["env_action"])
-            )
-
-            is_round_boundary = bool(info.get("is_round_boundary", False))
-
-            ep_done = bool(
-                terminated
-                or truncated
-                or ep_steps + 1 >= ep_horizon
-            )
-
-            if is_round_boundary:
-                ep_rounds_completed += 1
-
-            entered_mask = np.asarray(
-                info.get("region_info", {}).get(
-                    "entered_mask",
-                    np.zeros(int(env_cfg.num_user), dtype=np.int32),
-                ),
-                dtype=np.int32,
-            )
-            ep_user_entries += int(entered_mask.sum())
-            crossing_mask = np.asarray(
-                info.get("region_info", {}).get(
-                    "region_crossing_mask",
-                    np.zeros(
-                        int(env_cfg.num_user),
-                        dtype=np.int32,
-                    ),
-                ),
-                dtype=np.int32,
-            )
-            ep_region_crossings += int(
-                crossing_mask.sum()
-            )
-
-            if ep_done and not is_round_boundary:
-                raise RuntimeError(
-                    "Evaluation episode ended inside a slow-timescale round. "
-                    f"ep_steps={ep_steps + 1}, slow_T={env_cfg.slow_T}"
-                )
-
-            next_obs = next_obs_raw
-
-            if is_round_boundary and not ep_done:
-                next_obs, slow_info = apply_random_slow_action_for_current_round(
-                    env=env,
-                    slow_rng=slow_rng,
-                    train_cfg=train_cfg,
-                )
-                info["next_random_slow_action"] = slow_info
-
-            metrics = extract_info_metrics(info)
-
-            ep_reward += float(reward)
-            ep_dpp_cost += metrics["one_slot_dpp_cost"]
-            ep_delivery += metrics["sum_delivery"]
-            ep_quality += metrics["sum_quality"]
-            ep_stall += metrics["stall_sum"]
-            ep_consumed_soc += metrics["sum_consumed_soc"]
-            ep_charged_soc += metrics["sum_charged_soc"]
-            ep_outage += metrics["num_outage_uav"]
-
-            ep_min_soc = min(ep_min_soc, metrics["min_soc"])
-            ep_mean_soc_sum += metrics["mean_soc"]
-            ep_max_B = max(ep_max_B, metrics["max_B"])
-            ep_mean_B_sum += metrics["mean_B"]
-            ep_charging_slots += metrics["charging_slots"]
-            ep_outage_slots += metrics["outage_slots"]
-
-            ep_quality_degradation += (
-                metrics["sum_quality_degradation"]
-            )
-
-            ep_video_delivery_term += (
-                metrics["video_delivery_term"]
-            )
-            ep_queue_playback_term += (
-                metrics["queue_playback_term"]
-            )
-            ep_battery_consume_term += (
-                metrics["battery_consume_term"]
-            )
-            ep_battery_charge_term += (
-                metrics["battery_charge_term"]
-            )
-            ep_quality_degradation_term += (
-                metrics["quality_degradation_term"]
-            )
-
-            ep_scheduled_stall += (
-                metrics["scheduled_stall"]
-            )
-            ep_scheduled_playback += (
-                metrics["scheduled_playback"]
-            )
-            ep_unscheduled_stall += (
-                metrics["unscheduled_stall"]
-            )
-            ep_unscheduled_playback += (
-                metrics["unscheduled_playback"]
-            )
-
-            ep_active_action_dims += float(
-                selected["active_action_dims"]
-            )
-            ep_active_action_ratio += float(
-                selected["active_action_ratio"]
-            )
-            ep_action_saturation_ratio += float(
-                selected["action_saturation_ratio"]
-            )
-
-            ep_steps += 1
-            obs = next_obs
-
-            if ep_done:
-                break
-
-        if ep_steps != ep_horizon:
-            raise RuntimeError(
-                "Incomplete evaluation episode: "
-                f"expected_slots={ep_horizon}, actual_slots={ep_steps}"
-            )
-        if ep_rounds_completed != int(
-            train_cfg.eval_rounds_per_episode
-        ):
-            raise RuntimeError(
-                "Completed evaluation slow-round count mismatch: "
-                f"expected={train_cfg.eval_rounds_per_episode}, "
-                f"actual={ep_rounds_completed}"
-            )
-        if not np.isclose(
-            ep_reward,
-            -ep_dpp_cost,
-            rtol=1e-6,
-            atol=1e-3,
-        ):
-            raise RuntimeError(
-                "Evaluation fast reward/DPP cost mismatch: "
-                f"episode_reward={ep_reward}, "
-                f"episode_dpp_cost={ep_dpp_cost}"
-            )
-        
-        step_denominator = float(
-            max(ep_steps, 1)
-        )
-
-        ep_quality_per_chunk = (
-            ep_quality / ep_delivery
-            if ep_delivery > 0.0
-            else 0.0
-        )
-
-        ep_quality_degradation_per_chunk = (
-            ep_quality_degradation
-            / ep_delivery
-            if ep_delivery > 0.0
-            else 0.0
-        )
-
-        ep_scheduled_stall_rate = (
-            ep_scheduled_stall
-            / ep_scheduled_playback
-            if ep_scheduled_playback > 0.0
-            else 0.0
-        )
-
-        ep_unscheduled_stall_rate = (
-            ep_unscheduled_stall
-            / ep_unscheduled_playback
-            if ep_unscheduled_playback > 0.0
-            else 0.0
-        )
-
-        ep_mean_soc = (
-            ep_mean_soc_sum
-            / step_denominator
-        )
-
-        ep_mean_B = (
-            ep_mean_B_sum
-            / step_denominator
-        )
-
-        ep_active_action_dims_mean = (
-            ep_active_action_dims
-            / step_denominator
-        )
-
-        ep_active_action_ratio_mean = (
-            ep_active_action_ratio
-            / step_denominator
-        )
-
-        ep_action_saturation_ratio_mean = (
-            ep_action_saturation_ratio
-            / step_denominator
-        )
-
-        ep_service_rate = (
-            ep_service_rate
-            / step_denominator
-        )
-
-        ep_mean_requested_chunks = (
-            ep_mean_requested_chunks
-            / step_denominator
-        )
-
-        ep_layer_ratios = (
-            ep_layer_ratios
-            / step_denominator
-        )
-
-        if not np.isfinite(ep_min_soc):
-            ep_min_soc = 0.0
-
-        if ep_active_uav_power_count > 0:
-            ep_active_uav_power_mean = (
-                ep_active_uav_power_sum
-                / float(ep_active_uav_power_count)
-            )
-            ep_active_uav_power_var = max(
-                0.0,
-                ep_active_uav_power_sq_sum
-                / float(ep_active_uav_power_count)
-                - ep_active_uav_power_mean ** 2,
-            )
-            ep_active_uav_power_std = float(
-                np.sqrt(ep_active_uav_power_var)
-            )
-        else:
-            ep_active_uav_power_mean = 0.0
-            ep_active_uav_power_std = 0.0
-            
-        rewards.append(ep_reward)
-        deliveries.append(ep_delivery)
-        qualities.append(ep_quality)
-        stalls.append(ep_stall)
-
-        layer_metrics = {
-            f"episode_layer_{layer_idx}_ratio":
-                float(ep_layer_ratios[layer_idx])
-            for layer_idx in range(
-                1,
-                int(env_cfg.layer) + 1,
-            )
+        obs, _ = split_env_reset(env.reset())
+        totals = {
+            "reward": 0.0,
+            "delivery": 0.0,
+            "quality": 0.0,
+            "quality_degradation": 0.0,
+            "stall": 0.0,
+            "outage_slots": 0.0,
+            "prediction_gap_sum": 0.0,
+            "prediction_gap_count": 0,
         }
 
-        eval_logger.write(
+        for _ in range(int(train_cfg.eval_rounds_per_episode)):
+            obs, slow_info = _select_and_apply_slow_action(
+                env,
+                agent,
+                train_cfg,
+                slow_rng,
+            )
+            obs, realized = _execute_real_round_eval(env, agent, obs)
+            predicted = float(slow_info["predicted_round_cost"])
+            if np.isfinite(predicted):
+                totals["prediction_gap_sum"] += (
+                    realized["realized_round_cost"] - predicted
+                )
+                totals["prediction_gap_count"] += 1
+            totals["reward"] += realized["formulation_reward"]
+            for key in (
+                "delivery",
+                "quality",
+                "quality_degradation",
+                "stall",
+                "outage_slots",
+            ):
+                totals[key] += realized[key]
+
+        gap_mean = (
+            totals["prediction_gap_sum"]
+            / totals["prediction_gap_count"]
+            if totals["prediction_gap_count"] > 0
+            else float("nan")
+        )
+        logger.write(
             {
                 "episode": episode_idx,
-                "mobility_speed_scale":
-                    float(env_cfg.mobility_speed_scale),
-                "speed_min_kmh":
-                    float(env_cfg.speed_min_kmh),
-                "speed_max_kmh":
-                    float(env_cfg.speed_max_kmh),
-                "episode_steps":
-                    ep_steps,
-                "episode_reward":
-                    ep_reward,
-                "episode_dpp_cost":
-                    ep_dpp_cost,
-                "episode_delivery":
-                    ep_delivery,
-                "episode_quality":
-                    ep_quality,
-                "episode_quality_per_chunk":
-                    ep_quality_per_chunk,
-                "episode_quality_degradation":
-                    ep_quality_degradation,
-                "episode_quality_degradation_per_chunk":
-                    ep_quality_degradation_per_chunk,
-                "episode_stall":
-                    ep_stall,
-                "episode_scheduled_stall_rate":
-                    ep_scheduled_stall_rate,
-                "episode_unscheduled_stall_rate":
-                    ep_unscheduled_stall_rate,
-                "episode_consumed_soc":
-                    ep_consumed_soc,
-                "episode_charged_soc":
-                    ep_charged_soc,
-                "episode_outage":
-                    ep_outage,
-                "episode_min_soc":
-                    ep_min_soc,
-                "episode_mean_soc":
-                    ep_mean_soc,
-                "episode_max_B":
-                    ep_max_B,
-                "episode_mean_B":
-                    ep_mean_B,
-                "episode_charging_slots":
-                    ep_charging_slots,
-                "episode_outage_slots":
-                    ep_outage_slots,
-                "episode_rounds_completed":
-                    int(ep_rounds_completed),
-                "episode_user_entries":
-                    int(ep_user_entries),
-                "episode_region_crossings":
-                    int(ep_region_crossings),
-                "episode_queue_playback_term":
-                    ep_queue_playback_term,
-                "episode_active_action_dims_mean":
-                    ep_active_action_dims_mean,
-                "episode_active_action_ratio_mean":
-                    ep_active_action_ratio_mean,
-                "episode_action_saturation_ratio_mean":
-                    ep_action_saturation_ratio_mean,
-                "episode_active_uav_power_count":
-                    int(ep_active_uav_power_count),
-                "episode_active_uav_power_mean":
-                    ep_active_uav_power_mean,
-                "episode_active_uav_power_std":
-                    ep_active_uav_power_std,
-                "episode_service_rate":
-                    ep_service_rate,
-                "episode_mean_requested_chunks":
-                    ep_mean_requested_chunks,
-                **layer_metrics,
+                "reward": totals["reward"],
+                "delivery": totals["delivery"],
+                "quality": totals["quality"],
+                "quality_degradation": totals["quality_degradation"],
+                "stall": totals["stall"],
+                "outage_slots": totals["outage_slots"],
+                "prediction_gap_mean": gap_mean,
             }
         )
-
         print(
             "[EVAL] "
             f"ep={episode_idx}/{train_cfg.eval_episodes} "
-            f"steps={ep_steps} "
-            f"reward={ep_reward:.4f} "
-            f"dpp_cost={ep_dpp_cost:.4f} "
-            f"delivery={ep_delivery:.4f} "
-            f"quality={ep_quality:.4f} "
-            f"stall={ep_stall:.4f} "
-            f"rounds={ep_rounds_completed} "
-            f"entries={ep_user_entries} "
-            f"crossings={ep_region_crossings} "
-            f"uav_power={ep_active_uav_power_mean:.4f}",
+            f"reward={totals['reward']:.4f} "
+            f"delivery={totals['delivery']:.1f} "
+            f"stall={totals['stall']:.1f} "
+            f"gap={gap_mean:.4f}",
             flush=True,
         )
-
-    summary = {
-        "reward_mean": float(np.mean(rewards)) if rewards else 0.0,
-        "reward_std": float(np.std(rewards)) if rewards else 0.0,
-        "delivery_mean": float(np.mean(deliveries)) if deliveries else 0.0,
-        "quality_mean": float(np.mean(qualities)) if qualities else 0.0,
-        "stall_mean": float(np.mean(stalls)) if stalls else 0.0,
-        "checkpoint": train_cfg.checkpoint,
-        "run_dir": str(run_dir),
-    }
-
-    save_json(summary, run_dir / "eval_summary.json")
-
-    print("=" * 100, flush=True)
-    print("[FAST PPO EVAL DONE]", flush=True)
-    print(
-        f"reward_mean={summary['reward_mean']:.4f}, "
-        f"delivery_mean={summary['delivery_mean']:.4f}, "
-        f"quality_mean={summary['quality_mean']:.4f}, "
-        f"stall_mean={summary['stall_mean']:.4f}",
-        flush=True,
-    )
-    print("=" * 100, flush=True)
 
 
 def main() -> None:
     train_cfg = get_fast_ppo_config()
-
     if train_cfg.mode == "train":
         train(train_cfg)
     elif train_cfg.mode == "eval":
         evaluate(train_cfg)
     else:
-        raise ValueError(f"지원하지 않는 mode입니다: {train_cfg.mode}")
+        raise ValueError(f"Unsupported mode: {train_cfg.mode}")
 
 
 if __name__ == "__main__":

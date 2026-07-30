@@ -22,48 +22,50 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     mode: str = "train"  # train | eval
     seed: int = 2026
-    deterministic_torch: bool = True
+    deterministic_torch: bool = False
     device: str = "cuda"  # cuda | cuda:0 | cpu | auto
+    fail_if_cuda_unavailable: bool = True
 
     # ------------------------------------------------------------------
     # 2) run directory / checkpoint
     # ------------------------------------------------------------------
     # 상대경로면 proposed/ 아래에 생성된다.
-    output_root: str = "fast"
+    output_root: str = "joint"
+    run_name: Optional[str] = "joint_dpp_fastppo_full_seed2026"
 
     # None이면 fast_train.py에서 자동 이름 생성
-    run_name: Optional[str] = (
-        "fast_mixed_seed2026_continuous_mobility_slot1s_noklstop"
+    checkpoint: Optional[str] = (
+        "fast/fast_mixed_seed2026_continuous_mobility_slot1s_noklstop/"
+        "checkpoints/fast_ppo_final.pt"
     )
 
-    checkpoint: Optional[str] = None
+    # resume=True이면 model/optimizer/normalizer를 모두 복원한다.
+    # dpp warm start에서는 보통 False로 두고 model/normalizer만 가져온다.
     resume: bool = False
     legacy_transfer: bool = False
+    load_optimizer_on_warm_start: bool = False
+    require_pretrained_fast_for_dpp: bool = True
 
     # ------------------------------------------------------------------
     # 3) episode / rollout
     # ------------------------------------------------------------------
-    # 한 episode는 rounds_per_episode개의 slow-timescale round로 구성한다.
-    # 현재 기본값에서는 1 episode = 18,000 * 2 = 36,000 fast slot이다.
-    # 기존 run과 동일한 총 slot 수를 유지하여 PPO update 수를 보존한다.
-    num_episodes: int = 250
-    eval_episodes: int = 10
+    num_episodes: int = 100
+    eval_episodes: int = 5
 
-    rounds_per_episode: int = 18_000
-    eval_rounds_per_episode: int = 9_000
+    rounds_per_episode: int = 10
+    eval_rounds_per_episode: int = 5
 
-    # PPO update 1번에 모을 slot 수
-    rollout_slots: int = 4096
+    # Joint mode에서는 반드시 EnvConfig.slow_T와 동일해야 한다.
+    rollout_slots: int = 3600
 
-    # checkpoint / plot 저장 주기
-    save_every_episodes: int = 10
-    plot_every_episodes: int = 10
-    plot_smooth_window: int = 10
+    save_every_episodes: int = 5
+    plot_every_episodes: int = 5
+    plot_smooth_window: int = 5
 
     # ------------------------------------------------------------------
     # 4) PPO hyperparameters
     # ------------------------------------------------------------------
-    batch_size: int = 512
+    batch_size: int = 450
     update_epochs: int = 4
 
     # Queue/Battery 장기 pressure를 보려면 gamma=0.90은 너무 짧다.
@@ -73,15 +75,15 @@ class FastTrainConfig:
     gae_lambda: float = 0.95
 
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
-    lr: float = 6e-5
+    lr: float = 3e-5
     clip_coef: float = 0.15
-    target_kl: Optional[float] = None
+    target_kl: Optional[float] = 0.015
 
     # ppo_reward_scale 적용 후 critic loss가 actor를 압도하지 않도록
     # value_coef는 0.5로 유지한다
     value_coef: float = 0.5
-    categorical_entropy_coef: float = 1e-4
-    power_entropy_coef: float = 1e-5
+    categorical_entropy_coef: float = 5e-4
+    power_entropy_coef: float = 1e-4
 
     max_grad_norm: float = 0.5
     hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
@@ -103,13 +105,17 @@ class FastTrainConfig:
     # reward scaling 변수
     ppo_reward_scale: float = 1e-4
 
+    # Round 동안 observation-normalizer 통계도 고정하고,
+    # round 종료 뒤 실제 observation batch로 한 번 갱신한다.
+    freeze_obs_norm_within_round: bool = True
+
     # ------------------------------------------------------------------
     # 6) Critic 안정화 옵션
     # ------------------------------------------------------------------
     # fast_train.py / fast_agent.py에서 지원하도록 반영하면 좋다.
     # 지원하지 않는 경우에도 config 저장용으로 문제 없음.
     use_value_huber_loss: bool = True
-    use_value_clip: bool = True
+    use_value_clip: bool = False
 
     # PPO에 저장되는 scaled reward/value 단위의 value clipping 폭.
     value_clip_coef: float = 0.5
@@ -117,43 +123,55 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 7) Fast-only 학습용 slow decision 생성 방식
     # ------------------------------------------------------------------
-    slow_decision_mode: str = "random"
+    slow_decision_mode: str = "dpp" # random | dpp
 
-    # 기존 0.70 / 0.35 / 0.50은 나쁘지 않지만,
-    # 처음 본격 학습에서는 active link를 너무 많이 만들면 action credit assignment가 어려워진다.
-    # 여기서는 약간 완화한다.
+    # for random
     random_rsu_user_prob: float = 0.50
     random_uav_hire_prob: float = 0.70
     random_uav_user_prob: float = 0.80
 
-    # --------------------------------------------------------------
-    # 8) Mobility speed curriculum
-    # --------------------------------------------------------------
-    # EnvConfig의 30--60 km/h에 곱하는 scale.
-    # 기본 학습은 target physical speed를 처음부터 고정한다.
-    mobility_speed_curriculum: Tuple[
-        Tuple[int, float],
-        ...
-    ] = (
-        (1, 1.0),
-    )
+    # DPP mode: current Fast policy를 고정하여 complete round forecast
+    dpp_forecast_horizon: int = 3600
+    dpp_forecast_scenarios: int = 1
+    dpp_candidate_batch_size: int = 128
+    dpp_forecast_workers: int = 8
 
-    # --------------------------------------------------------------
+    # 전체 region Cartesian product는 사용하지 않는다.
+    # 완전한 global action을 평가하는 region-coordinate minimization으로 고정.
+    dpp_coordinate_sweeps: int = 3
+    dpp_max_region_candidates: int = 8192
+    dpp_improvement_tolerance: float = 1.0
+
+    # 논문처럼 candidate cost 평가 시 greedy/mean Fast action 사용.
+    dpp_deterministic_fast_forecast: bool = True
+
+    # Candidate 간 RNG 호출 순서 차이를 제거하기 위해 forecast RSU channel은
+    # Rayleigh/shadowing의 mean power gain을 사용한다. 실제 round는 stochastic.
+    dpp_use_mean_rsu_channel: bool = True
+
+    # 한 scenario라도 battery outage가 발생하면 해당 slow candidate를 infeasible 처리.
+    dpp_reject_forecast_outage: bool = True
+
+    # Scenario 7.1: schedule user가 없는 UAV hiring candidate는 생성하지 않음.
+    dpp_forbid_empty_hiring: bool = True
+
+    # ------------------------------------------------------------------
+    # 8) Mobility curriculum
+    # ------------------------------------------------------------------
+    mobility_curriculum: Tuple[Tuple[int, float], ...] = ((1, 1e-4),)
+
+    # ------------------------------------------------------------------
     # 9) Debug
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
     fail_on_nan: bool = True
 
     def __post_init__(self) -> None:
-        if self.hidden_dims is None:
-            object.__setattr__(
-                self,
-                "hidden_dims",
-                [256, 256],
-            )
-
         if self.mode not in {"train", "eval"}:
+            raise ValueError("mode must be 'train' or 'eval'.")
+
+        if self.slow_decision_mode not in {"random", "dpp"}:
             raise ValueError(
-                "mode must be 'train' or 'eval'."
+                "slow_decision_mode must be 'random' or 'dpp'."
             )
 
         for name in (
@@ -164,90 +182,61 @@ class FastTrainConfig:
             "rollout_slots",
             "batch_size",
             "update_epochs",
+            "dpp_forecast_horizon",
+            "dpp_forecast_scenarios",
+            "dpp_candidate_batch_size",
+            "dpp_coordinate_sweeps",
+            "dpp_max_region_candidates",
         ):
             if int(getattr(self, name)) <= 0:
-                raise ValueError(
-                    f"{name} must be positive."
-                )
+                raise ValueError(f"{name} must be positive.")
+
+        if int(self.dpp_forecast_workers) < 0:
+            raise ValueError("dpp_forecast_workers must be >= 0.")
 
         if self.rollout_slots < self.batch_size:
-            raise ValueError(
-                "rollout_slots must be >= batch_size."
-            )
+            raise ValueError("rollout_slots must be >= batch_size.")
         if self.rollout_slots % self.batch_size != 0:
             raise ValueError(
                 "rollout_slots must be divisible by batch_size."
             )
 
         if not (0.0 < self.gamma <= 1.0):
-            raise ValueError(
-                "gamma must be in (0,1]."
-            )
+            raise ValueError("gamma must be in (0,1].")
         if not (0.0 < self.gae_lambda <= 1.0):
-            raise ValueError(
-                "gae_lambda must be in (0,1]."
-            )
-
+            raise ValueError("gae_lambda must be in (0,1].")
         if self.lr <= 0.0:
             raise ValueError("lr must be positive.")
         if self.clip_coef <= 0.0:
+            raise ValueError("clip_coef must be positive.")
+        if self.max_grad_norm <= 0.0:
+            raise ValueError("max_grad_norm must be positive.")
+        if self.value_clip_coef <= 0.0:
+            raise ValueError("value_clip_coef must be positive.")
+        if self.ppo_reward_scale <= 0.0:
+            raise ValueError("ppo_reward_scale must be positive.")
+        if self.dpp_improvement_tolerance < 0.0:
             raise ValueError(
-                "clip_coef must be positive."
+                "dpp_improvement_tolerance must be non-negative."
             )
-        if self.value_coef < 0.0:
-            raise ValueError(
-                "value_coef must be non-negative."
-            )
+
         for name in (
             "value_coef",
             "categorical_entropy_coef",
             "power_entropy_coef",
         ):
             if float(getattr(self, name)) < 0.0:
-                raise ValueError(
-                    f"{name} must be non-negative."
-                )
-            
-        if self.max_grad_norm <= 0.0:
-            raise ValueError(
-                "max_grad_norm must be positive."
-            )
+                raise ValueError(f"{name} must be non-negative.")
 
-        if (
-            self.target_kl is not None
-            and self.target_kl <= 0.0
-        ):
-            raise ValueError(
-                "target_kl must be None or positive."
-            )
-
-        if self.value_clip_coef <= 0.0:
-            raise ValueError(
-                "value_clip_coef must be positive."
-            )
-        if self.ppo_reward_scale <= 0.0:
-            raise ValueError(
-                "ppo_reward_scale must be positive."
-            )
+        if self.target_kl is not None and self.target_kl <= 0.0:
+            raise ValueError("target_kl must be None or positive.")
 
         if self.reward_norm:
-            raise ValueError(
-                "reward_norm must remain False."
-            )
+            raise ValueError("reward_norm must remain False.")
         if self.reward_scale is not None:
-            raise ValueError(
-                "reward_scale must remain None."
-            )
+            raise ValueError("reward_scale must remain None.")
         if self.reward_clip is not None:
-            raise ValueError(
-                "reward_clip must remain None."
-            )
-
-        if self.slow_decision_mode != "random":
-            raise ValueError(
-                "Fast-only training supports "
-                "slow_decision_mode='random' only."
-            )
+            raise ValueError("reward_clip must remain None.")
 
         for name in (
             "random_rsu_user_prob",
@@ -256,89 +245,77 @@ class FastTrainConfig:
         ):
             value = float(getattr(self, name))
             if not (0.0 <= value <= 1.0):
-                raise ValueError(
-                    f"{name} must be in [0,1]."
-                )
+                raise ValueError(f"{name} must be in [0,1].")
 
-        prev_episode = 0
-
-        for start_episode, speed_scale in (
-            self.mobility_speed_curriculum
-        ):
-            if int(start_episode) <= prev_episode:
-                raise ValueError(
-                    "mobility_speed_curriculum episode은 "
-                    "오름차순이어야 합니다."
-                )
-            if float(speed_scale) < 0.0:
-                raise ValueError(
-                    "curriculum speed_scale은 "
-                    "0 이상이어야 합니다."
-                )
-
-            prev_episode = int(start_episode)
-
-        if (
-            len(self.mobility_speed_curriculum) == 0
-            or int(
-                self.mobility_speed_curriculum[0][0]
-            ) != 1
-        ):
-            raise ValueError(
-                "mobility_speed_curriculum은 episode 1부터 "
-                "정의되어야 합니다."
-            )
-        
         if self.resume and self.legacy_transfer:
             raise ValueError(
-                "resume과 legacy_transfer는 "
-                "동시에 True일 수 없습니다."
+                "resume and legacy_transfer cannot both be True."
             )
 
-        if (
+        checkpoint_required = (
             self.resume
             or self.legacy_transfer
             or self.mode == "eval"
-        ):
-            if self.checkpoint is None:
+            or (
+                self.slow_decision_mode == "dpp"
+                and self.require_pretrained_fast_for_dpp
+            )
+        )
+        if checkpoint_required and self.checkpoint is None:
+            raise ValueError(
+                "A checkpoint path is required for the selected mode."
+            )
+
+        if self.slow_decision_mode == "dpp":
+            if self.rollout_slots != self.dpp_forecast_horizon:
                 raise ValueError(
-                    "checkpoint 경로가 필요합니다."
+                    "Joint DPP mode requires rollout_slots == "
+                    "dpp_forecast_horizon."
+                )
+            if not self.dpp_deterministic_fast_forecast:
+                raise ValueError(
+                    "The finalized DPP forecast uses deterministic Fast policy."
+                )
+            if not self.dpp_use_mean_rsu_channel:
+                raise ValueError(
+                    "The finalized implementation requires mean RSU channel "
+                    "during forecast to preserve common exogenous paths."
                 )
 
+        prev_episode = 0
+        for start_episode, move_prob in self.mobility_curriculum:
+            if int(start_episode) <= prev_episode:
+                raise ValueError(
+                    "mobility_curriculum episodes must be strictly increasing."
+                )
+            if not (0.0 <= float(move_prob) <= 1.0):
+                raise ValueError("move_prob must be in [0,1].")
+            prev_episode = int(start_episode)
+
         if (
-            self.target_kl is not None
-            and self.target_kl <= 0.0
+            len(self.mobility_curriculum) == 0
+            or int(self.mobility_curriculum[0][0]) != 1
         ):
             raise ValueError(
-                "target_kl은 None 또는 "
-                "양수여야 합니다."
+                "mobility_curriculum must start from episode 1."
             )
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
 
-    def make_run_dir(
-        self,
-        proposed_root: Path,
-    ) -> Path:
+    def make_run_dir(self, proposed_root: Path) -> Path:
         output_root_path = Path(self.output_root)
-
         if not output_root_path.is_absolute():
-            output_root_path = (
-                proposed_root / output_root_path
-            )
+            output_root_path = proposed_root / output_root_path
 
         run_name = (
             str(self.run_name)
             if self.run_name is not None
-            else "fast_ppo_v2"
+            else "joint_dpp_fastppo"
         )
 
         run_dir = output_root_path / run_name
-        run_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
 
