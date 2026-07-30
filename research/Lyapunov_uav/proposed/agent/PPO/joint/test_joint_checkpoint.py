@@ -7,6 +7,7 @@ import torch
 
 from env.env import Env
 from agent.PPO.common import (
+    set_seed,
     split_env_reset,
     split_env_step,
 )
@@ -17,20 +18,21 @@ from agent.PPO.joint.joint_config import (
     get_slow_joint_train_config,
 )
 from agent.PPO.joint.joint_train import (
+    FAST_INITIALIZATION,
     _apply_selected_slow_action,
     _build_fast_agent,
     _extract_slow_reward,
-    _load_trusted_checkpoint,
     _make_env_config,
-    _resolve_path,
+    _prime_fresh_obs_normalizer,
     _resolve_ppo_reward_scale,
     _select_slow_action,
 )
 
 
-def run_checkpoint_joint_smoke_test() -> None:
+def run_fresh_joint_smoke_test() -> None:
     run_cfg = replace(
         get_slow_joint_train_config(),
+        device="cpu",
         num_episodes=1,
         rounds_per_episode=1,
         final_slow_T=2,
@@ -40,20 +42,24 @@ def run_checkpoint_joint_smoke_test() -> None:
         fast_rollout_steps=2,
         fast_batch_size=2,
         fast_update_epochs=1,
-        load_pretrained_optimizer=False,
+        fast_target_kl=None,
+        resume_checkpoint=None,
     )
-    checkpoint_path = _resolve_path(
-        run_cfg.fast_checkpoint
+    if hasattr(run_cfg, "fast_checkpoint"):
+        raise RuntimeError(
+            "Fresh joint config must not expose a Fast-only checkpoint."
+        )
+
+    set_seed(
+        int(run_cfg.seed),
+        deterministic=bool(
+            run_cfg.deterministic_torch
+        ),
     )
-    checkpoint = _load_trusted_checkpoint(
-        checkpoint_path
-    )
-    extra = dict(checkpoint.get("extra", {}))
     env_cfg = _make_env_config(
         run_cfg=run_cfg,
-        checkpoint_extra=extra,
+        checkpoint_extra=None,
     )
-
     probe_env = Env(env_cfg)
     sample_obs, _ = split_env_reset(
         probe_env.reset()
@@ -62,18 +68,37 @@ def run_checkpoint_joint_smoke_test() -> None:
         run_cfg=run_cfg,
         env_cfg=env_cfg,
         sample_fast_obs=sample_obs,
-        checkpoint_path=checkpoint_path,
-        checkpoint=checkpoint,
-        load_optimizer=False,
     )
-    if fast_agent.device.type != "cuda":
+
+    if fast_agent.device.type != "cpu":
         raise RuntimeError(
-            "Checkpoint joint smoke test requires CUDA."
+            "Fresh joint smoke test expected a CPU agent."
         )
+    if fast_agent.optimizer.state:
+        raise RuntimeError(
+            "Fresh Adam optimizer already contains state."
+        )
+    if len(fast_agent.buffer) != 0:
+        raise RuntimeError(
+            "Fresh PPO rollout buffer is not empty."
+        )
+    if fast_agent.obs_normalizer is not None:
+        initial_count = float(
+            fast_agent.obs_normalizer.rms.count
+        )
+        if not np.isclose(
+            initial_count,
+            1e-4,
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise RuntimeError(
+                "Fresh observation normalizer already contains samples."
+            )
 
     reward_scale = _resolve_ppo_reward_scale(
         run_cfg=run_cfg,
-        checkpoint_extra=extra,
+        checkpoint_extra=None,
     )
     controller = SlowDPPController(
         env_cfg=env_cfg,
@@ -86,90 +111,101 @@ def run_checkpoint_joint_smoke_test() -> None:
         parameter.detach().clone()
         for parameter in fast_agent.model.parameters()
     ]
-    completed_rounds = 0
-    last_obs = env.get_fast_obs()
 
-    for round_idx in range(
-        int(run_cfg.rounds_per_episode)
+    _prime_fresh_obs_normalizer(
+        fast_agent=fast_agent,
+        obs=env.get_fast_obs(),
+    )
+    if (
+        fast_agent.obs_normalizer is not None
+        and float(
+            fast_agent.obs_normalizer.rms.count
+        ) <= initial_count
     ):
-        selected_slow = _select_slow_action(
-            controller=controller,
-            env=env,
-            fast_agent=fast_agent,
-        )
-        _apply_selected_slow_action(
-            env=env,
-            selected=selected_slow,
+        raise RuntimeError(
+            "Fresh observation normalizer was not primed by the first "
+            "real joint state."
         )
 
-        boundary_info = None
-        for slot_idx in range(int(env_cfg.slow_T)):
-            selected_fast = fast_agent.select_action(
-                env.get_fast_obs(),
-                deterministic=False,
-                update_norm=True,
-            )
-            (
-                last_obs,
-                raw_reward,
-                terminated,
-                truncated,
-                info,
-            ) = split_env_step(
-                env.step(
-                    selected_fast["env_action"]
-                )
-            )
-            done = bool(
-                terminated
-                or truncated
-                or (
-                    round_idx + 1
-                    == int(run_cfg.rounds_per_episode)
-                    and slot_idx + 1
-                    == int(env_cfg.slow_T)
-                )
-            )
-            fast_agent.store_transition(
-                obs_vec=selected_fast["obs_vec"],
-                raw_action=selected_fast["raw_action"],
-                action_mask=selected_fast["action_mask"],
-                reward=(
-                    float(raw_reward)
-                    * float(reward_scale)
-                ),
-                done=done,
-                value=float(selected_fast["value"]),
-                log_prob=float(
-                    selected_fast["log_prob"]
-                ),
-            )
-            if bool(
-                info.get("is_round_boundary", False)
-            ):
-                boundary_info = info
-                break
+    selected_slow = _select_slow_action(
+        controller=controller,
+        env=env,
+        fast_agent=fast_agent,
+    )
+    if selected_slow["action_info"]["controller"] != (
+        "round_dpp_coordinate_descent"
+    ):
+        raise RuntimeError(
+            "Slow action was not produced by the DPP controller."
+        )
+    _apply_selected_slow_action(
+        env=env,
+        selected=selected_slow,
+    )
 
-        if boundary_info is None:
-            raise RuntimeError(
-                "Smoke run did not reach a round boundary."
+    boundary_info = None
+    last_obs = env.get_fast_obs()
+    for slot_idx in range(int(env_cfg.slow_T)):
+        selected_fast = fast_agent.select_action(
+            env.get_fast_obs(),
+            deterministic=False,
+            update_norm=True,
+        )
+        (
+            last_obs,
+            raw_reward,
+            terminated,
+            truncated,
+            info,
+        ) = split_env_step(
+            env.step(
+                selected_fast["env_action"]
             )
-        slow_reward, slow_components = (
-            _extract_slow_reward(boundary_info)
         )
-        round_cost = float(
-            slow_components["round_dpp_cost"]
+        done = bool(
+            terminated
+            or truncated
+            or slot_idx + 1 == int(env_cfg.slow_T)
         )
-        if not np.isclose(
-            slow_reward,
-            -round_cost,
-            rtol=1e-6,
-            atol=1e-3,
+        fast_agent.store_transition(
+            obs_vec=selected_fast["obs_vec"],
+            raw_action=selected_fast["raw_action"],
+            action_mask=selected_fast["action_mask"],
+            reward=(
+                float(raw_reward)
+                * float(reward_scale)
+            ),
+            done=done,
+            value=float(selected_fast["value"]),
+            log_prob=float(
+                selected_fast["log_prob"]
+            ),
+        )
+        if bool(
+            info.get("is_round_boundary", False)
         ):
-            raise RuntimeError(
-                "Smoke R_H(r)=-J^S(r) check failed."
-            )
-        completed_rounds += 1
+            boundary_info = info
+            break
+
+    if boundary_info is None:
+        raise RuntimeError(
+            "Fresh smoke run did not reach a round boundary."
+        )
+    slow_reward, slow_components = _extract_slow_reward(
+        boundary_info
+    )
+    round_cost = float(
+        slow_components["round_dpp_cost"]
+    )
+    if not np.isclose(
+        slow_reward,
+        -round_cost,
+        rtol=1e-6,
+        atol=1e-3,
+    ):
+        raise RuntimeError(
+            "Fresh smoke R_H(r)=-J^S(r) check failed."
+        )
 
     fast_agent.finish_rollout(
         last_obs=last_obs,
@@ -189,26 +225,20 @@ def run_checkpoint_joint_smoke_test() -> None:
     )
     if not changed:
         raise RuntimeError(
-            "Fast PPO parameters did not change in the smoke update."
+            "Fresh Fast PPO parameters did not change."
         )
     if int(
         update_logs["completed_minibatches"]
     ) <= 0:
         raise RuntimeError(
-            "Fast PPO smoke update completed no minibatches."
+            "Fresh Fast PPO update completed no minibatches."
         )
     if not all(
         np.isfinite(float(value))
         for value in update_logs.values()
     ):
         raise RuntimeError(
-            "Fast PPO smoke update produced NaN or Inf."
-        )
-    if completed_rounds != int(
-        run_cfg.rounds_per_episode
-    ):
-        raise RuntimeError(
-            "Smoke run completed the wrong number of rounds."
+            "Fresh Fast PPO update produced NaN or Inf."
         )
     if len(fast_agent.buffer) != 0:
         raise RuntimeError(
@@ -216,11 +246,13 @@ def run_checkpoint_joint_smoke_test() -> None:
         )
 
     print(
-        "[PASS] checkpoint joint smoke: Slow DPP selected complete "
-        "(y, mu, phi) actions, realized full rounds, preserved "
-        "R_H=-J^S, stored mixed-action transitions, and updated Fast PPO."
+        "[PASS] fresh joint smoke: "
+        f"fast_initialization={FAST_INITIALIZATION}, "
+        "no Fast-only checkpoint, Slow DPP selected (y, mu, phi), "
+        "one complete round was realized, Fast PPO parameters updated, "
+        "and R_H(r)=-J^S(r) held."
     )
 
 
 if __name__ == "__main__":
-    run_checkpoint_joint_smoke_test()
+    run_fresh_joint_smoke_test()

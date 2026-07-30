@@ -5,7 +5,7 @@ import csv
 import random
 import signal
 import sys
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple, Type, TypeVar
 
@@ -48,7 +48,8 @@ from agent.PPO.slow.slow_metrics import (  # noqa: E402
 
 
 DataclassT = TypeVar("DataclassT")
-JOINT_TRAINER_KIND = "slow_dpp_fast_ppo_joint_v1"
+JOINT_TRAINER_KIND = "slow_dpp_fast_ppo_scratch_v2"
+FAST_INITIALIZATION = "random_from_scratch"
 STOP_REQUESTED = False
 
 
@@ -124,128 +125,130 @@ def _filtered_dataclass(
 
 def _make_env_config(
     run_cfg: SlowJointTrainConfig,
-    checkpoint_extra: Mapping[str, Any],
+    checkpoint_extra: Optional[Mapping[str, Any]] = None,
 ) -> EnvConfig:
     """
-    Reconstruct compatible system/channel state, then apply the final
-    formulation's explicit timescale, mobility, hiring-cost, and battery-round
-    overrides.
+    Build the final joint environment without using Fast-only metadata.
 
-    The source Fast policy was pretrained with slow_T=2 and continuous
-    mobility. That metadata is checked rather than silently treated as the
-    final joint environment. A joint-resume checkpoint must already contain
-    the final environment.
+    A fresh run starts from the repository's current EnvConfig defaults and
+    applies the explicit final joint-timescale overrides. A resume run
+    reconstructs the exact saved environment and validates it against the
+    immutable joint contract.
     """
-    saved = checkpoint_extra.get("env_config")
-    if not isinstance(saved, Mapping):
-        raise RuntimeError(
-            "Checkpoint has no env_config metadata. "
-            "Joint training cannot safely infer slow_T/channel/mobility."
-        )
-
-    values = dict(saved)
-    for key in ("rsu_channel", "uav_channel"):
-        nested = values.get(key)
-        if isinstance(nested, Mapping):
-            values[key] = _filtered_dataclass(
-                ChannelConfig,
-                nested,
-            )
-
-    battery_value = values.get("battery")
-    if isinstance(battery_value, Mapping):
-        battery_value = _filtered_dataclass(
-            BatteryConfig,
-            battery_value,
-        )
-    if not isinstance(battery_value, BatteryConfig):
-        raise RuntimeError(
-            "Checkpoint env_config has no valid battery metadata."
-        )
-
-    allowed = {field.name for field in fields(EnvConfig)}
-    values = {
-        key: value
-        for key, value in values.items()
-        if key in allowed
-    }
-    values["seed"] = int(run_cfg.seed)
-
-    saved_slow_t = int(values.get("slow_T", 0))
-    if saved_slow_t <= 0:
-        raise ValueError(
-            "Checkpoint env_config has an invalid slow_T."
-        )
-    saved_mobility_mode = str(
-        values.get("mobility_mode", "")
-    ).lower()
-    is_joint_resume = (
-        checkpoint_extra.get("trainer_kind")
-        == JOINT_TRAINER_KIND
+    expected_episode_slots = (
+        int(run_cfg.final_slow_T)
+        * int(run_cfg.rounds_per_episode)
     )
-    if is_joint_resume:
-        if saved_slow_t != int(run_cfg.final_slow_T):
-            raise RuntimeError(
-                "Joint resume slow_T mismatch: "
-                f"checkpoint={saved_slow_t}, "
-                f"configured={run_cfg.final_slow_T}"
-            )
-        if saved_mobility_mode != str(
-            run_cfg.final_mobility_mode
-        ):
-            raise RuntimeError(
-                "Joint resume mobility-mode mismatch: "
-                f"checkpoint={saved_mobility_mode!r}, "
-                f"configured={run_cfg.final_mobility_mode!r}"
-            )
-    else:
-        if saved_slow_t != int(
-            run_cfg.expected_source_slow_T
-        ):
-            raise RuntimeError(
-                "Unexpected Fast-only source slow_T: "
-                f"checkpoint={saved_slow_t}, "
-                f"expected={run_cfg.expected_source_slow_T}"
-            )
-        if saved_mobility_mode != str(
-            run_cfg.expected_source_mobility_mode
-        ):
-            raise RuntimeError(
-                "Unexpected Fast-only source mobility mode: "
-                f"checkpoint={saved_mobility_mode!r}, "
-                "expected="
-                f"{run_cfg.expected_source_mobility_mode!r}"
-            )
 
-    battery_values = {
-        item.name: getattr(battery_value, item.name)
-        for item in fields(BatteryConfig)
-    }
-    battery_values["target_service_slots_per_round"] = int(
-        run_cfg.final_target_service_slots_per_round
-    )
-    values["battery"] = BatteryConfig(**battery_values)
-
-    values.update(
-        {
-            "slow_T": int(run_cfg.final_slow_T),
-            "episode_slots": (
-                int(run_cfg.final_slow_T)
-                * int(run_cfg.rounds_per_episode)
+    if checkpoint_extra is None:
+        base = EnvConfig()
+        battery = replace(
+            base.battery,
+            target_service_slots_per_round=int(
+                run_cfg.final_target_service_slots_per_round
             ),
-            "mobility_mode": str(
+        )
+        env_cfg = replace(
+            base,
+            seed=int(run_cfg.seed),
+            slow_T=int(run_cfg.final_slow_T),
+            episode_slots=expected_episode_slots,
+            mobility_mode=str(
                 run_cfg.final_mobility_mode
             ),
-            "move_prob": float(
+            move_prob=float(
                 run_cfg.final_move_prob
             ),
-            "uav_hiring_cost": float(
+            uav_hiring_cost=float(
                 run_cfg.final_uav_hiring_cost
             ),
-        }
-    )
+            battery=battery,
+        )
+    else:
+        if checkpoint_extra.get(
+            "trainer_kind"
+        ) != JOINT_TRAINER_KIND:
+            raise RuntimeError(
+                "Resume checkpoint trainer_kind mismatch."
+            )
+        if checkpoint_extra.get(
+            "fast_initialization"
+        ) != FAST_INITIALIZATION:
+            raise RuntimeError(
+                "Resume checkpoint was not initialized by the "
+                "from-scratch joint trainer."
+            )
 
-    env_cfg = EnvConfig(**values)
+        saved = checkpoint_extra.get("env_config")
+        if not isinstance(saved, Mapping):
+            raise RuntimeError(
+                "Joint resume checkpoint has no env_config metadata."
+            )
+        values = dict(saved)
+        for key in ("rsu_channel", "uav_channel"):
+            nested = values.get(key)
+            if isinstance(nested, Mapping):
+                values[key] = _filtered_dataclass(
+                    ChannelConfig,
+                    nested,
+                )
+        battery_value = values.get("battery")
+        if isinstance(battery_value, Mapping):
+            battery_value = _filtered_dataclass(
+                BatteryConfig,
+                battery_value,
+            )
+        if not isinstance(battery_value, BatteryConfig):
+            raise RuntimeError(
+                "Joint resume env_config has invalid battery metadata."
+            )
+        values["battery"] = battery_value
+        allowed = {field.name for field in fields(EnvConfig)}
+        values = {
+            key: value
+            for key, value in values.items()
+            if key in allowed
+        }
+        env_cfg = EnvConfig(**values)
+
+    contract = {
+        "seed": int(run_cfg.seed),
+        "slow_T": int(run_cfg.final_slow_T),
+        "episode_slots": expected_episode_slots,
+        "mobility_mode": str(
+            run_cfg.final_mobility_mode
+        ),
+        "move_prob": float(
+            run_cfg.final_move_prob
+        ),
+        "uav_hiring_cost": float(
+            run_cfg.final_uav_hiring_cost
+        ),
+        "target_service_slots_per_round": int(
+            run_cfg.final_target_service_slots_per_round
+        ),
+    }
+    actual = {
+        "seed": int(env_cfg.seed),
+        "slow_T": int(env_cfg.slow_T),
+        "episode_slots": int(
+            env_cfg.episode_slots or 0
+        ),
+        "mobility_mode": str(env_cfg.mobility_mode),
+        "move_prob": float(env_cfg.move_prob),
+        "uav_hiring_cost": float(
+            env_cfg.uav_hiring_cost
+        ),
+        "target_service_slots_per_round": int(
+            env_cfg.battery.target_service_slots_per_round
+        ),
+    }
+    if actual != contract:
+        raise RuntimeError(
+            "Joint environment contract mismatch: "
+            f"expected={contract}, actual={actual}"
+        )
+
     expected_slots = (
         int(env_cfg.slow_T)
         * int(run_cfg.rounds_per_episode)
@@ -261,109 +264,136 @@ def _build_fast_agent(
     run_cfg: SlowJointTrainConfig,
     env_cfg: EnvConfig,
     sample_fast_obs: Dict[str, Any],
-    checkpoint_path: Path,
-    checkpoint: Mapping[str, Any],
-    load_optimizer: bool,
+    checkpoint_path: Optional[Path] = None,
+    checkpoint: Optional[Mapping[str, Any]] = None,
 ) -> FastPPOAgent:
-    extra = dict(checkpoint.get("extra", {}))
-    saved_config = dict(
-        extra.get(
-            "fast_ppo_config",
-            extra.get("ppo_config", {}),
-        )
-    )
-    policy_type = str(extra.get("policy_type", ""))
-    if policy_type not in (
-        "",
-        "conditional_mixed_categorical_gaussian_v1",
-    ):
-        raise ValueError(
-            "Joint training requires the mixed categorical/Gaussian Fast "
-            f"policy; checkpoint policy_type={policy_type!r}."
-        )
+    """
+    Build a randomly initialized Fast PPO agent.
 
-    allowed = {field.name for field in fields(FastPPOConfig)}
-    config_values = {
-        key: value
-        for key, value in saved_config.items()
-        if key in allowed
-    }
-    config_values.update(
-        {
-            "device": str(run_cfg.device),
-            "rollout_steps": int(
-                run_cfg.fast_rollout_steps
-            ),
-            "batch_size": int(
-                run_cfg.fast_batch_size
-            ),
-            "update_epochs": int(
-                run_cfg.fast_update_epochs
-            ),
-            "lr": float(run_cfg.fast_lr),
-            "clip_coef": float(
-                run_cfg.fast_clip_coef
-            ),
-            "target_kl": (
-                None
-                if run_cfg.fast_target_kl is None
-                else float(run_cfg.fast_target_kl)
-            ),
-            "max_grad_norm": float(
-                run_cfg.fast_max_grad_norm
-            ),
-        }
-    )
-    config_values.setdefault(
-        "hidden_dims",
-        tuple(
-            int(value)
-            for value in run_cfg.fast_hidden_dims_fallback
+    When checkpoint_path/checkpoint are supplied, the random construction is
+    immediately overwritten by an exact same-trainer resume state, including
+    optimizer and observation-normalizer state. Fast-only transfer is not
+    supported.
+    """
+    fast_ppo_config = FastPPOConfig(
+        rollout_steps=int(run_cfg.fast_rollout_steps),
+        update_epochs=int(run_cfg.fast_update_epochs),
+        batch_size=int(run_cfg.fast_batch_size),
+        gamma=float(run_cfg.fast_gamma),
+        gae_lambda=float(run_cfg.fast_gae_lambda),
+        lr=float(run_cfg.fast_lr),
+        max_grad_norm=float(run_cfg.fast_max_grad_norm),
+        clip_coef=float(run_cfg.fast_clip_coef),
+        value_coef=float(run_cfg.fast_value_coef),
+        categorical_entropy_coef=float(
+            run_cfg.fast_categorical_entropy_coef
         ),
+        power_entropy_coef=float(
+            run_cfg.fast_power_entropy_coef
+        ),
+        normalize_obs=bool(run_cfg.fast_normalize_obs),
+        normalize_adv=bool(run_cfg.fast_normalize_adv),
+        hidden_dims=tuple(
+            int(value)
+            for value in run_cfg.fast_hidden_dims
+        ),
+        init_log_std=float(run_cfg.fast_init_log_std),
+        use_value_huber_loss=bool(
+            run_cfg.fast_use_value_huber_loss
+        ),
+        use_value_clip=bool(
+            run_cfg.fast_use_value_clip
+        ),
+        value_clip_coef=float(
+            run_cfg.fast_value_clip_coef
+        ),
+        fail_on_nan=bool(run_cfg.fast_fail_on_nan),
+        target_kl=(
+            None
+            if run_cfg.fast_target_kl is None
+            else float(run_cfg.fast_target_kl)
+        ),
+        device=str(run_cfg.device),
     )
-    config_values.setdefault(
-        "init_log_std",
-        float(run_cfg.fast_init_log_std_fallback),
-    )
-    fast_ppo_config = FastPPOConfig(**config_values)
 
     obs_dim = infer_fast_obs_dim(sample_fast_obs)
-    saved_obs_dim = int(extra.get("obs_dim", obs_dim))
-    if saved_obs_dim != obs_dim:
-        raise ValueError(
-            "Fast checkpoint/environment observation mismatch: "
-            f"checkpoint={saved_obs_dim}, environment={obs_dim}"
-        )
-
     agent = FastPPOAgent(
         env_cfg=env_cfg,
         obs_dim=obs_dim,
         ppo_cfg=fast_ppo_config,
     )
 
-    if (
-        load_optimizer
-        and "optimizer_state_dict" not in checkpoint
-    ):
-        raise RuntimeError(
-            "Optimizer continuation was requested, but the checkpoint "
-            "has no optimizer_state_dict."
+    if (checkpoint_path is None) != (checkpoint is None):
+        raise ValueError(
+            "checkpoint_path and checkpoint must be provided together."
         )
+    if checkpoint_path is not None and checkpoint is not None:
+        extra = dict(checkpoint.get("extra", {}))
+        if extra.get("trainer_kind") != JOINT_TRAINER_KIND:
+            raise RuntimeError(
+                "Only an exact checkpoint from this joint trainer can "
+                "be resumed."
+            )
+        if extra.get(
+            "fast_initialization"
+        ) != FAST_INITIALIZATION:
+            raise RuntimeError(
+                "Resume checkpoint did not originate from random "
+                "joint initialization."
+            )
+        if "optimizer_state_dict" not in checkpoint:
+            raise RuntimeError(
+                "Exact joint resume checkpoint has no optimizer state."
+            )
+        policy_type = str(extra.get("policy_type", ""))
+        if policy_type != (
+            "conditional_mixed_categorical_gaussian_v1"
+        ):
+            raise RuntimeError(
+                "Resume checkpoint has an incompatible Fast policy type: "
+                f"{policy_type!r}"
+            )
+        saved_obs_dim = int(extra.get("obs_dim", -1))
+        if saved_obs_dim != obs_dim:
+            raise ValueError(
+                "Resume checkpoint/environment observation mismatch: "
+                f"checkpoint={saved_obs_dim}, environment={obs_dim}"
+            )
 
-    loaded = agent.load(
-        checkpoint_path,
-        strict=True,
-        load_optimizer=bool(load_optimizer),
-    )
-    loaded_extra = dict(loaded.get("extra", {}))
-    if (
-        agent.obs_normalizer is not None
-        and "obs_normalizer" not in loaded_extra
-    ):
-        raise RuntimeError(
-            "Checkpoint has no observation-normalizer state. "
-            "A normalized Fast policy cannot be continued safely."
+        saved_fast_cfg = extra.get("fast_ppo_config")
+        if not isinstance(saved_fast_cfg, Mapping):
+            raise RuntimeError(
+                "Resume checkpoint has no Fast PPO config metadata."
+            )
+        expected_fast_cfg = {
+            key: value
+            for key, value in vars(fast_ppo_config).items()
+            if key != "device"
+        }
+        actual_fast_cfg = {
+            key: saved_fast_cfg.get(key)
+            for key in expected_fast_cfg
+        }
+        if actual_fast_cfg != expected_fast_cfg:
+            raise RuntimeError(
+                "Fast PPO config differs from the exact-resume "
+                "checkpoint. Use the original joint config."
+            )
+
+        loaded = agent.load(
+            checkpoint_path,
+            strict=True,
+            load_optimizer=True,
         )
+        loaded_extra = dict(loaded.get("extra", {}))
+        if (
+            agent.obs_normalizer is not None
+            and "obs_normalizer" not in loaded_extra
+        ):
+            raise RuntimeError(
+                "Exact resume checkpoint has no observation-normalizer "
+                "state."
+            )
 
     if int(agent.ppo_cfg.rollout_steps) != int(env_cfg.slow_T):
         raise ValueError(
@@ -381,36 +411,63 @@ def _build_fast_agent(
 
 def _resolve_ppo_reward_scale(
     run_cfg: SlowJointTrainConfig,
-    checkpoint_extra: Mapping[str, Any],
+    checkpoint_extra: Optional[Mapping[str, Any]] = None,
 ) -> float:
-    if run_cfg.ppo_reward_scale is not None:
-        value = float(run_cfg.ppo_reward_scale)
-    else:
-        joint_value = checkpoint_extra.get(
-            "ppo_reward_scale"
-        )
-        if joint_value is not None:
-            value = float(joint_value)
-        else:
-            train_config = checkpoint_extra.get(
-                "train_config"
+    value = float(run_cfg.ppo_reward_scale)
+    if checkpoint_extra is not None:
+        saved = checkpoint_extra.get("ppo_reward_scale")
+        if saved is None:
+            raise RuntimeError(
+                "Exact resume checkpoint has no PPO reward scale."
             )
-            if not isinstance(train_config, Mapping):
-                raise RuntimeError(
-                    "Checkpoint has no train_config metadata and "
-                    "ppo_reward_scale was not configured explicitly."
-                )
-            if "ppo_reward_scale" not in train_config:
-                raise RuntimeError(
-                    "Checkpoint train_config has no ppo_reward_scale."
-                )
-            value = float(train_config["ppo_reward_scale"])
+        if not np.isclose(
+            value,
+            float(saved),
+            rtol=0.0,
+            atol=0.0,
+        ):
+            raise RuntimeError(
+                "Configured PPO reward scale differs from the exact-resume "
+                f"checkpoint: configured={value}, saved={saved}"
+            )
 
     if not np.isfinite(value) or value <= 0.0:
         raise ValueError(
             f"Invalid ppo_reward_scale: {value}"
         )
     return value
+
+
+def _prime_fresh_obs_normalizer(
+    fast_agent: FastPPOAgent,
+    obs: Mapping[str, Any],
+) -> None:
+    """
+    Add the first observable joint state to a fresh normalizer.
+
+    Slow candidate forecasts use update_norm=False so they cannot contaminate
+    training statistics. Without this one real-state update, the first Slow
+    decision would evaluate an untrained network on completely unnormalized
+    queue, battery, and distance inputs.
+    """
+    normalizer = fast_agent.obs_normalizer
+    if normalizer is None:
+        return
+    count = float(normalizer.rms.count)
+    if not np.isclose(
+        count,
+        1e-4,
+        rtol=0.0,
+        atol=1e-12,
+    ):
+        raise RuntimeError(
+            "Fresh observation normalizer was unexpectedly pre-populated: "
+            f"count={count}"
+        )
+    fast_agent.obs_to_vec(
+        dict(obs),
+        update_norm=True,
+    )
 
 
 def _select_slow_action(
@@ -655,7 +712,6 @@ def _save_joint_checkpoint(
     env: Env,
     run_dir: Path,
     ppo_reward_scale: float,
-    source_fast_checkpoint: Path,
     current_episode: int,
     rounds_completed_in_episode: int,
     global_round: int,
@@ -673,9 +729,7 @@ def _save_joint_checkpoint(
         path,
         extra={
             "trainer_kind": JOINT_TRAINER_KIND,
-            "source_fast_checkpoint": str(
-                source_fast_checkpoint
-            ),
+            "fast_initialization": FAST_INITIALIZATION,
             "run_dir": str(run_dir),
             "current_episode": int(current_episode),
             "rounds_completed_in_episode": int(
@@ -757,38 +811,38 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
     )
 
     is_resume = run_cfg.resume_checkpoint is not None
-    source_checkpoint_path = _resolve_path(
-        run_cfg.fast_checkpoint
-    )
-    checkpoint_path = _resolve_path(
-        run_cfg.resume_checkpoint
-        if is_resume
-        else run_cfg.fast_checkpoint
-    )
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(
-            f"Checkpoint does not exist: {checkpoint_path}"
+    checkpoint_path: Optional[Path] = None
+    checkpoint: Optional[Dict[str, Any]] = None
+    checkpoint_extra: Optional[Dict[str, Any]] = None
+    if is_resume:
+        checkpoint_path = _resolve_path(
+            str(run_cfg.resume_checkpoint)
         )
-    if not source_checkpoint_path.is_file():
-        raise FileNotFoundError(
-            "Source Fast checkpoint does not exist: "
-            f"{source_checkpoint_path}"
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                "Joint resume checkpoint does not exist: "
+                f"{checkpoint_path}"
+            )
+        checkpoint = _load_trusted_checkpoint(
+            checkpoint_path
         )
-
-    checkpoint = _load_trusted_checkpoint(
-        checkpoint_path
-    )
-    checkpoint_extra = dict(
-        checkpoint.get("extra", {})
-    )
-
-    if is_resume and checkpoint_extra.get(
-        "trainer_kind"
-    ) != JOINT_TRAINER_KIND:
-        raise RuntimeError(
-            "resume_checkpoint was not produced by "
-            "slow_joint_train.py."
+        checkpoint_extra = dict(
+            checkpoint.get("extra", {})
         )
+        if checkpoint_extra.get(
+            "trainer_kind"
+        ) != JOINT_TRAINER_KIND:
+            raise RuntimeError(
+                "resume_checkpoint was not produced by the current "
+                "from-scratch joint trainer."
+            )
+        if checkpoint_extra.get(
+            "fast_initialization"
+        ) != FAST_INITIALIZATION:
+            raise RuntimeError(
+                "resume_checkpoint did not originate from a random "
+                "Fast PPO joint initialization."
+            )
 
     env_cfg = _make_env_config(
         run_cfg=run_cfg,
@@ -805,13 +859,6 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
         sample_fast_obs=sample_fast_obs,
         checkpoint_path=checkpoint_path,
         checkpoint=checkpoint,
-        load_optimizer=(
-            True
-            if is_resume
-            else bool(
-                run_cfg.load_pretrained_optimizer
-            )
-        ),
     )
     if (
         str(run_cfg.device).startswith("cuda")
@@ -835,6 +882,26 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
     run_dir = _resolve_path(
         Path(run_cfg.output_root) / run_cfg.run_name
     )
+    if is_resume:
+        if checkpoint_extra is None:
+            raise RuntimeError(
+                "Internal error: resume metadata is unavailable."
+            )
+        saved_run_dir_value = checkpoint_extra.get(
+            "run_dir"
+        )
+        if not isinstance(saved_run_dir_value, str):
+            raise RuntimeError(
+                "Exact resume checkpoint has no run_dir metadata."
+            )
+        saved_run_dir = _resolve_path(
+            saved_run_dir_value
+        )
+        if saved_run_dir != run_dir:
+            raise RuntimeError(
+                "Exact resume requires the original run directory: "
+                f"configured={run_dir}, saved={saved_run_dir}"
+            )
     checkpoint_dir = run_dir / "checkpoints"
     log_dir = run_dir / "logs"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -875,10 +942,13 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
     save_json(
         {
             "trainer_kind": JOINT_TRAINER_KIND,
-            "source_fast_checkpoint": str(
-                source_checkpoint_path
+            "fast_initialization": FAST_INITIALIZATION,
+            "loaded_resume_checkpoint": (
+                None
+                if checkpoint_path is None
+                else str(checkpoint_path)
             ),
-            "loaded_checkpoint": str(checkpoint_path),
+            "fast_only_checkpoint_used": False,
             "slow_policy": "none",
             "slow_controller": (
                 "round_dpp_coordinate_minimization"
@@ -896,6 +966,10 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
     update_logger = ScalarLogger(update_csv)
 
     if is_resume:
+        if checkpoint_extra is None:
+            raise RuntimeError(
+                "Internal error: resume metadata is unavailable."
+            )
         required = (
             "env_state",
             "ppo_buffer_state",
@@ -1034,6 +1108,10 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
         update_idx = 0
         episode_metrics = _new_metrics(env_cfg)
         aggregate = _new_metrics(env_cfg)
+        _prime_fresh_obs_normalizer(
+            fast_agent=fast_agent,
+            obs=env.get_fast_obs(),
+        )
         pending_slow_selected = _select_slow_action(
             controller=controller,
             env=env,
@@ -1047,8 +1125,9 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
     print("=" * 100, flush=True)
     print("[SLOW DPP + FAST PPO JOINT TRAIN START]", flush=True)
     print(f"run_dir              : {run_dir}", flush=True)
-    print(f"source_checkpoint    : {source_checkpoint_path}", flush=True)
-    print(f"loaded_checkpoint    : {checkpoint_path}", flush=True)
+    print(f"fast_initialization  : {FAST_INITIALIZATION}", flush=True)
+    print(f"fast_only_checkpoint : not used", flush=True)
+    print(f"resume_checkpoint    : {checkpoint_path}", flush=True)
     print(f"resume                : {is_resume}", flush=True)
     print(f"device                : {fast_agent.device}", flush=True)
     print(f"slow_policy           : none", flush=True)
@@ -1369,9 +1448,6 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
                 env=env,
                 run_dir=run_dir,
                 ppo_reward_scale=ppo_reward_scale,
-                source_fast_checkpoint=(
-                    source_checkpoint_path
-                ),
                 current_episode=current_episode,
                 rounds_completed_in_episode=(
                     rounds_completed
@@ -1461,9 +1537,6 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
                 env=env,
                 run_dir=run_dir,
                 ppo_reward_scale=ppo_reward_scale,
-                source_fast_checkpoint=(
-                    source_checkpoint_path
-                ),
                 current_episode=current_episode,
                 rounds_completed_in_episode=0,
                 global_round=global_round,
@@ -1497,9 +1570,6 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
                 env=env,
                 run_dir=run_dir,
                 ppo_reward_scale=ppo_reward_scale,
-                source_fast_checkpoint=(
-                    source_checkpoint_path
-                ),
                 current_episode=current_episode,
                 rounds_completed_in_episode=(
                     rounds_completed
@@ -1568,9 +1638,6 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
         env=env,
         run_dir=run_dir,
         ppo_reward_scale=ppo_reward_scale,
-        source_fast_checkpoint=(
-            source_checkpoint_path
-        ),
         current_episode=current_episode,
         rounds_completed_in_episode=(
             rounds_completed
@@ -1595,9 +1662,8 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
             "global_round": int(global_round),
             "global_slot": int(global_slot),
             "ppo_updates": int(update_idx),
-            "source_fast_checkpoint": str(
-                source_checkpoint_path
-            ),
+            "fast_initialization": FAST_INITIALIZATION,
+            "fast_only_checkpoint_used": False,
             "final_checkpoint": str(
                 final_checkpoint
             ),

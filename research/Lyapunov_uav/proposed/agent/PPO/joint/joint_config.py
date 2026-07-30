@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from typing import Dict, Optional, Tuple
 
 
@@ -10,10 +9,6 @@ from typing import Dict, Optional, Tuple
 class SlowJointTrainConfig:
     """
     Slow DPP + Fast PPO online joint-training settings.
-
-    The slow side is a non-learning DPP controller. Only the Fast PPO
-    parameters are updated. A converged Fast-only checkpoint is used as the
-    initialization point.
     """
 
     seed: int = 2026
