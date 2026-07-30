@@ -28,7 +28,9 @@ class SlowJointTrainConfig:
     # 2) Output / exact resume
     # ------------------------------------------------------------------
     output_root: str = "joint"
-    run_name: str = "slow_dpp_fast_ppo_scratch_long_seed2026"
+    run_name: str = (
+        "slow_dpp_fast_ppo_scratch_long_mp_seed2026"
+    )
 
     # Set this only to resume a checkpoint produced by this trainer.
     # A fresh run must leave it as None.

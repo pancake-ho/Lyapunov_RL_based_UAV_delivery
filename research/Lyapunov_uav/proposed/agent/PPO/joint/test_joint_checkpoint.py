@@ -92,10 +92,14 @@ def run_forecast_batch_equivalence_test() -> None:
         env=env,
         fast_agent=fast_agent,
     )
-    batched = batched_controller.select_action(
-        env=env,
-        fast_agent=fast_agent,
-    )
+    try:
+        batched = batched_controller.select_action(
+            env=env,
+            fast_agent=fast_agent,
+        )
+    finally:
+        batched_controller.close()
+        serial_controller.close()
 
     for key in (
         "rsu_scheduling",
@@ -134,6 +138,18 @@ def run_forecast_batch_equivalence_test() -> None:
     ):
         raise RuntimeError(
             "Forecast batching did not reduce actor batch calls."
+        )
+    if batched_info["forecast_env_backend"] != (
+        "spawn_process"
+    ):
+        raise RuntimeError(
+            "Batched forecast did not use the spawn-process backend."
+        )
+    if int(
+        batched_info["forecast_peak_active_workers"]
+    ) <= 1:
+        raise RuntimeError(
+            "Batched forecast never activated multiple process workers."
         )
 
     duplicate_obs = [
@@ -181,7 +197,8 @@ def run_forecast_batch_equivalence_test() -> None:
     print(
         "[PASS] forecast batching: deterministic Slow action/cost and "
         "exact trial-step count matched serial execution, actor batch calls "
-        "decreased, and stochastic common random numbers were preserved."
+        "decreased, spawn-process Env workers were active, and stochastic "
+        "common random numbers were preserved."
     )
 
 
@@ -194,6 +211,8 @@ def run_fresh_joint_smoke_test() -> None:
         final_slow_T=2,
         final_target_service_slots_per_round=2,
         forecast_scenarios=1,
+        forecast_candidate_batch_size=1,
+        forecast_env_workers=1,
         max_coordinate_sweeps=4,
         fast_rollout_steps=2,
         fast_batch_size=2,
@@ -288,6 +307,7 @@ def run_fresh_joint_smoke_test() -> None:
         env=env,
         fast_agent=fast_agent,
     )
+    controller.close()
     if selected_slow["action_info"]["controller"] != (
         "round_dpp_coordinate_descent"
     ):

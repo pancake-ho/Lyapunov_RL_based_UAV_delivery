@@ -59,6 +59,7 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
+export MALLOC_ARENA_MAX=2
 
 export JOINT_FORECAST_ENV_WORKERS="${JOINT_FORECAST_ENV_WORKERS:-${ALLOCATED_CPUS}}"
 export JOINT_FORECAST_CANDIDATE_BATCH_SIZE="${JOINT_FORECAST_CANDIDATE_BATCH_SIZE:-64}"
@@ -97,6 +98,7 @@ if [[ -n "${JOINT_RESUME_CHECKPOINT:-}" ]] \
 fi
 
 "${PYTHON_BIN}" -c '
+import os
 import torch
 
 print("torch:", torch.__version__)
@@ -104,12 +106,21 @@ print("cuda available:", torch.cuda.is_available())
 if not torch.cuda.is_available():
     raise SystemExit("CUDA is required for the joint run.")
 print("GPU:", torch.cuda.get_device_name(0))
+
+available_cpus = sorted(os.sched_getaffinity(0))
+forecast_workers = int(os.environ["JOINT_FORECAST_ENV_WORKERS"])
+print("CPU affinity:", available_cpus)
+if forecast_workers > len(available_cpus):
+    raise SystemExit(
+        "JOINT_FORECAST_ENV_WORKERS exceeds Slurm CPU affinity: "
+        f"workers={forecast_workers}, available={len(available_cpus)}"
+    )
 '
 
 nvidia-smi \
     --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw \
     --format=csv \
-    -l 30 \
+    -l 5 \
     > "${RESOURCE_LOG}" 2>&1 &
 GPU_MONITOR_PID="$!"
 

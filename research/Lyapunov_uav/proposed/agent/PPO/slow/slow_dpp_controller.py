@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import atexit
 import copy
 import math
+import multiprocessing as mp
+import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from itertools import product
+from multiprocessing.connection import Connection
 from typing import (
     Any,
     Dict,
@@ -26,6 +29,501 @@ from .slow_config import SlowDPPConfig
 
 
 SlowEnvAction = Dict[str, np.ndarray]
+
+
+def _slim_forecast_step_info(
+    info: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """
+    Keep only information consumed by the Slow-DPP forecast.
+
+    Non-boundary slot ``info`` dictionaries contain many diagnostic arrays.
+    Sending all of them through a multiprocessing pipe every slot would add
+    substantial serialization overhead. The full boundary record is retained
+    because ``_extract_boundary_cost()`` needs its reward components.
+    """
+    if bool(info.get("is_round_boundary", False)):
+        return copy.deepcopy(dict(info))
+
+    return {
+        "is_round_boundary": False,
+        "outage": np.asarray(
+            info.get("outage", []),
+            dtype=np.int32,
+        ).copy(),
+    }
+
+
+def _forecast_env_worker_main(
+    connection: Connection,
+    cpu_id: Optional[int],
+) -> None:
+    """
+    Own candidate Env instances inside one spawned process.
+
+    A candidate environment must remain in the same process for all 3,600
+    slots. A per-slot ProcessPoolExecutor call would mutate only a temporary
+    unpickled copy and break the Markov trajectory. This persistent command
+    loop keeps the state local and exchanges only actions/observations.
+    """
+    base_env: Optional[Env] = None
+    trials: Dict[int, Env] = {}
+
+    try:
+        if (
+            cpu_id is not None
+            and hasattr(os, "sched_setaffinity")
+        ):
+            os.sched_setaffinity(
+                0,
+                {int(cpu_id)},
+            )
+
+        while True:
+            command, payload = connection.recv()
+
+            if command == "set_base_env":
+                base_env = payload
+                trials = {}
+                connection.send(("ok", None))
+                continue
+
+            if command == "load_trials":
+                if base_env is None:
+                    raise RuntimeError(
+                        "Forecast worker received trials before base Env."
+                    )
+
+                indexed_actions, forecast_seed = payload
+                trials = {}
+                initial_observations = []
+
+                for trial_idx, slow_action in indexed_actions:
+                    trial = copy.deepcopy(base_env)
+                    trial.rng = np.random.default_rng(
+                        int(forecast_seed)
+                    )
+                    trial.apply_slow_action(
+                        {
+                            name: np.asarray(
+                                slow_action[name],
+                                dtype=np.int32,
+                            ).copy()
+                            for name in (
+                                "rsu_scheduling",
+                                "uav_hiring",
+                                "uav_scheduling",
+                            )
+                        }
+                    )
+                    trial_idx = int(trial_idx)
+                    trials[trial_idx] = trial
+                    initial_observations.append(
+                        (
+                            trial_idx,
+                            trial.get_fast_obs(),
+                        )
+                    )
+
+                connection.send(
+                    ("ok", initial_observations)
+                )
+                continue
+
+            if command == "step":
+                indexed_actions = payload
+                step_results = []
+                worker_started_at = time.perf_counter()
+
+                for trial_idx, env_action in indexed_actions:
+                    trial_idx = int(trial_idx)
+                    trial = trials.get(trial_idx)
+                    if trial is None:
+                        raise RuntimeError(
+                            "Forecast worker does not own trial "
+                            f"{trial_idx}."
+                        )
+
+                    (
+                        next_obs,
+                        reward,
+                        terminated,
+                        truncated,
+                        info,
+                    ) = split_env_step(
+                        trial.step(dict(env_action))
+                    )
+                    step_results.append(
+                        (
+                            trial_idx,
+                            next_obs,
+                            float(reward),
+                            bool(terminated),
+                            bool(truncated),
+                            _slim_forecast_step_info(info),
+                        )
+                    )
+
+                connection.send(
+                    (
+                        "ok",
+                        {
+                            "results": step_results,
+                            "worker_compute_seconds": (
+                                time.perf_counter()
+                                - worker_started_at
+                            ),
+                        },
+                    )
+                )
+                continue
+
+            if command == "clear":
+                trials = {}
+                connection.send(("ok", None))
+                continue
+
+            if command == "close":
+                connection.send(("ok", None))
+                return
+
+            raise RuntimeError(
+                f"Unknown forecast worker command: {command}"
+            )
+
+    except EOFError:
+        return
+    except BaseException as exc:
+        try:
+            connection.send(
+                (
+                    "error",
+                    {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            )
+        except BaseException:
+            pass
+        raise
+    finally:
+        connection.close()
+
+
+class _ForecastEnvProcessPool:
+    """
+    Persistent spawn-based process pool for candidate environment steps.
+
+    CUDA policy inference stays in the parent process. Workers never touch
+    CUDA; they only advance independent CPU environment states.
+    """
+
+    def __init__(
+        self,
+        worker_count: int,
+        response_timeout_seconds: float = 300.0,
+    ) -> None:
+        self.worker_count = max(1, int(worker_count))
+        self.response_timeout_seconds = float(
+            response_timeout_seconds
+        )
+        self._context = mp.get_context("spawn")
+        self._connections: list[Connection] = []
+        self._processes: list[Any] = []
+        self._trial_indices_by_worker: list[list[int]] = [
+            []
+            for _ in range(self.worker_count)
+        ]
+        self._closed = False
+        if hasattr(os, "sched_getaffinity"):
+            available_cpus = sorted(
+                int(value)
+                for value in os.sched_getaffinity(0)
+            )
+        else:
+            available_cpus = list(
+                range(os.cpu_count() or self.worker_count)
+            )
+        if len(available_cpus) < self.worker_count:
+            raise RuntimeError(
+                "forecast_env_workers exceeds the CPUs available to the "
+                "Slurm task: "
+                f"workers={self.worker_count}, "
+                f"available_cpus={available_cpus}."
+            )
+        self.available_cpus = tuple(available_cpus)
+        self.last_step_roundtrip_seconds = 0.0
+        self.last_step_worker_compute_sum_seconds = 0.0
+        self.last_step_worker_compute_max_seconds = 0.0
+        self.last_step_overhead_seconds = 0.0
+
+        for worker_idx in range(self.worker_count):
+            parent_connection, child_connection = (
+                self._context.Pipe(duplex=True)
+            )
+            process = self._context.Process(
+                target=_forecast_env_worker_main,
+                args=(
+                    child_connection,
+                    self.available_cpus[worker_idx],
+                ),
+                name=f"slow-dpp-env-{worker_idx}",
+                daemon=True,
+            )
+            process.start()
+            child_connection.close()
+            self._connections.append(parent_connection)
+            self._processes.append(process)
+
+    def _receive(
+        self,
+        worker_idx: int,
+    ) -> Any:
+        connection = self._connections[worker_idx]
+        process = self._processes[worker_idx]
+
+        if not connection.poll(
+            self.response_timeout_seconds
+        ):
+            raise TimeoutError(
+                "Timed out waiting for forecast environment worker "
+                f"{worker_idx}; alive={process.is_alive()}, "
+                f"exitcode={process.exitcode}."
+            )
+
+        status, payload = connection.recv()
+        if status == "ok":
+            return payload
+        if status == "error":
+            raise RuntimeError(
+                "Forecast environment worker failed: "
+                f"worker={worker_idx}, "
+                f"type={payload.get('type')}, "
+                f"message={payload.get('message')}"
+            )
+        raise RuntimeError(
+            "Forecast worker returned an invalid response: "
+            f"worker={worker_idx}, status={status}"
+        )
+
+    def set_base_env(self, env: Env) -> None:
+        if self._closed:
+            raise RuntimeError(
+                "Forecast process pool is already closed."
+            )
+
+        for connection in self._connections:
+            connection.send(
+                ("set_base_env", env)
+            )
+        for worker_idx in range(self.worker_count):
+            self._receive(worker_idx)
+
+    def load_trials(
+        self,
+        actions: Sequence[Mapping[str, np.ndarray]],
+        forecast_seed: int,
+    ) -> list[Dict[str, np.ndarray]]:
+        if not actions:
+            return []
+
+        active_workers = min(
+            self.worker_count,
+            len(actions),
+        )
+        self._trial_indices_by_worker = [
+            []
+            for _ in range(self.worker_count)
+        ]
+        indexed_actions_by_worker: list[list[Any]] = [
+            []
+            for _ in range(active_workers)
+        ]
+
+        for trial_idx, action in enumerate(actions):
+            worker_idx = trial_idx % active_workers
+            self._trial_indices_by_worker[
+                worker_idx
+            ].append(trial_idx)
+            indexed_actions_by_worker[
+                worker_idx
+            ].append(
+                (
+                    trial_idx,
+                    {
+                        name: np.asarray(
+                            action[name],
+                            dtype=np.int32,
+                        ).copy()
+                        for name in (
+                            "rsu_scheduling",
+                            "uav_hiring",
+                            "uav_scheduling",
+                        )
+                    },
+                )
+            )
+
+        for worker_idx in range(active_workers):
+            self._connections[worker_idx].send(
+                (
+                    "load_trials",
+                    (
+                        indexed_actions_by_worker[worker_idx],
+                        int(forecast_seed),
+                    ),
+                )
+            )
+
+        observations: list[
+            Optional[Dict[str, np.ndarray]]
+        ] = [
+            None
+            for _ in actions
+        ]
+        for worker_idx in range(active_workers):
+            for trial_idx, observation in self._receive(
+                worker_idx
+            ):
+                observations[int(trial_idx)] = observation
+
+        if any(value is None for value in observations):
+            raise RuntimeError(
+                "Forecast workers did not return every initial "
+                "observation."
+            )
+        return [
+            value
+            for value in observations
+            if value is not None
+        ]
+
+    def step(
+        self,
+        env_actions: Sequence[Mapping[str, Any]],
+    ) -> list[
+        Tuple[
+            Dict[str, np.ndarray],
+            float,
+            bool,
+            bool,
+            Dict[str, Any],
+        ]
+    ]:
+        if not env_actions:
+            return []
+
+        active_workers = min(
+            self.worker_count,
+            len(env_actions),
+        )
+        step_started_at = time.perf_counter()
+        for worker_idx in range(active_workers):
+            indexed_actions = [
+                (
+                    trial_idx,
+                    env_actions[trial_idx],
+                )
+                for trial_idx in self._trial_indices_by_worker[
+                    worker_idx
+                ]
+            ]
+            self._connections[worker_idx].send(
+                ("step", indexed_actions)
+            )
+
+        ordered_results: list[Optional[Any]] = [
+            None
+            for _ in env_actions
+        ]
+        worker_compute_seconds = []
+        for worker_idx in range(active_workers):
+            response = self._receive(worker_idx)
+            worker_compute_seconds.append(
+                float(
+                    response["worker_compute_seconds"]
+                )
+            )
+            for (
+                trial_idx,
+                next_obs,
+                reward,
+                terminated,
+                truncated,
+                info,
+            ) in response["results"]:
+                ordered_results[int(trial_idx)] = (
+                    next_obs,
+                    float(reward),
+                    bool(terminated),
+                    bool(truncated),
+                    info,
+                )
+
+        if any(value is None for value in ordered_results):
+            raise RuntimeError(
+                "Forecast workers did not return every step result."
+            )
+        roundtrip_seconds = (
+            time.perf_counter() - step_started_at
+        )
+        worker_compute_sum = float(
+            sum(worker_compute_seconds)
+        )
+        worker_compute_max = float(
+            max(worker_compute_seconds, default=0.0)
+        )
+        self.last_step_roundtrip_seconds = float(
+            roundtrip_seconds
+        )
+        self.last_step_worker_compute_sum_seconds = (
+            worker_compute_sum
+        )
+        self.last_step_worker_compute_max_seconds = (
+            worker_compute_max
+        )
+        self.last_step_overhead_seconds = max(
+            0.0,
+            float(roundtrip_seconds) - worker_compute_max,
+        )
+        return [
+            value
+            for value in ordered_results
+            if value is not None
+        ]
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        for connection, process in zip(
+            self._connections,
+            self._processes,
+        ):
+            if process.is_alive():
+                try:
+                    connection.send(("close", None))
+                except BaseException:
+                    pass
+
+        for worker_idx, (connection, process) in enumerate(
+            zip(
+                self._connections,
+                self._processes,
+            )
+        ):
+            if process.is_alive():
+                try:
+                    self._receive(worker_idx)
+                except BaseException:
+                    pass
+            process.join(timeout=5.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5.0)
+            connection.close()
 
 
 class SlowDPPController:
@@ -52,15 +550,32 @@ class SlowDPPController:
         self._forecast_wall_seconds = 0.0
         self._forecast_policy_seconds = 0.0
         self._forecast_env_seconds = 0.0
-        self._forecast_executor: Optional[ThreadPoolExecutor] = None
-    
+        self._forecast_process_setup_seconds = 0.0
+        self._forecast_process_roundtrip_seconds = 0.0
+        self._forecast_worker_compute_sum_seconds = 0.0
+        self._forecast_worker_critical_seconds = 0.0
+        self._forecast_process_overhead_seconds = 0.0
+        self._forecast_batch_size_sum = 0
+        self._forecast_peak_batch_size = 0
+        self._forecast_active_workers_sum = 0
+        self._forecast_peak_active_workers = 0
+        self._forecast_process_pool: Optional[
+            _ForecastEnvProcessPool
+        ] = None
+        atexit.register(self.close)
+
+    def close(self) -> None:
+        if self._forecast_process_pool is not None:
+            self._forecast_process_pool.close()
+            self._forecast_process_pool = None
+
     @staticmethod
     def _binary_copy(value: Any) -> np.ndarray:
         """
         binary-type decision 복사본 반환 수행
         """
         return np.asarray(value, dtype=np.int32).copy()
-    
+
     def _empty_action(self) -> SlowEnvAction:
         """
         모든 decision을 0으로 반환
@@ -70,19 +585,19 @@ class SlowDPPController:
             "uav_hiring": np.zeros(self.num_uav, dtype=np.int32),
             "uav_scheduling": np.zeros((self.num_uav, self.num_user), dtype=np.int32),
         }
-    
+
     def _copy_action(self, action: Mapping[str, Any]) -> SlowEnvAction:
         return {
             "rsu_scheduling": self._binary_copy(action["rsu_scheduling"]),
             "uav_hiring": self._binary_copy(action["uav_hiring"]),
             "uav_scheduling": self._binary_copy(action["uav_scheduling"]),
         }
-    
+
     @staticmethod
     def _is_binary(name: str, value: np.ndarray) -> None:
         if np.any((value != 0) & (value != 1)):
             raise ValueError(f"{name}은 0 또는 1을 포함해야 합니다.")
-    
+
     @staticmethod
     def _action_key(action: Mapping[str, np.ndarray]) -> bytes:
         return b"|".join(
@@ -91,7 +606,7 @@ class SlowDPPController:
                 "rsu_scheduling", "uav_hiring", "uav_scheduling",
             )
         )
-    
+
     def _validate_action(self, env: Env, action: Mapping[str, Any]) -> None:
         rsu = np.asarray(action["rsu_scheduling"], dtype=np.int32)
         hiring = np.asarray(action["uav_hiring"], dtype=np.int32)
@@ -141,7 +656,7 @@ class SlowDPPController:
             raise ValueError(
                 "UAV slow candidates exceed uav_user_cap."
             )
-        
+
         provider_count = rsu.sum(axis=0) + uav.sum(axis=0)
         if np.any(provider_count > 1):
             raise ValueError(
@@ -160,7 +675,7 @@ class SlowDPPController:
             action["rsu_scheduling"][int(region_idx), user_idx] = 1
         self._validate_action(env, action)
         return action
-    
+
     def _region_assignment_count(self, env: Env, region_idx: int) -> int:
         region = np.asarray(env.user_region, dtype=np.int32)
         requested = np.asarray(env.requested_content, dtype=np.int32)
@@ -270,7 +785,7 @@ class SlowDPPController:
 
                 self._validate_action(env, action)
                 yield action
-    
+
     def _forecast_seed(self, env: Env, scenario_idx: int) -> int:
         # Forecast randomness is independent from env.rng, so candidate
         # evaluation cannot peek at the actual environment's future samples.
@@ -378,21 +893,60 @@ class SlowDPPController:
             env,
             scenario_idx,
         )
+        candidate_count = len(actions)
+        active_workers = min(
+            self._configured_forecast_env_workers(),
+            candidate_count,
+        )
+        self._forecast_batch_size_sum += candidate_count
+        self._forecast_peak_batch_size = max(
+            self._forecast_peak_batch_size,
+            candidate_count,
+        )
+        self._forecast_active_workers_sum += active_workers
+        self._forecast_peak_active_workers = max(
+            self._forecast_peak_active_workers,
+            active_workers,
+        )
+
+        use_process_workers = bool(
+            self._forecast_process_pool is not None
+            and candidate_count > 1
+        )
+
         trials: list[Env] = []
-        fast_observations: list[Dict[str, np.ndarray]] = []
-        for action in actions:
-            trial = copy.deepcopy(env)
-            trial.rng = np.random.default_rng(forecast_seed)
-            trial.apply_slow_action(self._copy_action(action))
-            trials.append(trial)
-            fast_observations.append(trial.get_fast_obs())
+        if use_process_workers:
+            setup_started_at = time.perf_counter()
+            fast_observations = (
+                self._forecast_process_pool.load_trials(
+                    actions=actions,
+                    forecast_seed=forecast_seed,
+                )
+            )
+            self._forecast_process_setup_seconds += (
+                time.perf_counter() - setup_started_at
+            )
+        else:
+            fast_observations = []
+            for action in actions:
+                trial = copy.deepcopy(env)
+                trial.rng = np.random.default_rng(
+                    forecast_seed
+                )
+                trial.apply_slow_action(
+                    self._copy_action(action)
+                )
+                trials.append(trial)
+                fast_observations.append(
+                    trial.get_fast_obs()
+                )
 
         boundary_infos: list[Optional[Dict[str, Any]]] = [
             None
-            for _ in trials
+            for _ in actions
         ]
         outage_slots = np.zeros(
-            len(trials),
+            candidate_count,
             dtype=np.int64,
         )
         deterministic = bool(
@@ -447,7 +1001,10 @@ class SlowDPPController:
                         common_random_across_batch=True,
                     )
                 else:
-                    if not deterministic and len(trials) > 1:
+                    if (
+                        not deterministic
+                        and candidate_count > 1
+                    ):
                         raise RuntimeError(
                             "Stochastic batched forecast requires "
                             "FastPPOAgent.select_env_actions_batch()."
@@ -465,18 +1022,32 @@ class SlowDPPController:
                 )
 
                 env_started_at = time.perf_counter()
-                payloads = list(zip(trials, env_actions))
-                if (
-                    self._forecast_executor is not None
-                    and len(payloads) > 1
-                ):
-                    step_results = list(
-                        self._forecast_executor.map(
-                            self._step_forecast_trial,
-                            payloads,
+                if use_process_workers:
+                    step_results = (
+                        self._forecast_process_pool.step(
+                            env_actions
                         )
                     )
+                    self._forecast_process_roundtrip_seconds += (
+                        self._forecast_process_pool
+                        .last_step_roundtrip_seconds
+                    )
+                    self._forecast_worker_compute_sum_seconds += (
+                        self._forecast_process_pool
+                        .last_step_worker_compute_sum_seconds
+                    )
+                    self._forecast_worker_critical_seconds += (
+                        self._forecast_process_pool
+                        .last_step_worker_compute_max_seconds
+                    )
+                    self._forecast_process_overhead_seconds += (
+                        self._forecast_process_pool
+                        .last_step_overhead_seconds
+                    )
                 else:
+                    payloads = list(
+                        zip(trials, env_actions)
+                    )
                     step_results = [
                         self._step_forecast_trial(payload)
                         for payload in payloads
@@ -782,6 +1353,14 @@ class SlowDPPController:
             float(self._forecast_trial_steps)
             / max(float(self._forecast_wall_seconds), 1e-12)
         )
+        mean_batch_size = (
+            float(self._forecast_batch_size_sum)
+            / max(int(self._forecast_batches), 1)
+        )
+        mean_active_workers = (
+            float(self._forecast_active_workers_sum)
+            / max(int(self._forecast_batches), 1)
+        )
 
         return {
             "controller": "round_dpp_coordinate_descent",
@@ -801,6 +1380,13 @@ class SlowDPPController:
             "forecast_env_workers": int(
                 self._configured_forecast_env_workers()
             ),
+            "forecast_available_cpus": int(
+                len(
+                    self._forecast_process_pool.available_cpus
+                )
+                if self._forecast_process_pool is not None
+                else 1
+            ),
             "forecast_batches": int(self._forecast_batches),
             "forecast_trial_steps": int(
                 self._forecast_trial_steps
@@ -813,6 +1399,38 @@ class SlowDPPController:
             ),
             "forecast_env_seconds": float(
                 self._forecast_env_seconds
+            ),
+            "forecast_process_setup_seconds": float(
+                self._forecast_process_setup_seconds
+            ),
+            "forecast_process_roundtrip_seconds": float(
+                self._forecast_process_roundtrip_seconds
+            ),
+            "forecast_worker_compute_sum_seconds": float(
+                self._forecast_worker_compute_sum_seconds
+            ),
+            "forecast_worker_critical_seconds": float(
+                self._forecast_worker_critical_seconds
+            ),
+            "forecast_process_overhead_seconds": float(
+                self._forecast_process_overhead_seconds
+            ),
+            "forecast_mean_batch_size": float(
+                mean_batch_size
+            ),
+            "forecast_peak_batch_size": int(
+                self._forecast_peak_batch_size
+            ),
+            "forecast_mean_active_workers": float(
+                mean_active_workers
+            ),
+            "forecast_peak_active_workers": int(
+                self._forecast_peak_active_workers
+            ),
+            "forecast_env_backend": (
+                "spawn_process"
+                if self._configured_forecast_env_workers() > 1
+                else "serial"
             ),
             "forecast_trial_steps_per_second": float(
                 throughput
@@ -851,15 +1469,37 @@ class SlowDPPController:
         self._forecast_wall_seconds = 0.0
         self._forecast_policy_seconds = 0.0
         self._forecast_env_seconds = 0.0
+        self._forecast_process_setup_seconds = 0.0
+        self._forecast_process_roundtrip_seconds = 0.0
+        self._forecast_worker_compute_sum_seconds = 0.0
+        self._forecast_worker_critical_seconds = 0.0
+        self._forecast_process_overhead_seconds = 0.0
+        self._forecast_batch_size_sum = 0
+        self._forecast_peak_batch_size = 0
+        self._forecast_active_workers_sum = 0
+        self._forecast_peak_active_workers = 0
 
         workers = self._configured_forecast_env_workers()
         if workers > 1:
-            self._forecast_executor = ThreadPoolExecutor(
-                max_workers=workers,
-                thread_name_prefix="slow-dpp-env",
-            )
+            if self._forecast_process_pool is None:
+                self._forecast_process_pool = (
+                    _ForecastEnvProcessPool(
+                        worker_count=workers,
+                    )
+                )
+            elif (
+                self._forecast_process_pool.worker_count
+                != workers
+            ):
+                self.close()
+                self._forecast_process_pool = (
+                    _ForecastEnvProcessPool(
+                        worker_count=workers,
+                    )
+                )
+            self._forecast_process_pool.set_base_env(env)
         else:
-            self._forecast_executor = None
+            self.close()
 
         try:
             current = self._initial_rsu_first_action(env)
@@ -954,6 +1594,8 @@ class SlowDPPController:
                 ),
             }
         finally:
-            if self._forecast_executor is not None:
-                self._forecast_executor.shutdown(wait=True)
-                self._forecast_executor = None
+            # The spawn workers remain alive across Slow decisions. Reusing
+            # them avoids repeatedly importing Python/Torch and recreating
+            # 16 processes for every round. ``close()`` is registered with
+            # atexit and can also be called explicitly by tests/trainers.
+            pass

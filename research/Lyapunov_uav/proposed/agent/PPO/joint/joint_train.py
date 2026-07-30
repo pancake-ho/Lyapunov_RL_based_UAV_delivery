@@ -1334,6 +1334,14 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
                 f"{selected_slow['action_info']['forecast_trial_steps_per_second']:.1f} "
                 "forecast_s="
                 f"{selected_slow['action_info']['forecast_wall_seconds']:.1f} "
+                "batch_mean/peak="
+                f"{selected_slow['action_info']['forecast_mean_batch_size']:.1f}/"
+                f"{selected_slow['action_info']['forecast_peak_batch_size']} "
+                "workers_mean/peak="
+                f"{selected_slow['action_info']['forecast_mean_active_workers']:.1f}/"
+                f"{selected_slow['action_info']['forecast_peak_active_workers']} "
+                "proc_overhead_s="
+                f"{selected_slow['action_info']['forecast_process_overhead_seconds']:.1f} "
                 f"buffer={len(fast_agent.buffer)}/"
                 f"{fast_agent.buffer.capacity}",
                 flush=True,
@@ -1620,6 +1628,7 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
                 f"resume_checkpoint={signal_checkpoint}",
                 flush=True,
             )
+            controller.close()
             return
 
     if len(fast_agent.buffer) > 0:
@@ -1690,6 +1699,7 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
     print(f"final checkpoint: {final_checkpoint}", flush=True)
     print(final_summary, flush=True)
     print("=" * 100, flush=True)
+    controller.close()
 
 
 def main() -> None:
