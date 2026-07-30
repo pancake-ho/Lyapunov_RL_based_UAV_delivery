@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -221,6 +221,89 @@ class FastPPOAgent:
 
             **action_stats,
         }
+
+    @torch.inference_mode()
+    def select_env_actions_batch(
+        self,
+        observations: Sequence[Dict[str, Any]],
+        deterministic: bool = False,
+        update_norm: bool = False,
+        common_random_across_batch: bool = True,
+    ) -> list[Dict[str, Any]]:
+        """
+        Select only environment actions for a batch of forecast states.
+
+        This method is intentionally separate from :meth:`select_action`.
+        Realized PPO transitions still require value, log-probability, action
+        mask, and statistics; Slow-DPP candidate forecasts do not. A single
+        batched actor call and a single GPU-to-CPU transfer replace many
+        batch-1 calls and synchronization points.
+        """
+        if not observations:
+            return []
+
+        obs_vectors = np.stack(
+            [
+                self.obs_to_vec(
+                    dict(obs),
+                    update_norm=update_norm,
+                )
+                for obs in observations
+            ],
+            axis=0,
+        ).astype(np.float32, copy=False)
+        base_masks = np.stack(
+            [
+                self.codec.build_base_action_mask(dict(obs))
+                for obs in observations
+            ],
+            axis=0,
+        ).astype(np.float32, copy=False)
+
+        self._check_finite_array(
+            "forecast_obs_batch",
+            obs_vectors,
+        )
+        self._check_finite_array(
+            "forecast_action_mask_batch",
+            base_masks,
+        )
+
+        obs_tensor = to_tensor(
+            obs_vectors,
+            device=self.device,
+        )
+        mask_tensor = to_tensor(
+            base_masks,
+            device=self.device,
+        )
+        action_tensor = self.model.sample_policy_actions(
+            obs=obs_tensor,
+            deterministic=deterministic,
+            action_mask=mask_tensor,
+            common_random_across_batch=(
+                common_random_across_batch
+            ),
+        )
+        policy_actions = (
+            action_tensor
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=False)
+        )
+        self._check_finite_array(
+            "forecast_policy_action_batch",
+            policy_actions,
+        )
+
+        return [
+            self.codec.decode(
+                policy_actions[row_idx],
+                dict(obs),
+            )
+            for row_idx, obs in enumerate(observations)
+        ]
     
     def store_transition(
         self,

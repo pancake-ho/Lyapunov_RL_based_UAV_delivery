@@ -2,8 +2,18 @@ from __future__ import annotations
 
 import copy
 import math
+import time
+from concurrent.futures import ThreadPoolExecutor
 from itertools import product
-from typing import Any, Dict, Iterator, Mapping, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import numpy as np
 import torch
@@ -37,6 +47,12 @@ class SlowDPPController:
         self._score_cache: Dict[bytes, Tuple[float, Dict[str, Any]]] = {}
         self._candidate_requests = 0
         self._finite_candidate_requests = 0
+        self._forecast_batches = 0
+        self._forecast_trial_steps = 0
+        self._forecast_wall_seconds = 0.0
+        self._forecast_policy_seconds = 0.0
+        self._forecast_env_seconds = 0.0
+        self._forecast_executor: Optional[ThreadPoolExecutor] = None
     
     @staticmethod
     def _binary_copy(value: Any) -> np.ndarray:
@@ -302,23 +318,83 @@ class SlowDPPController:
         # Env stores R_H(r) = -J_S(r). The controller minimizes J_S(r).
         return -slow_reward, slow_components
 
-    def _run_forecast_round(
+    def _configured_forecast_batch_size(self) -> int:
+        return max(
+            1,
+            int(
+                getattr(
+                    self.dpp_cfg,
+                    "forecast_candidate_batch_size",
+                    1,
+                )
+            ),
+        )
+
+    def _configured_forecast_env_workers(self) -> int:
+        return max(
+            1,
+            int(
+                getattr(
+                    self.dpp_cfg,
+                    "forecast_env_workers",
+                    1,
+                )
+            ),
+        )
+
+    @staticmethod
+    def _step_forecast_trial(
+        payload: Tuple[Env, Mapping[str, Any]],
+    ) -> Tuple[
+        Dict[str, np.ndarray],
+        float,
+        bool,
+        bool,
+        Dict[str, Any],
+    ]:
+        trial, env_action = payload
+        return split_env_step(trial.step(dict(env_action)))
+
+    def _run_forecast_round_batch(
         self,
         env: Env,
         fast_agent: FastPPOAgent,
-        action: Mapping[str, np.ndarray],
+        actions: Sequence[Mapping[str, np.ndarray]],
         scenario_idx: int,
-    ) -> Tuple[float, Dict[str, Any]]:
-        trial = copy.deepcopy(env)
-        trial.rng = np.random.default_rng(
-            self._forecast_seed(env, scenario_idx)
+    ) -> list[Tuple[float, Dict[str, Any]]]:
+        """
+        Evaluate independent Slow candidates in lock-step.
+
+        Candidate enumeration, one-full-round horizon, DPP extraction,
+        feasibility handling, and common-random-number semantics are
+        unchanged. Only the actor forward and independent environment steps
+        are scheduled in batches.
+        """
+        if not actions:
+            return []
+
+        started_at = time.perf_counter()
+        forecast_seed = self._forecast_seed(
+            env,
+            scenario_idx,
         )
+        trials: list[Env] = []
+        fast_observations: list[Dict[str, np.ndarray]] = []
+        for action in actions:
+            trial = copy.deepcopy(env)
+            trial.rng = np.random.default_rng(forecast_seed)
+            trial.apply_slow_action(self._copy_action(action))
+            trials.append(trial)
+            fast_observations.append(trial.get_fast_obs())
 
-        trial.apply_slow_action(self._copy_action(action))
-        fast_obs = trial.get_fast_obs()
-        boundary_info: Dict[str, Any] | None = None
-        outage_slots = 0
-
+        boundary_infos: list[Optional[Dict[str, Any]]] = [
+            None
+            for _ in trials
+        ]
+        outage_slots = np.zeros(
+            len(trials),
+            dtype=np.int64,
+        )
         deterministic = bool(
             getattr(
                 self.dpp_cfg,
@@ -344,84 +420,278 @@ class SlowDPPController:
                 )
             ]
 
-        forecast_seed = self._forecast_seed(
-            env,
-            scenario_idx,
-        )
-        # A scenario uses common environment and Fast-policy randomness for
-        # every candidate. fork_rng also prevents forecast rollouts from
-        # consuming the actual joint-training RNG stream.
+        # fork_rng keeps forecast sampling separate from the realized Fast-PPO
+        # trajectory. The batch sampler shares each underlying random
+        # variate across candidates while retaining candidate-specific policy
+        # probabilities.
         with torch.random.fork_rng(
             devices=cuda_devices,
             enabled=True,
         ):
             torch.manual_seed(forecast_seed)
             if cuda_devices:
-                torch.cuda.manual_seed_all(
-                    forecast_seed
+                torch.cuda.manual_seed_all(forecast_seed)
+
+            for _ in range(int(env.slow_T)):
+                policy_started_at = time.perf_counter()
+                batch_selector = getattr(
+                    fast_agent,
+                    "select_env_actions_batch",
+                    None,
+                )
+                if callable(batch_selector):
+                    env_actions = batch_selector(
+                        observations=fast_observations,
+                        deterministic=deterministic,
+                        update_norm=False,
+                        common_random_across_batch=True,
+                    )
+                else:
+                    if not deterministic and len(trials) > 1:
+                        raise RuntimeError(
+                            "Stochastic batched forecast requires "
+                            "FastPPOAgent.select_env_actions_batch()."
+                        )
+                    env_actions = [
+                        fast_agent.select_action(
+                            obs,
+                            deterministic=deterministic,
+                            update_norm=False,
+                        )["env_action"]
+                        for obs in fast_observations
+                    ]
+                self._forecast_policy_seconds += (
+                    time.perf_counter() - policy_started_at
                 )
 
-            for _ in range(int(trial.slow_T)):
-                selected = fast_agent.select_action(
-                    fast_obs,
-                    deterministic=deterministic,
-                    update_norm=False,
+                env_started_at = time.perf_counter()
+                payloads = list(zip(trials, env_actions))
+                if (
+                    self._forecast_executor is not None
+                    and len(payloads) > 1
+                ):
+                    step_results = list(
+                        self._forecast_executor.map(
+                            self._step_forecast_trial,
+                            payloads,
+                        )
+                    )
+                else:
+                    step_results = [
+                        self._step_forecast_trial(payload)
+                        for payload in payloads
+                    ]
+                self._forecast_env_seconds += (
+                    time.perf_counter() - env_started_at
                 )
-                (
+                self._forecast_trial_steps += len(step_results)
+
+                reached_boundary = False
+                for trial_idx, (
                     next_obs,
                     _,
                     terminated,
                     truncated,
                     info,
-                ) = split_env_step(
-                    trial.step(selected["env_action"])
-                )
-                outage_slots += int(
-                    np.asarray(
-                        info.get("outage", []),
-                        dtype=np.int32,
-                    ).sum()
-                )
-                fast_obs = next_obs
-
-                if bool(
-                    info.get("is_round_boundary", False)
-                ):
-                    boundary_info = info
-                    break
-                if terminated or truncated:
-                    raise RuntimeError(
-                        "Forecast episode ended before a complete "
-                        "slow round."
+                ) in enumerate(step_results):
+                    outage_slots[trial_idx] += int(
+                        np.asarray(
+                            info.get("outage", []),
+                            dtype=np.int32,
+                        ).sum()
                     )
+                    fast_observations[trial_idx] = next_obs
 
-        if boundary_info is None:
+                    if bool(
+                        info.get("is_round_boundary", False)
+                    ):
+                        boundary_infos[trial_idx] = dict(info)
+                        reached_boundary = True
+                    elif terminated or truncated:
+                        raise RuntimeError(
+                            "Forecast episode ended before a complete "
+                            "slow round."
+                        )
+
+                if reached_boundary:
+                    if any(
+                        value is None
+                        for value in boundary_infos
+                    ):
+                        raise RuntimeError(
+                            "Batched forecast candidates reached different "
+                            "round boundaries."
+                        )
+                    break
+
+        if any(value is None for value in boundary_infos):
             raise RuntimeError(
                 "Forecast loop did not reach the slow round boundary."
             )
 
-        cost, slow_components = self._extract_boundary_cost(boundary_info)
+        results: list[Tuple[float, Dict[str, Any]]] = []
+        for trial_idx, boundary_info in enumerate(boundary_infos):
+            if boundary_info is None:
+                raise RuntimeError(
+                    "Internal error: missing forecast boundary info."
+                )
+            cost, slow_components = self._extract_boundary_cost(
+                boundary_info
+            )
 
-        # Battery queue pressure and rule-based charging remain in J_S.
-        # A predicted physical outage is an infeasible candidate because the
-        # scenario requires no depletion within the selected round.
-        if outage_slots > 0:
-            cost = math.inf
+            # Battery queue pressure and rule-based charging remain in J_S.
+            # A predicted physical outage makes the candidate infeasible.
+            if int(outage_slots[trial_idx]) > 0:
+                cost = math.inf
 
-        return float(cost), {
-            "scenario": int(scenario_idx),
-            "round_dpp_cost": float(cost),
-            "outage_slots": int(outage_slots),
-            "round_fast_reward_sum": float(
-                slow_components.get("round_fast_reward_sum", 0.0)
-            ),
-            "hire_cost_raw": float(
-                slow_components.get("hire_cost_raw", 0.0)
-            ),
-            "hire_weight": float(
-                slow_components.get("hire_weight", 1.0)
-            ),
+            results.append(
+                (
+                    float(cost),
+                    {
+                        "scenario": int(scenario_idx),
+                        "round_dpp_cost": float(cost),
+                        "outage_slots": int(
+                            outage_slots[trial_idx]
+                        ),
+                        "round_fast_reward_sum": float(
+                            slow_components.get(
+                                "round_fast_reward_sum",
+                                0.0,
+                            )
+                        ),
+                        "hire_cost_raw": float(
+                            slow_components.get(
+                                "hire_cost_raw",
+                                0.0,
+                            )
+                        ),
+                        "hire_weight": float(
+                            slow_components.get(
+                                "hire_weight",
+                                1.0,
+                            )
+                        ),
+                    },
+                )
+            )
+
+        self._forecast_batches += 1
+        self._forecast_wall_seconds += (
+            time.perf_counter() - started_at
+        )
+        return results
+
+    def _run_forecast_round(
+        self,
+        env: Env,
+        fast_agent: FastPPOAgent,
+        action: Mapping[str, np.ndarray],
+        scenario_idx: int,
+    ) -> Tuple[float, Dict[str, Any]]:
+        return self._run_forecast_round_batch(
+            env=env,
+            fast_agent=fast_agent,
+            actions=[action],
+            scenario_idx=scenario_idx,
+        )[0]
+
+    def _score_actions(
+        self,
+        env: Env,
+        fast_agent: FastPPOAgent,
+        actions: Sequence[Mapping[str, np.ndarray]],
+    ) -> list[Tuple[float, Dict[str, Any]]]:
+        if not actions:
+            return []
+
+        results: list[Optional[Tuple[float, Dict[str, Any]]]] = [
+            None
+            for _ in actions
+        ]
+        missing_actions: list[Mapping[str, np.ndarray]] = []
+        missing_keys: list[bytes] = []
+        missing_key_set: set[bytes] = set()
+
+        for action_idx, action in enumerate(actions):
+            self._validate_action(env, action)
+            self._candidate_requests += 1
+            key = self._action_key(action)
+            cached = self._score_cache.get(key)
+            if cached is not None:
+                results[action_idx] = cached
+            elif key not in missing_key_set:
+                missing_key_set.add(key)
+                missing_keys.append(key)
+                missing_actions.append(action)
+
+        scenario_costs: Dict[bytes, list[float]] = {
+            key: []
+            for key in missing_keys
         }
+        scenario_infos: Dict[bytes, list[Dict[str, Any]]] = {
+            key: []
+            for key in missing_keys
+        }
+        batch_size = self._configured_forecast_batch_size()
+        for scenario_idx in range(
+            int(self.dpp_cfg.forecast_scenarios)
+        ):
+            for batch_start in range(
+                0,
+                len(missing_actions),
+                batch_size,
+            ):
+                batch_actions = missing_actions[
+                    batch_start:batch_start + batch_size
+                ]
+                batch_keys = missing_keys[
+                    batch_start:batch_start + batch_size
+                ]
+                batch_results = self._run_forecast_round_batch(
+                    env=env,
+                    fast_agent=fast_agent,
+                    actions=batch_actions,
+                    scenario_idx=scenario_idx,
+                )
+                for key, (cost, info) in zip(
+                    batch_keys,
+                    batch_results,
+                ):
+                    scenario_costs[key].append(float(cost))
+                    scenario_infos[key].append(info)
+
+        for key in missing_keys:
+            costs = scenario_costs[key]
+            if any(not math.isfinite(value) for value in costs):
+                mean_cost = math.inf
+                std_cost = math.inf
+            else:
+                mean_cost = float(np.mean(costs))
+                std_cost = float(np.std(costs))
+                self._finite_candidate_requests += 1
+
+            self._score_cache[key] = (
+                float(mean_cost),
+                {
+                    "mean_round_dpp_cost": float(mean_cost),
+                    "std_round_dpp_cost": float(std_cost),
+                    "scenario_costs": tuple(
+                        float(value)
+                        for value in costs
+                    ),
+                    "scenarios": scenario_infos[key],
+                },
+            )
+
+        finalized: list[Tuple[float, Dict[str, Any]]] = []
+        for action_idx, action in enumerate(actions):
+            result = results[action_idx]
+            if result is None:
+                result = self._score_cache[
+                    self._action_key(action)
+                ]
+            finalized.append(result)
+        return finalized
 
     def _score_action(
         self,
@@ -429,45 +699,11 @@ class SlowDPPController:
         fast_agent: FastPPOAgent,
         action: Mapping[str, np.ndarray],
     ) -> Tuple[float, Dict[str, Any]]:
-        self._validate_action(env, action)
-        self._candidate_requests += 1
-
-        key = self._action_key(action)
-        cached = self._score_cache.get(key)
-        if cached is not None:
-            return cached
-
-        scenario_costs = []
-        scenario_info = []
-        for scenario_idx in range(int(self.dpp_cfg.forecast_scenarios)):
-            cost, info = self._run_forecast_round(
-                env=env,
-                fast_agent=fast_agent,
-                action=action,
-                scenario_idx=scenario_idx,
-            )
-            scenario_costs.append(float(cost))
-            scenario_info.append(info)
-
-        if any(not math.isfinite(value) for value in scenario_costs):
-            mean_cost = math.inf
-            std_cost = math.inf
-        else:
-            mean_cost = float(np.mean(scenario_costs))
-            std_cost = float(np.std(scenario_costs))
-            self._finite_candidate_requests += 1
-
-        result = (
-            float(mean_cost),
-            {
-                "mean_round_dpp_cost": float(mean_cost),
-                "std_round_dpp_cost": float(std_cost),
-                "scenario_costs": tuple(float(x) for x in scenario_costs),
-                "scenarios": scenario_info,
-            },
-        )
-        self._score_cache[key] = result
-        return result
+        return self._score_actions(
+            env=env,
+            fast_agent=fast_agent,
+            actions=[action],
+        )[0]
 
     def _tie_break_key(
         self,
@@ -542,6 +778,10 @@ class SlowDPPController:
 
         action_dim = int(rsu.size + hiring.size + uav.size)
         active_dims = int(rsu.sum() + hiring.sum() + uav.sum())
+        throughput = (
+            float(self._forecast_trial_steps)
+            / max(float(self._forecast_wall_seconds), 1e-12)
+        )
 
         return {
             "controller": "round_dpp_coordinate_descent",
@@ -555,6 +795,28 @@ class SlowDPPController:
                 self._finite_candidate_requests
             ),
             "forecast_scenarios": int(self.dpp_cfg.forecast_scenarios),
+            "forecast_candidate_batch_size": int(
+                self._configured_forecast_batch_size()
+            ),
+            "forecast_env_workers": int(
+                self._configured_forecast_env_workers()
+            ),
+            "forecast_batches": int(self._forecast_batches),
+            "forecast_trial_steps": int(
+                self._forecast_trial_steps
+            ),
+            "forecast_wall_seconds": float(
+                self._forecast_wall_seconds
+            ),
+            "forecast_policy_seconds": float(
+                self._forecast_policy_seconds
+            ),
+            "forecast_env_seconds": float(
+                self._forecast_env_seconds
+            ),
+            "forecast_trial_steps_per_second": float(
+                throughput
+            ),
             "raw_rsu_links": int(rsu.sum()),
             "effective_rsu_links": int(rsu.sum()),
             "raw_hired_uav": int(hiring.sum()),
@@ -584,81 +846,114 @@ class SlowDPPController:
         self._score_cache = {}
         self._candidate_requests = 0
         self._finite_candidate_requests = 0
+        self._forecast_batches = 0
+        self._forecast_trial_steps = 0
+        self._forecast_wall_seconds = 0.0
+        self._forecast_policy_seconds = 0.0
+        self._forecast_env_seconds = 0.0
 
-        current = self._initial_rsu_first_action(env)
-        current_score, _ = self._score_action(env, fast_agent, current)
-        if not math.isfinite(current_score):
-            raise RuntimeError(
-                "The RSU-first initial slow action is not DPP-feasible."
+        workers = self._configured_forecast_env_workers()
+        if workers > 1:
+            self._forecast_executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="slow-dpp-env",
             )
+        else:
+            self._forecast_executor = None
 
-        sweeps_completed = 0
-        coordinate_converged = False
-        for _ in range(int(self.dpp_cfg.max_coordinate_sweeps)):
-            changed_in_sweep = False
+        try:
+            current = self._initial_rsu_first_action(env)
+            current_score, _ = self._score_action(
+                env,
+                fast_agent,
+                current,
+            )
+            if not math.isfinite(current_score):
+                raise RuntimeError(
+                    "The RSU-first initial slow action is not DPP-feasible."
+                )
 
-            for region_idx in range(self.num_rsu):
-                best_action = current
-                best_score = current_score
+            sweeps_completed = 0
+            coordinate_converged = False
+            for _ in range(int(self.dpp_cfg.max_coordinate_sweeps)):
+                changed_in_sweep = False
 
-                for candidate in self._iter_region_candidates(
-                    env=env,
-                    base_action=current,
-                    region_idx=region_idx,
-                ):
-                    score, _ = self._score_action(
+                for region_idx in range(self.num_rsu):
+                    best_action = current
+                    best_score = current_score
+                    candidates = list(
+                        self._iter_region_candidates(
+                            env=env,
+                            base_action=current,
+                            region_idx=region_idx,
+                        )
+                    )
+                    candidate_results = self._score_actions(
                         env=env,
                         fast_agent=fast_agent,
-                        action=candidate,
+                        actions=candidates,
                     )
-                    if self._candidate_is_better(
-                        candidate_score=score,
-                        candidate=candidate,
-                        incumbent_score=best_score,
-                        incumbent=best_action,
+                    for candidate, (score, _) in zip(
+                        candidates,
+                        candidate_results,
                     ):
-                        best_action = candidate
-                        best_score = score
+                        if self._candidate_is_better(
+                            candidate_score=score,
+                            candidate=candidate,
+                            incumbent_score=best_score,
+                            incumbent=best_action,
+                        ):
+                            best_action = candidate
+                            best_score = score
 
-                if not self._same_action(current, best_action):
-                    changed_in_sweep = True
-                    current = self._copy_action(best_action)
-                    current_score = float(best_score)
+                    if not self._same_action(current, best_action):
+                        changed_in_sweep = True
+                        current = self._copy_action(best_action)
+                        current_score = float(best_score)
 
-            sweeps_completed += 1
-            if not changed_in_sweep:
-                coordinate_converged = True
-                break
+                sweeps_completed += 1
+                if not changed_in_sweep:
+                    coordinate_converged = True
+                    break
 
-        if not coordinate_converged:
-            raise RuntimeError(
-                "Slow DPP coordinate minimization did not converge within "
-                f"{self.dpp_cfg.max_coordinate_sweeps} sweeps."
+            if not coordinate_converged:
+                raise RuntimeError(
+                    "Slow DPP coordinate minimization did not converge "
+                    "within "
+                    f"{self.dpp_cfg.max_coordinate_sweeps} sweeps."
+                )
+
+            self._validate_action(env, current)
+            if not math.isfinite(current_score):
+                raise RuntimeError(
+                    "Selected slow DPP cost is not finite."
+                )
+
+            _, current_score_info = self._score_action(
+                env=env,
+                fast_agent=fast_agent,
+                action=current,
+            )
+            current_score_std = float(
+                current_score_info["std_round_dpp_cost"]
+            )
+            action_info = self._build_action_info(
+                env=env,
+                action=current,
+                score=current_score,
+                score_std=current_score_std,
+                sweeps_completed=sweeps_completed,
             )
 
-        self._validate_action(env, current)
-        if not math.isfinite(current_score):
-            raise RuntimeError("Selected slow DPP cost is not finite.")
-
-        _, current_score_info = self._score_action(
-            env=env,
-            fast_agent=fast_agent,
-            action=current,
-        )
-        current_score_std = float(
-            current_score_info["std_round_dpp_cost"]
-        )
-        action_info = self._build_action_info(
-            env=env,
-            action=current,
-            score=current_score,
-            score_std=current_score_std,
-            sweeps_completed=sweeps_completed,
-        )
-
-        return {
-            "env_action": self._copy_action(current),
-            "action_info": action_info,
-            "predicted_round_dpp_cost": float(current_score),
-            "predicted_round_dpp_cost_std": float(current_score_std),
-        }
+            return {
+                "env_action": self._copy_action(current),
+                "action_info": action_info,
+                "predicted_round_dpp_cost": float(current_score),
+                "predicted_round_dpp_cost_std": float(
+                    current_score_std
+                ),
+            }
+        finally:
+            if self._forecast_executor is not None:
+                self._forecast_executor.shutdown(wait=True)
+                self._forecast_executor = None

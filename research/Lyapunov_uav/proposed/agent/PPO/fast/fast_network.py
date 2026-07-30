@@ -256,6 +256,185 @@ class FastActorCritic(nn.Module):
             result,
             torch.zeros_like(result),
         )  
+
+    @staticmethod
+    def _sample_common_categorical(
+        distribution: Categorical,
+    ) -> torch.Tensor:
+        """
+        Sample one common uniform variate per categorical variable.
+
+        Every batch row keeps its own policy probabilities, while the
+        underlying uniform variate is shared across rows. This is the
+        vectorized equivalent of evaluating Slow-DPP candidates with common
+        random numbers.
+        """
+        logits = distribution.logits
+        if logits.ndim < 2:
+            raise ValueError(
+                "Categorical logits must include batch and class dims."
+            )
+
+        probabilities = torch.softmax(logits, dim=-1)
+        cdf = probabilities.cumsum(dim=-1)
+        uniform_shape = (1, *logits.shape[1:-1])
+        uniform = torch.rand(
+            uniform_shape,
+            device=logits.device,
+            dtype=logits.dtype,
+        )
+        sample = (
+            uniform.unsqueeze(-1)
+            > cdf
+        ).sum(dim=-1)
+        return sample.clamp_max(logits.shape[-1] - 1)
+
+    @staticmethod
+    def _sample_common_normal(
+        distribution: Normal,
+    ) -> torch.Tensor:
+        """
+        Reparameterized Normal sample with common noise across batch rows.
+        """
+        mean = distribution.mean
+        noise = torch.randn(
+            (1, *mean.shape[1:]),
+            device=mean.device,
+            dtype=mean.dtype,
+        )
+        return mean + distribution.stddev * noise
+
+    @torch.inference_mode()
+    def sample_policy_actions(
+        self,
+        obs: torch.Tensor,
+        deterministic: bool = False,
+        action_mask: torch.Tensor | None = None,
+        common_random_across_batch: bool = False,
+    ) -> torch.Tensor:
+        """
+        Forecast-only policy sampling without critic/log-prob computation.
+
+        The realized joint-training path continues to use :meth:`act`.
+        Slow-DPP forecasts need only environment actions, so omitting critic,
+        log-probability, entropy, and statistics removes unnecessary GPU
+        work and synchronization.
+        """
+        if obs.ndim == 1:
+            obs = obs.unsqueeze(0)
+
+        (
+            rsu_chunk_dist,
+            rsu_layer_dist,
+            uav_chunk_dist,
+            uav_layer_dist,
+            power_dist,
+        ) = self._policy_distributions(obs)
+
+        if deterministic:
+            rsu_chunks = rsu_chunk_dist.logits.argmax(dim=-1)
+            rsu_layer_class = rsu_layer_dist.logits.argmax(dim=-1)
+            uav_chunks = uav_chunk_dist.logits.argmax(dim=-1)
+            uav_layer_class = uav_layer_dist.logits.argmax(dim=-1)
+            power_raw = power_dist.mean
+        elif common_random_across_batch:
+            rsu_chunks = self._sample_common_categorical(
+                rsu_chunk_dist
+            )
+            rsu_layer_class = self._sample_common_categorical(
+                rsu_layer_dist
+            )
+            uav_chunks = self._sample_common_categorical(
+                uav_chunk_dist
+            )
+            uav_layer_class = self._sample_common_categorical(
+                uav_layer_dist
+            )
+            power_raw = self._sample_common_normal(power_dist)
+        else:
+            rsu_chunks = rsu_chunk_dist.sample()
+            rsu_layer_class = rsu_layer_dist.sample()
+            uav_chunks = uav_chunk_dist.sample()
+            uav_layer_class = uav_layer_dist.sample()
+            power_raw = power_dist.sample()
+
+        provisional = torch.cat(
+            [
+                rsu_chunks.float(),
+                (rsu_layer_class + 1).float(),
+                uav_chunks.float(),
+                (uav_layer_class + 1).float(),
+                power_raw,
+            ],
+            dim=-1,
+        )
+
+        if action_mask is None:
+            base_mask = torch.ones_like(provisional)
+        else:
+            base_mask = self._prepare_mask(
+                action_mask,
+                provisional,
+            )
+
+        (
+            rsu_chunk_mask,
+            rsu_layer_base_mask,
+            uav_chunk_mask,
+            uav_layer_base_mask,
+            power_base_mask,
+        ) = self._split_vector(base_mask)
+
+        rsu_chunks = torch.where(
+            rsu_chunk_mask > 0.0,
+            rsu_chunks,
+            torch.zeros_like(rsu_chunks),
+        )
+        uav_chunks = torch.where(
+            uav_chunk_mask > 0.0,
+            uav_chunks,
+            torch.zeros_like(uav_chunks),
+        )
+
+        rsu_layer_mask = (
+            rsu_layer_base_mask
+            * (rsu_chunks > 0).to(rsu_layer_base_mask.dtype)
+        )
+        uav_layer_mask = (
+            uav_layer_base_mask
+            * (uav_chunks > 0).to(uav_layer_base_mask.dtype)
+        )
+        power_mask = (
+            power_base_mask
+            * (uav_chunks > 0).to(power_base_mask.dtype)
+        )
+
+        rsu_layers = torch.where(
+            rsu_layer_mask > 0.0,
+            rsu_layer_class + 1,
+            torch.zeros_like(rsu_layer_class),
+        )
+        uav_layers = torch.where(
+            uav_layer_mask > 0.0,
+            uav_layer_class + 1,
+            torch.zeros_like(uav_layer_class),
+        )
+        power_raw = torch.where(
+            power_mask > 0.0,
+            power_raw,
+            torch.zeros_like(power_raw),
+        )
+
+        return torch.cat(
+            [
+                rsu_chunks.float(),
+                rsu_layers.float(),
+                uav_chunks.float(),
+                uav_layers.float(),
+                power_raw,
+            ],
+            dim=-1,
+        )
     
     @torch.no_grad()
     def act(

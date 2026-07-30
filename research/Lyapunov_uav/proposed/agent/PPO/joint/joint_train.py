@@ -1137,6 +1137,16 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
     print(f"episode_slots         : {env_cfg.episode_slots}", flush=True)
     print(f"rounds_per_episode    : {run_cfg.rounds_per_episode}", flush=True)
     print(f"forecast_scenarios    : {run_cfg.forecast_scenarios}", flush=True)
+    print(
+        "forecast_batch_size   : "
+        f"{run_cfg.forecast_candidate_batch_size}",
+        flush=True,
+    )
+    print(
+        "forecast_env_workers  : "
+        f"{run_cfg.forecast_env_workers}",
+        flush=True,
+    )
     print(f"rollout_steps         : {fast_agent.ppo_cfg.rollout_steps}", flush=True)
     print(f"ppo_reward_scale      : {ppo_reward_scale}", flush=True)
     print(f"start_episode         : {current_episode}", flush=True)
@@ -1320,6 +1330,10 @@ def run(run_cfg: SlowJointTrainConfig) -> None:
                 f"{selected_slow['action_info']['effective_hired_uav']} "
                 "unique_candidates="
                 f"{selected_slow['action_info']['unique_candidates']} "
+                "forecast_steps/s="
+                f"{selected_slow['action_info']['forecast_trial_steps_per_second']:.1f} "
+                "forecast_s="
+                f"{selected_slow['action_info']['forecast_wall_seconds']:.1f} "
                 f"buffer={len(fast_agent.buffer)}/"
                 f"{fast_agent.buffer.capacity}",
                 flush=True,

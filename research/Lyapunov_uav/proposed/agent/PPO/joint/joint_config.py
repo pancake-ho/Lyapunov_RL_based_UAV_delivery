@@ -64,6 +64,13 @@ class SlowJointTrainConfig:
     forecast_seed_offset: int = 20_000_000
     forecast_fast_deterministic: bool = False
 
+    # Exact candidates within the same coordinate are independent once the
+    # base action is fixed. Evaluate them in lock-step so policy inference is
+    # a GPU batch instead of repeated batch-1 calls. Environment steps use
+    # independent trial objects and can therefore use the allocated CPUs.
+    forecast_candidate_batch_size: int = 64
+    forecast_env_workers: int = 16
+
     # Region-local candidates are exhaustively enumerated. Exceeding this
     # guard raises an error; it never prunes candidates to top-k.
     max_exact_region_candidates: int = 8_192
@@ -127,6 +134,8 @@ class SlowJointTrainConfig:
             "num_episodes",
             "rounds_per_episode",
             "forecast_scenarios",
+            "forecast_candidate_batch_size",
+            "forecast_env_workers",
             "max_exact_region_candidates",
             "max_coordinate_sweeps",
             "final_slow_T",
@@ -263,12 +272,31 @@ class SlowJointTrainConfig:
 
 def get_slow_joint_train_config() -> SlowJointTrainConfig:
     cfg = SlowJointTrainConfig()
+    replacements: Dict[str, object] = {}
     resume_checkpoint = os.environ.get(
         "JOINT_RESUME_CHECKPOINT"
     )
     if resume_checkpoint:
-        cfg = replace(
-            cfg,
-            resume_checkpoint=resume_checkpoint,
+        replacements["resume_checkpoint"] = resume_checkpoint
+
+    batch_size = os.environ.get(
+        "JOINT_FORECAST_CANDIDATE_BATCH_SIZE"
+    )
+    if batch_size:
+        replacements["forecast_candidate_batch_size"] = int(
+            batch_size
         )
-    return cfg
+
+    env_workers = os.environ.get(
+        "JOINT_FORECAST_ENV_WORKERS"
+    )
+    if env_workers:
+        replacements["forecast_env_workers"] = int(
+            env_workers
+        )
+
+    return (
+        replace(cfg, **replacements)
+        if replacements
+        else cfg
+    )

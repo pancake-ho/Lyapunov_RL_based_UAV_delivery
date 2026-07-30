@@ -29,6 +29,162 @@ from agent.PPO.joint.joint_train import (
 )
 
 
+def run_forecast_batch_equivalence_test() -> None:
+    base_cfg = replace(
+        get_slow_joint_train_config(),
+        device="cpu",
+        num_episodes=1,
+        rounds_per_episode=1,
+        final_slow_T=2,
+        final_target_service_slots_per_round=2,
+        forecast_scenarios=1,
+        forecast_fast_deterministic=True,
+        max_coordinate_sweeps=4,
+        fast_rollout_steps=2,
+        fast_batch_size=2,
+        fast_update_epochs=1,
+        fast_target_kl=None,
+        resume_checkpoint=None,
+    )
+    set_seed(
+        int(base_cfg.seed),
+        deterministic=bool(base_cfg.deterministic_torch),
+    )
+    env_cfg = _make_env_config(
+        run_cfg=base_cfg,
+        checkpoint_extra=None,
+    )
+    probe_env = Env(env_cfg)
+    sample_obs, _ = split_env_reset(probe_env.reset())
+    fast_agent = _build_fast_agent(
+        run_cfg=base_cfg,
+        env_cfg=env_cfg,
+        sample_fast_obs=sample_obs,
+    )
+    with torch.no_grad():
+        for parameter in fast_agent.model.parameters():
+            parameter.zero_()
+    env = Env(env_cfg)
+    split_env_reset(env.reset())
+    _prime_fresh_obs_normalizer(
+        fast_agent=fast_agent,
+        obs=env.get_fast_obs(),
+    )
+
+    serial_controller = SlowDPPController(
+        env_cfg=env_cfg,
+        dpp_cfg=replace(
+            base_cfg,
+            forecast_candidate_batch_size=1,
+            forecast_env_workers=1,
+        ),
+    )
+    batched_controller = SlowDPPController(
+        env_cfg=env_cfg,
+        dpp_cfg=replace(
+            base_cfg,
+            forecast_candidate_batch_size=64,
+            forecast_env_workers=4,
+        ),
+    )
+    fast_agent.model.eval()
+    serial = serial_controller.select_action(
+        env=env,
+        fast_agent=fast_agent,
+    )
+    batched = batched_controller.select_action(
+        env=env,
+        fast_agent=fast_agent,
+    )
+
+    for key in (
+        "rsu_scheduling",
+        "uav_hiring",
+        "uav_scheduling",
+    ):
+        if not np.array_equal(
+            serial["env_action"][key],
+            batched["env_action"][key],
+        ):
+            raise RuntimeError(
+                "Batched forecast changed the deterministic Slow action: "
+                f"{key}"
+            )
+
+    if not np.isclose(
+        float(serial["predicted_round_dpp_cost"]),
+        float(batched["predicted_round_dpp_cost"]),
+        rtol=1e-6,
+        atol=1e-3,
+    ):
+        raise RuntimeError(
+            "Batched forecast changed the deterministic DPP cost."
+        )
+
+    serial_info = serial["action_info"]
+    batched_info = batched["action_info"]
+    if int(serial_info["forecast_trial_steps"]) != int(
+        batched_info["forecast_trial_steps"]
+    ):
+        raise RuntimeError(
+            "Batched forecast changed the number of exact trial steps."
+        )
+    if int(batched_info["forecast_batches"]) >= int(
+        serial_info["forecast_batches"]
+    ):
+        raise RuntimeError(
+            "Forecast batching did not reduce actor batch calls."
+        )
+
+    duplicate_obs = [
+        env.get_fast_obs(),
+        env.get_fast_obs(),
+        env.get_fast_obs(),
+    ]
+    torch.manual_seed(777)
+    common_actions = fast_agent.select_env_actions_batch(
+        observations=duplicate_obs,
+        deterministic=False,
+        update_norm=False,
+        common_random_across_batch=True,
+    )
+    for key in (
+        "rsu_chunks",
+        "rsu_layers",
+        "uav_chunks",
+        "uav_layers",
+        "uav_power",
+    ):
+        reference = np.asarray(common_actions[0][key])
+        for candidate_action in common_actions[1:]:
+            candidate_value = np.asarray(
+                candidate_action[key]
+            )
+            if np.issubdtype(reference.dtype, np.floating):
+                equal = np.allclose(
+                    reference,
+                    candidate_value,
+                    rtol=0.0,
+                    atol=0.0,
+                )
+            else:
+                equal = np.array_equal(
+                    reference,
+                    candidate_value,
+                )
+            if not equal:
+                raise RuntimeError(
+                    "Common-random-number sampling diverged across "
+                    f"identical candidates: {key}"
+                )
+
+    print(
+        "[PASS] forecast batching: deterministic Slow action/cost and "
+        "exact trial-step count matched serial execution, actor batch calls "
+        "decreased, and stochastic common random numbers were preserved."
+    )
+
+
 def run_fresh_joint_smoke_test() -> None:
     run_cfg = replace(
         get_slow_joint_train_config(),
@@ -255,4 +411,5 @@ def run_fresh_joint_smoke_test() -> None:
 
 
 if __name__ == "__main__":
+    run_forecast_batch_equivalence_test()
     run_fresh_joint_smoke_test()
