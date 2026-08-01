@@ -1618,10 +1618,35 @@ class Env:
             "uav_connection": connection_state["uav_connection"].copy(),
         }
 
-    def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+    def step(
+        self,
+        action: EnvAction,
+        *,
+        info_level: str = "full",
+    ) -> tuple[
+        Dict[str, np.ndarray],
+        float,
+        bool,
+        bool,
+        Dict[str, Any],
+    ]:
         """
-        환경의 1-slot 진행 함수로, Fast-timescale 진행을 담당.
+        환경의 1-slot transition.
+
+        info_level:
+            "full":
+                실제 training/evaluation용 전체 diagnostic info를 생성한다.
+
+            "forecast":
+                Slow-DPP shadow rollout에 필요한 최소 정보만 생성한다.
+                physical transition, reward, mobility, queue, battery 동작은
+                full 경로와 완전히 동일하다.
         """
+        if info_level not in {"full", "forecast"}:
+            raise ValueError(
+                "info_level must be 'full' or 'forecast', "
+                f"got {info_level!r}."
+            )
         fast_act = parse_fast_action(action, self.cfg)
 
         fast_act.rsu_user_distance = self.rsu_user_distance.copy()
@@ -1798,6 +1823,47 @@ class Env:
             self.round_slot = int(next_round_slot)
 
         region_info = self._update_user_mobility()
+        obs = self.get_fast_obs()
+
+        if info_level == "forecast":
+            fast_components = reward_components.get(
+                "fast_reward_components",
+                {},
+            )
+            one_slot_dpp_cost = float(
+                fast_components.get(
+                    "one_slot_dpp_cost",
+                    -float(reward),
+                )
+            )
+
+            if not np.isclose(
+                one_slot_dpp_cost,
+                -float(reward),
+                rtol=1e-6,
+                atol=1e-4,
+            ):
+                raise RuntimeError(
+                    "Forecast reward/DPP identity mismatch: "
+                    f"reward={reward}, "
+                    f"cost={one_slot_dpp_cost}"
+                )
+
+            forecast_info: Dict[str, Any] = {
+                "is_round_boundary": bool(is_round_boundary),
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "outage": self.outage.copy(),
+                "one_slot_dpp_cost": one_slot_dpp_cost,
+            }
+
+            return (
+                obs,
+                float(reward),
+                bool(terminated),
+                bool(truncated),
+                forecast_info,
+            )
 
         next_connection_state = self._get_user_node_connection_state()
 
@@ -1927,6 +1993,5 @@ class Env:
             },
         }
 
-        obs = self.get_fast_obs()
 
         return obs, float(reward), terminated, truncated, info

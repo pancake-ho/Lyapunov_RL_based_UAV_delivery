@@ -127,6 +127,8 @@ class FastPPOAgent:
             self.obs_normalizer = ObsNormalizer(obs_dim=self.obs_dim)
         else:
             self.obs_normalizer = None
+        
+        self._forecast_norm_cache: Optional[Tuple[float, torch.Tensor, torch.Tensor,]] = None
 
     # ------------------------------------------------------------------
     # validation / observation handling
@@ -216,6 +218,54 @@ class FastPPOAgent:
             )
         self._check_finite_array("normalizer_update_batch", raw)
         self.obs_normalizer.rms.update(raw)
+        self._invalidate_forecast_norm_cache()
+    
+    def _invalidate_forecast_norm_cache(self) -> None:
+        self._forecast_norm_cache = None
+
+    def _get_forecast_norm_tensors(
+        self,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.obs_normalizer is None:
+            raise RuntimeError(
+                "Observation normalizer is disabled."
+            )
+
+        count = float(
+            self.obs_normalizer.rms.count
+        )
+
+        cached = self._forecast_norm_cache
+        if (
+            cached is not None
+            and cached[0] == count
+        ):
+            return cached[1], cached[2]
+
+        mean = torch.as_tensor(
+            np.asarray(
+                self.obs_normalizer.rms.mean,
+                dtype=np.float32,
+            ),
+            device=self.device,
+            dtype=torch.float32,
+        ).clone()
+
+        std = torch.as_tensor(
+            np.asarray(
+                self.obs_normalizer.rms.std,
+                dtype=np.float32,
+            ),
+            device=self.device,
+            dtype=torch.float32,
+        ).clone()
+
+        self._forecast_norm_cache = (
+            count,
+            mean,
+            std,
+        )
+        return mean, std
 
     # ------------------------------------------------------------------
     # action selection
@@ -659,6 +709,7 @@ class FastPPOAgent:
         obs_norm_state = extra.get("obs_normalizer")
         if obs_norm_state is not None and self.obs_normalizer is not None:
             self.obs_normalizer.load_state_dict(obs_norm_state)
+            self._invalidate_forecast_norm_cache()
         return checkpoint
 
     def load_legacy_transfer(self, path: str | Path) -> Dict[str, Any]:
@@ -698,44 +749,120 @@ class FastPPOAgent:
             "source_extra": extra,
         }
 
-    # agent/PPO/fast/fast_agent.py 의 FastPPOAgent 클래스 내부에 추가
-
     @torch.inference_mode()
     def select_env_actions_from_matrices_batch(
         self,
-        obs_matrix: np.ndarray,      # (N, obs_dim) float32
-        mask_matrix: np.ndarray,     # (N, action_dim) float32
+        obs_matrix: np.ndarray,
+        mask_matrix: np.ndarray,
         *,
         deterministic: bool = True,
-    ) -> np.ndarray:                 # (N, action_dim) float32
-        """
-        Forecast 전용 Zero-Dict GPU 배치 추론.
-        Dict 변환 오버헤드 없이 Float32 NumPy Matrix를 즉시 GPU로 전달합니다.
-        """
-        if obs_matrix.shape[0] == 0:
-            return np.zeros((0, self.action_dim), dtype=np.float32)
-
-        self._check_finite_array("obs_matrix", obs_matrix)
-        self._check_finite_array("mask_matrix", mask_matrix)
-
-        # 1. Normalization (PyTorch Tensor 단위 고속 처리)
-        obs_tensor = to_tensor(obs_matrix, device=self.device)
-        mask_tensor = to_tensor(mask_matrix, device=self.device)
-
-        if self.obs_normalizer is not None:
-            mean = torch.as_tensor(self.obs_normalizer.rms.mean, device=self.device, dtype=torch.float32)
-            std = torch.as_tensor(self.obs_normalizer.rms.std, device=self.device, dtype=torch.float32)
-            eps = float(self.obs_normalizer.eps)
-            clip_val = float(self.obs_normalizer.clip)
-            obs_tensor = torch.clamp((obs_tensor - mean) / (std + eps), -clip_val, clip_val)
-
-        # 2. Actor Policy Forward
-        action_tensor, _ = self.model.policy_action(
-            obs=obs_tensor,
-            deterministic=bool(deterministic),
-            action_mask=mask_tensor,
+    ) -> np.ndarray:
+        obs_matrix = np.asarray(
+            obs_matrix,
+            dtype=np.float32,
+            order="C",
+        )
+        mask_matrix = np.asarray(
+            mask_matrix,
+            order="C",
         )
 
-        raw_actions = action_tensor.detach().cpu().numpy().astype(np.float32)
-        self._check_finite_array("batch_policy_actions", raw_actions)
+        if obs_matrix.ndim != 2:
+            raise ValueError(
+                f"obs_matrix must be 2-D: "
+                f"{obs_matrix.shape}"
+            )
+        if mask_matrix.ndim != 2:
+            raise ValueError(
+                f"mask_matrix must be 2-D: "
+                f"{mask_matrix.shape}"
+            )
+        if obs_matrix.shape[0] != mask_matrix.shape[0]:
+            raise ValueError(
+                "Observation/mask batch mismatch: "
+                f"obs={obs_matrix.shape}, "
+                f"mask={mask_matrix.shape}"
+            )
+        if obs_matrix.shape[1] != self.obs_dim:
+            raise ValueError(
+                "Observation dimension mismatch: "
+                f"expected={self.obs_dim}, "
+                f"got={obs_matrix.shape[1]}"
+            )
+        if mask_matrix.shape[1] != self.action_dim:
+            raise ValueError(
+                "Action-mask dimension mismatch: "
+                f"expected={self.action_dim}, "
+                f"got={mask_matrix.shape[1]}"
+            )
+
+        if obs_matrix.shape[0] == 0:
+            return np.zeros(
+                (0, self.action_dim),
+                dtype=np.float32,
+            )
+
+        self._check_finite_array(
+            "forecast_obs_matrix",
+            obs_matrix,
+        )
+
+        obs_tensor = torch.as_tensor(
+            obs_matrix,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        mask_tensor = torch.as_tensor(
+            mask_matrix,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+        if self.obs_normalizer is not None:
+            mean, std = (
+                self._get_forecast_norm_tensors()
+            )
+            obs_tensor = torch.clamp(
+                (
+                    obs_tensor - mean
+                )
+                / (
+                    std
+                    + float(
+                        self.obs_normalizer.eps
+                    )
+                ),
+                -float(
+                    self.obs_normalizer.clip
+                ),
+                float(
+                    self.obs_normalizer.clip
+                ),
+            )
+
+        action_tensor, _ = (
+            self.model.policy_action(
+                obs=obs_tensor,
+                deterministic=bool(
+                    deterministic
+                ),
+                action_mask=mask_tensor,
+            )
+        )
+
+        raw_actions = (
+            action_tensor
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(
+                np.float32,
+                copy=False,
+            )
+        )
+
+        self._check_finite_array(
+            "forecast_policy_actions",
+            raw_actions,
+        )
         return raw_actions

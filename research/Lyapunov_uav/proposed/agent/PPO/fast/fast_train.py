@@ -233,34 +233,63 @@ def formulation_reward_from_env_step(
     env_cfg: EnvConfig,
 ) -> Tuple[float, float]:
     """
-    Current Env reward contains
+    Env._compute_fast_reward()가 반환하는 env_reward는 이미 현재
+    formulation의 정확한 Fast reward이다.
 
-        alpha_Z * sum Z_n(t)d_n(t)
-        - alpha_B * sum B_u(t)e_u(t)
-        + alpha_B * sum B_u(t)e_c(t)
-        - V * degradation(t).
+        R^F(t)
+        = alpha_Z * sum_n Z_n(t)[d_n(t)-b_n(t)]
+          - alpha_B * sum_u B_u(t)e_u(t)
+          + alpha_B * sum_u B_u(t)e_u^c(t)
+          - V * sum_n[P_bar*d_n(t)-q_n(t)]
 
-    Formulation v6 uses alpha_Z * Z_n(t)(d_n(t)-b_n(t)); therefore the
-    action-independent one-slot term -alpha_Z * Z_n(t)b_n(t) is restored.
+    따라서 trainer에서 playback term을 다시 보정하면 안 된다.
 
-    Returns:
-        formulation_reward, slot_dpp_cost (= -formulation_reward)
+    Forecast 경량 경로에서는 info["one_slot_dpp_cost"]를 사용하고,
+    일반 경로에서는 reward_components 내부 값을 사용한다.
+    두 값이 없을 경우 -env_reward를 사용한다.
     """
-    prev_z = np.asarray(info.get("prev_Z", []), dtype=np.float64)
-    playback = np.asarray(info.get("playback", []), dtype=np.float64)
-    if prev_z.shape != (int(env_cfg.num_user),):
-        raise ValueError(f"prev_Z shape mismatch: {prev_z.shape}")
-    if playback.shape != (int(env_cfg.num_user),):
-        raise ValueError(f"playback shape mismatch: {playback.shape}")
+    del env_cfg
 
-    queue_playback_term = float(env_cfg.alpha_Z) * float(
-        np.dot(prev_z, playback)
+    formulation_reward = float(env_reward)
+
+    reward_components = info.get("reward_components", {})
+    fast_components = reward_components.get(
+        "fast_reward_components",
+        {},
     )
-    formulation_reward = float(env_reward) - queue_playback_term
-    slot_dpp_cost = -formulation_reward
+
+    stored_cost = info.get(
+        "one_slot_dpp_cost",
+        fast_components.get(
+            "one_slot_dpp_cost",
+            -formulation_reward,
+        ),
+    )
+    slot_dpp_cost = float(stored_cost)
 
     if not np.isfinite(formulation_reward):
-        raise RuntimeError("Formulation reward is NaN or Inf.")
+        raise RuntimeError(
+            "Formulation reward is NaN or Inf: "
+            f"{formulation_reward}"
+        )
+    if not np.isfinite(slot_dpp_cost):
+        raise RuntimeError(
+            "One-slot DPP cost is NaN or Inf: "
+            f"{slot_dpp_cost}"
+        )
+
+    if not np.isclose(
+        slot_dpp_cost,
+        -formulation_reward,
+        rtol=1e-6,
+        atol=1e-4,
+    ):
+        raise RuntimeError(
+            "Fast reward and one-slot DPP cost disagree: "
+            f"reward={formulation_reward}, "
+            f"cost={slot_dpp_cost}"
+        )
+
     return formulation_reward, slot_dpp_cost
 
 
@@ -596,25 +625,48 @@ def _make_shadow_env(
 
 def _forecast_worker_loop(connection) -> None:
     """
-    Slow-DPP shadow environment 담당 persistent Worker Process.
-    Pipe IPC 통신 시 Dict 객체를 전송하지 않고 순수 Float32 NumPy 배열만 송수신하여
-    Pickle 직렬화 병목을 완벽히 제거합니다.
+    Slow-DPP shadow environment worker.
+
+    Worker가 각 candidate의 현재 Dict observation을 내부에 유지한다.
+    Env.step()이 반환한 next_obs를 다음 action decode에 그대로 재사용한다.
     """
-    shadows: list[Env] = []
-    codec: Optional[FastActionCodec] = None
+    base_env: Optional[Env] = None
     train_cfg: Optional[FastTrainConfig] = None
+    codec: Optional[FastActionCodec] = None
+
+    shadows: list[Env] = []
+    current_observations: list[Dict[str, Any]] = []
 
     try:
         while True:
             command, payload = connection.recv()
 
             if command == "close":
+                connection.send(("closed", None))
                 break
 
-            if command == "init":
-                base_env, actions, cfg, scenario_idx = payload
-                train_cfg = cfg
+            if command == "set_round_context":
+                base_env, train_cfg = payload
                 codec = FastActionCodec(base_env.cfg)
+
+                shadows = []
+                current_observations = []
+
+                connection.send(("context_ready", None))
+                continue
+
+            if command == "load_batch":
+                if base_env is None:
+                    raise RuntimeError(
+                        "Worker received load_batch before "
+                        "set_round_context."
+                    )
+                if train_cfg is None or codec is None:
+                    raise RuntimeError(
+                        "Worker context is incomplete."
+                    )
+
+                actions, scenario_idx = payload
 
                 shadows = [
                     _make_shadow_env(
@@ -625,78 +677,216 @@ def _forecast_worker_loop(connection) -> None:
                     )
                     for action in actions
                 ]
+                current_observations = [
+                    shadow.get_fast_obs()
+                    for shadow in shadows
+                ]
 
-                # Dict 관측값을 Worker 내부에서 즉시 Float32 Matrix로 변환
-                obs_list = []
-                mask_list = []
-                for shadow in shadows:
-                    dict_obs = shadow.get_fast_obs()
-                    obs_list.append(flatten_fast_obs(dict_obs).astype(np.float32))
-                    mask_list.append(codec.build_base_action_mask(dict_obs).astype(np.float32))
+                obs_matrix = np.stack(
+                    [
+                        flatten_fast_obs(obs).astype(
+                            np.float32,
+                            copy=False,
+                        )
+                        for obs in current_observations
+                    ],
+                    axis=0,
+                )
 
-                obs_matrix = np.stack(obs_list, axis=0)
-                mask_matrix = np.stack(mask_list, axis=0)
+                # mask는 binary이므로 pipe/shared-memory에서는 uint8로 유지
+                mask_matrix = np.stack(
+                    [
+                        codec.build_base_action_mask(obs).astype(
+                            np.uint8,
+                            copy=False,
+                        )
+                        for obs in current_observations
+                    ],
+                    axis=0,
+                )
 
-                connection.send(("ready", obs_matrix, mask_matrix))
+                connection.send(
+                    (
+                        "batch_ready",
+                        obs_matrix,
+                        mask_matrix,
+                    )
+                )
                 continue
 
-            if command != "step":
-                raise RuntimeError(f"Unknown forecast-worker command: {command}")
+            if command == "step":
+                if train_cfg is None or codec is None:
+                    raise RuntimeError(
+                        "Worker received step before context."
+                    )
+                if not shadows:
+                    raise RuntimeError(
+                        "Worker received step before load_batch."
+                    )
 
-            if train_cfg is None or codec is None or not shadows:
-                raise RuntimeError("Forecast worker received step before init.")
-
-            raw_actions_chunk, slot_idx = payload  # (K, action_dim) float32 matrix
-
-            count = len(shadows)
-            next_obs_list = []
-            next_mask_list = []
-            slot_costs = np.zeros(count, dtype=np.float64)
-            invalid = np.zeros(count, dtype=bool)
-
-            # 각 shadow Env에 대해 디코딩 및 step 실행
-            for idx, shadow in enumerate(shadows):
-                dict_obs = shadow.get_fast_obs()
-                env_action = codec.decode(raw_actions_chunk[idx], dict_obs)
-
-                next_obs, reward, terminated, truncated, info = split_env_step(
-                    shadow.step(env_action)
+                raw_actions_chunk, slot_idx = payload
+                raw_actions_chunk = np.asarray(
+                    raw_actions_chunk,
+                    dtype=np.float32,
                 )
 
-                expected_boundary = int(slot_idx) == int(train_cfg.dpp_forecast_horizon) - 1
-                actual_boundary = bool(info.get("is_round_boundary", False))
-                if actual_boundary != expected_boundary:
-                    raise RuntimeError(f"Forecast boundary mismatch: slot={slot_idx}")
+                count = len(shadows)
+                if raw_actions_chunk.shape[0] != count:
+                    raise ValueError(
+                        "Worker action count mismatch: "
+                        f"actions={raw_actions_chunk.shape[0]}, "
+                        f"shadows={count}"
+                    )
 
-                if terminated or truncated:
-                    invalid[idx] = True
-
-                _, slot_cost = formulation_reward_from_env_step(
-                    env_reward=reward,
-                    info=info,
-                    env_cfg=shadow.cfg,
+                next_obs_matrix = np.empty(
+                    (
+                        count,
+                        flatten_fast_obs(
+                            current_observations[0]
+                        ).size,
+                    ),
+                    dtype=np.float32,
                 )
-                slot_costs[idx] = float(slot_cost)
+                next_mask_matrix = np.empty(
+                    (
+                        count,
+                        codec.action_dim,
+                    ),
+                    dtype=np.uint8,
+                )
+                slot_costs = np.empty(
+                    count,
+                    dtype=np.float64,
+                )
+                invalid = np.zeros(
+                    count,
+                    dtype=np.uint8,
+                )
 
-                if bool(train_cfg.dpp_reject_forecast_outage) and np.any(
-                    np.asarray(info.get("outage", []), dtype=np.int32) > 0
-                ):
-                    invalid[idx] = True
+                expected_boundary = (
+                    int(slot_idx)
+                    == int(
+                        train_cfg.dpp_forecast_horizon
+                    )
+                    - 1
+                )
 
-                # 다음 스텝용 관측값/마스크를 Worker 내에서 즉시 Vectorize
-                next_dict_obs = shadow.get_fast_obs()
-                next_obs_list.append(flatten_fast_obs(next_dict_obs).astype(np.float32))
-                next_mask_list.append(codec.build_base_action_mask(next_dict_obs).astype(np.float32))
+                for idx, shadow in enumerate(shadows):
+                    current_obs = current_observations[idx]
 
-            next_obs_matrix = np.stack(next_obs_list, axis=0)
-            next_mask_matrix = np.stack(next_mask_list, axis=0)
+                    env_action = codec.decode(
+                        raw_actions_chunk[idx],
+                        current_obs,
+                    )
 
-            # 순수 NumPy 배열만 전송 (Zero-Pickle Dict)
-            connection.send(("step_result", next_obs_matrix, next_mask_matrix, slot_costs, invalid))
+                    (
+                        next_obs,
+                        reward,
+                        terminated,
+                        truncated,
+                        info,
+                    ) = split_env_step(
+                        shadow.step(
+                            env_action,
+                            info_level="forecast",
+                        )
+                    )
 
+                    actual_boundary = bool(
+                        info.get(
+                            "is_round_boundary",
+                            False,
+                        )
+                    )
+                    if actual_boundary != expected_boundary:
+                        raise RuntimeError(
+                            "Forecast boundary mismatch: "
+                            f"slot={slot_idx}, "
+                            f"expected={expected_boundary}, "
+                            f"actual={actual_boundary}"
+                        )
+
+                    if terminated or truncated:
+                        invalid[idx] = 1
+
+                    slot_cost = float(
+                        info.get(
+                            "one_slot_dpp_cost",
+                            -float(reward),
+                        )
+                    )
+                    if not np.isfinite(slot_cost):
+                        raise RuntimeError(
+                            "Forecast slot DPP cost is NaN "
+                            f"or Inf: candidate={idx}, "
+                            f"slot={slot_idx}"
+                        )
+
+                    slot_costs[idx] = slot_cost
+
+                    if (
+                        bool(
+                            train_cfg
+                            .dpp_reject_forecast_outage
+                        )
+                        and np.any(
+                            np.asarray(
+                                info.get("outage", []),
+                                dtype=np.int32,
+                            )
+                            > 0
+                        )
+                    ):
+                        invalid[idx] = 1
+
+                    current_observations[idx] = next_obs
+
+                    next_obs_matrix[idx] = (
+                        flatten_fast_obs(
+                            next_obs
+                        ).astype(
+                            np.float32,
+                            copy=False,
+                        )
+                    )
+                    next_mask_matrix[idx] = (
+                        codec
+                        .build_base_action_mask(
+                            next_obs
+                        )
+                        .astype(
+                            np.uint8,
+                            copy=False,
+                        )
+                    )
+
+                connection.send(
+                    (
+                        "step_result",
+                        next_obs_matrix,
+                        next_mask_matrix,
+                        slot_costs,
+                        invalid,
+                    )
+                )
+                continue
+
+            raise RuntimeError(
+                "Unknown forecast-worker command: "
+                f"{command!r}"
+            )
+
+    except EOFError:
+        return
     except BaseException as exc:
         try:
-            connection.send(("error", type(exc).__name__, str(exc)))
+            connection.send(
+                (
+                    "error",
+                    type(exc).__name__,
+                    str(exc),
+                )
+            )
         except BaseException:
             pass
         raise
@@ -738,6 +928,30 @@ class _PersistentShadowProcessPool:
             raise RuntimeError(f"Unexpected worker message: expected={expected}, got={message[0]}")
         return message
 
+    def set_round_context(
+        self,
+        *,
+        base_env: Env,
+        train_cfg: FastTrainConfig,
+    ) -> None:
+        for parent in self.parents:
+            parent.send(
+                (
+                    "set_round_context",
+                    (
+                        base_env,
+                        train_cfg,
+                    ),
+                )
+            )
+
+        for worker_idx, parent in enumerate(self.parents):
+            message = self._check_message(
+                self.parents[worker_idx].recv(),
+                "batch_ready",
+            )
+            del message
+
     def rollout(
         self,
         *,
@@ -759,9 +973,17 @@ class _PersistentShadowProcessPool:
 
         # 1. Worker 초기화 및 첫 관측값/마스크 Matrix 수신
         for worker_idx in range(active_workers):
-            start, end = offsets[worker_idx], offsets[worker_idx + 1]
+            start = offsets[worker_idx]
+            end = offsets[worker_idx + 1]
+
             self.parents[worker_idx].send(
-                ("init", (base_env, list(actions[start:end]), train_cfg, int(scenario_idx)))
+                (
+                    "load_batch",
+                    (
+                        list(actions[start:end]),
+                        int(scenario_idx),
+                    ),
+                )
             )
 
         worker_obs_mats = []
@@ -833,7 +1055,6 @@ class _PersistentShadowProcessPool:
 
         for process in self.processes:
             process.join(timeout=5.0)
-            if process.is_alive():
                 process.terminate()
                 process.join(timeout=2.0)
 
@@ -844,24 +1065,28 @@ class SlowDPPEvaluator:
         env: Env,
         agent: FastPPOAgent,
         train_cfg: FastTrainConfig,
+        process_pool: _PersistentShadowProcessPool,
     ) -> None:
         self.env = env
         self.agent = agent
         self.train_cfg = train_cfg
-        self.cache: Dict[bytes, float] = {}
+        self.process_pool = process_pool
 
+        self.cache: Dict[bytes, float] = {}
         self.candidate_requests = 0
         self.finite_candidates = 0
         self.policy_seconds = 0.0
         self.env_seconds = 0.0
         self.gpu_batch_sizes: list[int] = []
 
-        self.process_pool = _PersistentShadowProcessPool(
-            int(train_cfg.dpp_forecast_workers)
+        self.process_pool.set_round_context(
+            base_env=env,
+            train_cfg=train_cfg,
         )
 
     def close(self) -> None:
-        self.process_pool.close()
+        # Pool 소유권은 trainer에 있으므로 여기서 종료하지 않는다.
+        return
 
     def evaluate(
         self,
@@ -944,6 +1169,7 @@ def select_slow_action_dpp(
     env: Env,
     agent: FastPPOAgent,
     train_cfg: FastTrainConfig,
+    process_pool: _PersistentShadowProcessPool,
 ) -> SlowSelectionResult:
     if int(env.round_slot) != 0:
         raise RuntimeError(
@@ -969,9 +1195,10 @@ def select_slow_action_dpp(
     agent.model.eval()
 
     evaluator = SlowDPPEvaluator(
-        env,
-        agent,
-        train_cfg,
+        env=env,
+        agent=agent,
+        train_cfg=train_cfg,
+        process_pool=process_pool,
     )
 
     try:
@@ -1409,33 +1636,77 @@ def _select_and_apply_slow_action(
     agent: FastPPOAgent,
     train_cfg: FastTrainConfig,
     slow_rng: np.random.Generator,
-) -> Tuple[Dict[str, Any], Dict[str, float]]:
+    process_pool: Optional[
+        _PersistentShadowProcessPool
+    ],
+) -> Tuple[
+    Dict[str, Any],
+    Dict[str, float],
+]:
     if train_cfg.slow_decision_mode == "dpp":
-        selected = select_slow_action_dpp(env, agent, train_cfg)
+        if process_pool is None:
+            raise RuntimeError(
+                "DPP mode requires a forecast process pool."
+            )
+
+        selected = select_slow_action_dpp(
+            env=env,
+            agent=agent,
+            train_cfg=train_cfg,
+            process_pool=process_pool,
+        )
+
         env.apply_slow_action(selected.action)
+
         return env.get_fast_obs(), {
-            "predicted_round_cost": selected.predicted_round_cost,
-            "candidate_requests": float(selected.candidate_requests),
-            "unique_candidates": float(selected.unique_candidates),
-            "finite_candidates": float(selected.finite_candidates),
-            "coordinate_sweeps": float(selected.coordinate_sweeps),
-            "forecast_seconds": selected.forecast_seconds,
-            "forecast_policy_seconds": selected.policy_seconds,
-            "forecast_env_seconds": selected.env_seconds,
-            "forecast_mean_gpu_batch": selected.mean_gpu_batch,
+            "predicted_round_cost":
+                selected.predicted_round_cost,
+            "candidate_requests":
+                float(selected.candidate_requests),
+            "unique_candidates":
+                float(selected.unique_candidates),
+            "finite_candidates":
+                float(selected.finite_candidates),
+            "coordinate_sweeps":
+                float(selected.coordinate_sweeps),
+            "forecast_seconds":
+                selected.forecast_seconds,
+            "forecast_policy_seconds":
+                selected.policy_seconds,
+            "forecast_env_seconds":
+                selected.env_seconds,
+            "forecast_mean_gpu_batch":
+                selected.mean_gpu_batch,
             "num_rsu_links": float(
-                np.sum(selected.action["rsu_scheduling"])
+                np.sum(
+                    selected.action[
+                        "rsu_scheduling"
+                    ]
+                )
             ),
             "num_hired_uav": float(
-                np.sum(selected.action["uav_hiring"])
+                np.sum(
+                    selected.action[
+                        "uav_hiring"
+                    ]
+                )
             ),
             "num_uav_links": float(
-                np.sum(selected.action["uav_scheduling"])
+                np.sum(
+                    selected.action[
+                        "uav_scheduling"
+                    ]
+                )
             ),
         }
 
-    action = sample_random_slow_action(env, slow_rng, train_cfg)
+    action = sample_random_slow_action(
+        env,
+        slow_rng,
+        train_cfg,
+    )
     env.apply_slow_action(action)
+
     return env.get_fast_obs(), {
         "predicted_round_cost": float("nan"),
         "candidate_requests": 0.0,
@@ -1446,9 +1717,15 @@ def _select_and_apply_slow_action(
         "forecast_policy_seconds": 0.0,
         "forecast_env_seconds": 0.0,
         "forecast_mean_gpu_batch": 0.0,
-        "num_rsu_links": float(np.sum(action["rsu_scheduling"])),
-        "num_hired_uav": float(np.sum(action["uav_hiring"])),
-        "num_uav_links": float(np.sum(action["uav_scheduling"])),
+        "num_rsu_links": float(
+            np.sum(action["rsu_scheduling"])
+        ),
+        "num_hired_uav": float(
+            np.sum(action["uav_hiring"])
+        ),
+        "num_uav_links": float(
+            np.sum(action["uav_scheduling"])
+        ),
     }
 
 
@@ -1723,183 +2000,197 @@ def train(train_cfg: FastTrainConfig) -> None:
     global_round = 0
     update_idx = 0
 
-    for episode_idx in range(1, int(train_cfg.num_episodes) + 1):
-        env.cfg.move_prob = get_episode_move_prob(train_cfg, episode_idx)
-        obs, _ = split_env_reset(env.reset())
+    forecast_pool: Optional[
+        _PersistentShadowProcessPool
+    ] = None
 
-        ep = {
-            "reward": 0.0,
-            "delivery": 0.0,
-            "quality": 0.0,
-            "quality_degradation": 0.0,
-            "stall": 0.0,
-            "outage_slots": 0.0,
-            "forecast_seconds": 0.0,
-            "real_seconds": 0.0,
-            "update_seconds": 0.0,
-            "prediction_gap_sum": 0.0,
-            "prediction_gap_count": 0,
-            "min_soc": float("inf"),
-        }
+    if train_cfg.slow_decision_mode == "dpp":
+        forecast_pool = _PersistentShadowProcessPool(
+            int(train_cfg.dpp_forecast_workers)
+        )
 
-        for round_in_episode in range(1, int(train_cfg.rounds_per_episode) + 1):
-            if int(env.round_slot) != 0:
-                raise RuntimeError("Episode loop is not at a round boundary.")
+    try:
+        for episode_idx in range(1, int(train_cfg.num_episodes) + 1):
+            env.cfg.move_prob = get_episode_move_prob(train_cfg, episode_idx)
+            obs, _ = split_env_reset(env.reset())
 
-            obs, slow_info = _select_and_apply_slow_action(
-                env,
-                agent,
-                train_cfg,
-                slow_rng,
-            )
-            policy_version = update_idx
-
-            obs, realized, update_logs = _execute_real_round_train(
-                env,
-                agent,
-                obs,
-                train_cfg,
-            )
-            update_idx += 1
-            global_round += 1
-            global_real_slot += int(env_cfg.slow_T)
-
-            predicted = float(slow_info["predicted_round_cost"])
-            realized_cost = float(realized["realized_round_cost"])
-            gap = (
-                realized_cost - predicted
-                if np.isfinite(predicted)
-                else float("nan")
-            )
-
-            round_row = {
-                "global_round": global_round,
-                "episode": episode_idx,
-                "round_in_episode": round_in_episode,
-                "policy_version": policy_version,
-                "global_real_slot": global_real_slot,
-                **slow_info,
-                **realized,
-                "prediction_gap": gap,
+            ep = {
+                "reward": 0.0,
+                "delivery": 0.0,
+                "quality": 0.0,
+                "quality_degradation": 0.0,
+                "stall": 0.0,
+                "outage_slots": 0.0,
+                "forecast_seconds": 0.0,
+                "real_seconds": 0.0,
+                "update_seconds": 0.0,
+                "prediction_gap_sum": 0.0,
+                "prediction_gap_count": 0,
+                "min_soc": float("inf"),
             }
-            round_logger.write(round_row)
-            update_logger.write(
-                {
-                    "update": update_idx,
+
+            for round_in_episode in range(1, int(train_cfg.rounds_per_episode) + 1):
+                if int(env.round_slot) != 0:
+                    raise RuntimeError("Episode loop is not at a round boundary.")
+
+                obs, slow_info = _select_and_apply_slow_action(
+                    env,
+                    agent,
+                    train_cfg,
+                    slow_rng,
+                    forecast_pool,
+                )
+                policy_version = update_idx
+
+                obs, realized, update_logs = _execute_real_round_train(
+                    env,
+                    agent,
+                    obs,
+                    train_cfg,
+                )
+                update_idx += 1
+                global_round += 1
+                global_real_slot += int(env_cfg.slow_T)
+
+                predicted = float(slow_info["predicted_round_cost"])
+                realized_cost = float(realized["realized_round_cost"])
+                gap = (
+                    realized_cost - predicted
+                    if np.isfinite(predicted)
+                    else float("nan")
+                )
+
+                round_row = {
                     "global_round": global_round,
                     "episode": episode_idx,
+                    "round_in_episode": round_in_episode,
+                    "policy_version": policy_version,
                     "global_real_slot": global_real_slot,
-                    **update_logs,
+                    **slow_info,
+                    **realized,
+                    "prediction_gap": gap,
+                }
+                round_logger.write(round_row)
+                update_logger.write(
+                    {
+                        "update": update_idx,
+                        "global_round": global_round,
+                        "episode": episode_idx,
+                        "global_real_slot": global_real_slot,
+                        **update_logs,
+                    }
+                )
+
+                ep["reward"] += realized["formulation_reward"]
+                ep["delivery"] += realized["delivery"]
+                ep["quality"] += realized["quality"]
+                ep["quality_degradation"] += realized[
+                    "quality_degradation"
+                ]
+                ep["stall"] += realized["stall"]
+                ep["outage_slots"] += realized["outage_slots"]
+                ep["forecast_seconds"] += slow_info["forecast_seconds"]
+                ep["real_seconds"] += realized["real_round_seconds"]
+                ep["update_seconds"] += realized["ppo_update_seconds"]
+                ep["min_soc"] = min(ep["min_soc"], realized["min_soc"])
+                if np.isfinite(gap):
+                    ep["prediction_gap_sum"] += gap
+                    ep["prediction_gap_count"] += 1
+
+                print(
+                    "[ROUND] "
+                    f"ep={episode_idx}/{train_cfg.num_episodes} "
+                    f"r={round_in_episode}/{train_cfg.rounds_per_episode} "
+                    f"policy_v={policy_version} "
+                    f"pred={predicted:.4f} "
+                    f"real={realized_cost:.4f} "
+                    f"gap={gap:.4f} "
+                    f"candidates={int(slow_info['unique_candidates'])} "
+                    f"forecast_s={slow_info['forecast_seconds']:.2f} "
+                    f"real_sps={realized['real_slots_per_second']:.2f} "
+                    f"kl={update_logs['approx_kl']:.6f}",
+                    flush=True,
+                )
+
+            if not np.isfinite(ep["min_soc"]):
+                ep["min_soc"] = 0.0
+            gap_mean = (
+                ep["prediction_gap_sum"] / ep["prediction_gap_count"]
+                if ep["prediction_gap_count"] > 0
+                else float("nan")
+            )
+            episode_logger.write(
+                {
+                    "episode": episode_idx,
+                    "global_round": global_round,
+                    "global_real_slot": global_real_slot,
+                    "move_prob": float(env.cfg.move_prob),
+                    "episode_formulation_reward": ep["reward"],
+                    "episode_delivery": ep["delivery"],
+                    "episode_quality": ep["quality"],
+                    "episode_quality_degradation": ep[
+                        "quality_degradation"
+                    ],
+                    "episode_stall": ep["stall"],
+                    "episode_outage_slots": ep["outage_slots"],
+                    "episode_min_soc": ep["min_soc"],
+                    "episode_forecast_seconds": ep["forecast_seconds"],
+                    "episode_real_seconds": ep["real_seconds"],
+                    "episode_update_seconds": ep["update_seconds"],
+                    "episode_prediction_gap_mean": gap_mean,
                 }
             )
 
-            ep["reward"] += realized["formulation_reward"]
-            ep["delivery"] += realized["delivery"]
-            ep["quality"] += realized["quality"]
-            ep["quality_degradation"] += realized[
-                "quality_degradation"
-            ]
-            ep["stall"] += realized["stall"]
-            ep["outage_slots"] += realized["outage_slots"]
-            ep["forecast_seconds"] += slow_info["forecast_seconds"]
-            ep["real_seconds"] += realized["real_round_seconds"]
-            ep["update_seconds"] += realized["ppo_update_seconds"]
-            ep["min_soc"] = min(ep["min_soc"], realized["min_soc"])
-            if np.isfinite(gap):
-                ep["prediction_gap_sum"] += gap
-                ep["prediction_gap_count"] += 1
-
             print(
-                "[ROUND] "
+                "[EPISODE] "
                 f"ep={episode_idx}/{train_cfg.num_episodes} "
-                f"r={round_in_episode}/{train_cfg.rounds_per_episode} "
-                f"policy_v={policy_version} "
-                f"pred={predicted:.4f} "
-                f"real={realized_cost:.4f} "
-                f"gap={gap:.4f} "
-                f"candidates={int(slow_info['unique_candidates'])} "
-                f"forecast_s={slow_info['forecast_seconds']:.2f} "
-                f"real_sps={realized['real_slots_per_second']:.2f} "
-                f"kl={update_logs['approx_kl']:.6f}",
+                f"reward={ep['reward']:.4f} "
+                f"delivery={ep['delivery']:.1f} "
+                f"stall={ep['stall']:.1f} "
+                f"gap_mean={gap_mean:.4f} "
+                f"outage_slots={ep['outage_slots']:.0f}",
                 flush=True,
             )
 
-        if not np.isfinite(ep["min_soc"]):
-            ep["min_soc"] = 0.0
-        gap_mean = (
-            ep["prediction_gap_sum"] / ep["prediction_gap_count"]
-            if ep["prediction_gap_count"] > 0
-            else float("nan")
-        )
-        episode_logger.write(
-            {
-                "episode": episode_idx,
-                "global_round": global_round,
-                "global_real_slot": global_real_slot,
-                "move_prob": float(env.cfg.move_prob),
-                "episode_formulation_reward": ep["reward"],
-                "episode_delivery": ep["delivery"],
-                "episode_quality": ep["quality"],
-                "episode_quality_degradation": ep[
-                    "quality_degradation"
-                ],
-                "episode_stall": ep["stall"],
-                "episode_outage_slots": ep["outage_slots"],
-                "episode_min_soc": ep["min_soc"],
-                "episode_forecast_seconds": ep["forecast_seconds"],
-                "episode_real_seconds": ep["real_seconds"],
-                "episode_update_seconds": ep["update_seconds"],
-                "episode_prediction_gap_mean": gap_mean,
-            }
-        )
+            if (
+                int(train_cfg.save_every_episodes) > 0
+                and episode_idx % int(train_cfg.save_every_episodes) == 0
+            ):
+                checkpoint_path = (
+                    run_dir
+                    / "checkpoints"
+                    / f"fast_ppo_joint_ep{episode_idx}.pt"
+                )
+                agent.save(
+                    checkpoint_path,
+                    extra={
+                        "episode": episode_idx,
+                        "global_round": global_round,
+                        "global_real_slot": global_real_slot,
+                        "update_idx": update_idx,
+                        "slow_decision_mode": train_cfg.slow_decision_mode,
+                        "env_config": (
+                            env_cfg.as_dict()
+                            if hasattr(env_cfg, "as_dict")
+                            else asdict(env_cfg)
+                        ),
+                        "train_config": train_cfg.to_dict(),
+                        "ppo_config": asdict(ppo_cfg),
+                    },
+                )
+                print(f"[SAVE] {checkpoint_path}", flush=True)
 
-        print(
-            "[EPISODE] "
-            f"ep={episode_idx}/{train_cfg.num_episodes} "
-            f"reward={ep['reward']:.4f} "
-            f"delivery={ep['delivery']:.1f} "
-            f"stall={ep['stall']:.1f} "
-            f"gap_mean={gap_mean:.4f} "
-            f"outage_slots={ep['outage_slots']:.0f}",
-            flush=True,
-        )
-
-        if (
-            int(train_cfg.save_every_episodes) > 0
-            and episode_idx % int(train_cfg.save_every_episodes) == 0
-        ):
-            checkpoint_path = (
-                run_dir
-                / "checkpoints"
-                / f"fast_ppo_joint_ep{episode_idx}.pt"
-            )
-            agent.save(
-                checkpoint_path,
-                extra={
-                    "episode": episode_idx,
-                    "global_round": global_round,
-                    "global_real_slot": global_real_slot,
-                    "update_idx": update_idx,
-                    "slow_decision_mode": train_cfg.slow_decision_mode,
-                    "env_config": (
-                        env_cfg.as_dict()
-                        if hasattr(env_cfg, "as_dict")
-                        else asdict(env_cfg)
-                    ),
-                    "train_config": train_cfg.to_dict(),
-                    "ppo_config": asdict(ppo_cfg),
-                },
-            )
-            print(f"[SAVE] {checkpoint_path}", flush=True)
-
-        if (
-            int(train_cfg.plot_every_episodes) > 0
-            and episode_idx % int(train_cfg.plot_every_episodes) == 0
-        ):
-            save_training_plots(
-                run_dir,
-                smooth_window=int(train_cfg.plot_smooth_window),
-            )
+            if (
+                int(train_cfg.plot_every_episodes) > 0
+                and episode_idx % int(train_cfg.plot_every_episodes) == 0
+            ):
+                save_training_plots(
+                    run_dir,
+                    smooth_window=int(train_cfg.plot_smooth_window),
+                )
+    finally:
+        if forecast_pool is not None:
+            forecast_pool.close()
 
     if len(agent.buffer) != 0:
         raise RuntimeError("Joint training ended with a nonempty PPO buffer.")
