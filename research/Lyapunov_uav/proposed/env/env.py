@@ -1865,23 +1865,34 @@ class Env:
             truncated = bool(next_t >= int(self.cfg.episode_slots))
 
         if info_level == "forecast":
-            reward, compact_fast_components = self._compute_reward(
-                prev_Q=prev_Q,
-                next_Q=self.queue,
-                prev_Z=prev_Z,
-                next_Z=self.Z,
-                prev_E=prev_E,
-                next_E=self.E,
-                prev_Y=prev_B,
-                next_Y=self.Y,
-                delivered_total_per_user=admitted_total_per_user,
-                quality_total_per_user=admitted_quality_total_per_user,
-                uav_hiring=self.uav_hiring,
-                charging_state=self.charging_state,
-                battery_step_info=battery_step_info,
-                compact=True,
+            reward, compact_fast_components = (
+                self._compute_fast_reward(
+                    prev_Q=prev_Q,
+                    next_Q=self.queue,
+                    prev_Z=prev_Z,
+                    next_Z=self.Z,
+                    prev_E=prev_E,
+                    next_E=self.E,
+                    prev_Y=prev_B,
+                    next_Y=self.Y,
+                    delivered_total_per_user=(
+                        admitted_total_per_user
+                    ),
+                    quality_total_per_user=(
+                        admitted_quality_total_per_user
+                    ),
+                    uav_hiring=self.uav_hiring,
+                    charging_state=self.charging_state,
+                    battery_step_info=battery_step_info,
+                    compact=True,
+                )
             )
-            one_slot_dpp_cost = float(compact_fast_components["one_slot_dpp_cost"])
+
+            one_slot_dpp_cost = float(
+                compact_fast_components[
+                    "one_slot_dpp_cost"
+                ]
+            )
         else:
             reward, reward_components = (
                 self._compute_reward(
@@ -1900,15 +1911,9 @@ class Env:
                         admitted_quality_total_per_user
                     ),
                     uav_hiring=self.uav_hiring,
-                    charging_state=(
-                        self.charging_state
-                    ),
-                    battery_step_info=(
-                        battery_step_info
-                    ),
-                    is_round_boundary=(
-                        is_round_boundary
-                    ),
+                    charging_state=self.charging_state,
+                    battery_step_info=battery_step_info,
+                    is_round_boundary=is_round_boundary,
                 )
             )
 

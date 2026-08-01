@@ -2,7 +2,7 @@
   "proposed_root": "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed",
   "obs_dim": 510,
   "action_dim": 1000,
-  "created_at": "2026-08-01 21:05:20",
+  "created_at": "2026-08-01 21:10:40",
   "initialization": "from_scratch",
   "checkpoint": null,
   "algorithm": "round-wise Slow-DPP forecast using the current frozen Fast-PPO policy -> one real Fast round -> one PPO update",
