@@ -6,12 +6,12 @@ import hashlib
 import itertools
 import json
 import math
+import multiprocessing as mp
 import os
 import pickle
 import sys
 import time
 import types
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
@@ -61,12 +61,14 @@ from agent.PPO.common import (
     set_seed,
     split_env_reset,
     split_env_step,
+    flatten_fast_obs
 )
 from agent.PPO.common.utils import ScalarLogger, save_json
 from agent.PPO.fast.fast_agent import (
     FastPPOAgent,
     FastPPOConfig as AgentPPOConfig,
 )
+from agent.PPO.fast.fast_action import FastActionCodec
 
 
 # ======================================================================
@@ -592,17 +594,251 @@ def _make_shadow_env(
     shadow.apply_slow_action(action)
     return shadow
 
+def _forecast_worker_loop(connection) -> None:
+    """
+    Slow-DPP shadow environment 담당 persistent Worker Process.
+    Pipe IPC 통신 시 Dict 객체를 전송하지 않고 순수 Float32 NumPy 배열만 송수신하여
+    Pickle 직렬화 병목을 완벽히 제거합니다.
+    """
+    shadows: list[Env] = []
+    codec: Optional[FastActionCodec] = None
+    train_cfg: Optional[FastTrainConfig] = None
 
-def _step_shadow(
-    item: Tuple[Env, Dict[str, Any]],
-) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
-    env, action = item
-    return split_env_step(env.step(action))
+    try:
+        while True:
+            command, payload = connection.recv()
+
+            if command == "close":
+                break
+
+            if command == "init":
+                base_env, actions, cfg, scenario_idx = payload
+                train_cfg = cfg
+                codec = FastActionCodec(base_env.cfg)
+
+                shadows = [
+                    _make_shadow_env(
+                        base_env,
+                        action,
+                        train_cfg,
+                        int(scenario_idx),
+                    )
+                    for action in actions
+                ]
+
+                # Dict 관측값을 Worker 내부에서 즉시 Float32 Matrix로 변환
+                obs_list = []
+                mask_list = []
+                for shadow in shadows:
+                    dict_obs = shadow.get_fast_obs()
+                    obs_list.append(flatten_fast_obs(dict_obs).astype(np.float32))
+                    mask_list.append(codec.build_base_action_mask(dict_obs).astype(np.float32))
+
+                obs_matrix = np.stack(obs_list, axis=0)
+                mask_matrix = np.stack(mask_list, axis=0)
+
+                connection.send(("ready", obs_matrix, mask_matrix))
+                continue
+
+            if command != "step":
+                raise RuntimeError(f"Unknown forecast-worker command: {command}")
+
+            if train_cfg is None or codec is None or not shadows:
+                raise RuntimeError("Forecast worker received step before init.")
+
+            raw_actions_chunk, slot_idx = payload  # (K, action_dim) float32 matrix
+
+            count = len(shadows)
+            next_obs_list = []
+            next_mask_list = []
+            slot_costs = np.zeros(count, dtype=np.float64)
+            invalid = np.zeros(count, dtype=bool)
+
+            # 각 shadow Env에 대해 디코딩 및 step 실행
+            for idx, shadow in enumerate(shadows):
+                dict_obs = shadow.get_fast_obs()
+                env_action = codec.decode(raw_actions_chunk[idx], dict_obs)
+
+                next_obs, reward, terminated, truncated, info = split_env_step(
+                    shadow.step(env_action)
+                )
+
+                expected_boundary = int(slot_idx) == int(train_cfg.dpp_forecast_horizon) - 1
+                actual_boundary = bool(info.get("is_round_boundary", False))
+                if actual_boundary != expected_boundary:
+                    raise RuntimeError(f"Forecast boundary mismatch: slot={slot_idx}")
+
+                if terminated or truncated:
+                    invalid[idx] = True
+
+                _, slot_cost = formulation_reward_from_env_step(
+                    env_reward=reward,
+                    info=info,
+                    env_cfg=shadow.cfg,
+                )
+                slot_costs[idx] = float(slot_cost)
+
+                if bool(train_cfg.dpp_reject_forecast_outage) and np.any(
+                    np.asarray(info.get("outage", []), dtype=np.int32) > 0
+                ):
+                    invalid[idx] = True
+
+                # 다음 스텝용 관측값/마스크를 Worker 내에서 즉시 Vectorize
+                next_dict_obs = shadow.get_fast_obs()
+                next_obs_list.append(flatten_fast_obs(next_dict_obs).astype(np.float32))
+                next_mask_list.append(codec.build_base_action_mask(next_dict_obs).astype(np.float32))
+
+            next_obs_matrix = np.stack(next_obs_list, axis=0)
+            next_mask_matrix = np.stack(next_mask_list, axis=0)
+
+            # 순수 NumPy 배열만 전송 (Zero-Pickle Dict)
+            connection.send(("step_result", next_obs_matrix, next_mask_matrix, slot_costs, invalid))
+
+    except BaseException as exc:
+        try:
+            connection.send(("error", type(exc).__name__, str(exc)))
+        except BaseException:
+            pass
+        raise
+    finally:
+        connection.close()
+
+class _PersistentShadowProcessPool:
+    def __init__(self, worker_count: int) -> None:
+        self.worker_count = max(1, int(worker_count))
+        self.context = mp.get_context("spawn")
+        self.parents = []
+        self.processes = []
+
+        for worker_idx in range(self.worker_count):
+            parent_conn, child_conn = self.context.Pipe(duplex=True)
+            process = self.context.Process(
+                target=_forecast_worker_loop,
+                args=(child_conn,),
+                name=f"dpp-shadow-{worker_idx}",
+                daemon=True,
+            )
+            process.start()
+            child_conn.close()
+            self.parents.append(parent_conn)
+            self.processes.append(process)
+
+    @staticmethod
+    def _partition_sizes(count: int, workers: int) -> list[int]:
+        base, remainder = divmod(int(count), int(workers))
+        return [base + (1 if idx < remainder else 0) for idx in range(int(workers))]
+
+    @staticmethod
+    def _check_message(message, expected: str):
+        if not isinstance(message, tuple) or not message:
+            raise RuntimeError(f"Malformed worker message: {message!r}")
+        if message[0] == "error":
+            raise RuntimeError(f"Forecast worker failed: {message[1]}: {message[2]}")
+        if message[0] != expected:
+            raise RuntimeError(f"Unexpected worker message: expected={expected}, got={message[0]}")
+        return message
+
+    def rollout(
+        self,
+        *,
+        base_env: Env,
+        actions: Sequence[Dict[str, np.ndarray]],
+        scenario_idx: int,
+        train_cfg: FastTrainConfig,
+        agent: FastPPOAgent,
+    ) -> Tuple[np.ndarray, float, float, list[int]]:
+        count = len(actions)
+        if count <= 0:
+            return np.zeros(0, dtype=np.float64), 0.0, 0.0, []
+
+        active_workers = min(self.worker_count, count)
+        sizes = self._partition_sizes(count, active_workers)
+        offsets = [0]
+        for size in sizes:
+            offsets.append(offsets[-1] + size)
+
+        # 1. Worker 초기화 및 첫 관측값/마스크 Matrix 수신
+        for worker_idx in range(active_workers):
+            start, end = offsets[worker_idx], offsets[worker_idx + 1]
+            self.parents[worker_idx].send(
+                ("init", (base_env, list(actions[start:end]), train_cfg, int(scenario_idx)))
+            )
+
+        worker_obs_mats = []
+        worker_mask_mats = []
+        for worker_idx in range(active_workers):
+            msg = self._check_message(self.parents[worker_idx].recv(), "ready")
+            worker_obs_mats.append(msg[1])   # (K_w, obs_dim)
+            worker_mask_mats.append(msg[2])  # (K_w, action_dim)
+
+        obs_matrix = np.vstack(worker_obs_mats)
+        mask_matrix = np.vstack(worker_mask_mats)
+
+        accumulated = np.zeros(count, dtype=np.float64)
+        invalid = np.zeros(count, dtype=bool)
+
+        policy_seconds = 0.0
+        env_seconds = 0.0
+        gpu_batch_sizes: list[int] = []
+
+        # 2. 3,600 Slot Zero-Dict High-Speed Loop
+        for slot_idx in range(int(train_cfg.dpp_forecast_horizon)):
+            # [GPU] Float32 Matrix 다이렉트 배치 추론 (Dict 변환 0회)
+            policy_start = time.perf_counter()
+            raw_actions_matrix = agent.select_env_actions_from_matrices_batch(
+                obs_matrix=obs_matrix,
+                mask_matrix=mask_matrix,
+                deterministic=bool(train_cfg.dpp_deterministic_fast_forecast),
+            )
+            policy_seconds += time.perf_counter() - policy_start
+            gpu_batch_sizes.append(count)
+
+            # [CPU] Worker 분할 전송 (Float32 Array만 전달)
+            env_start = time.perf_counter()
+            for worker_idx in range(active_workers):
+                start, end = offsets[worker_idx], offsets[worker_idx + 1]
+                self.parents[worker_idx].send(
+                    ("step", (raw_actions_matrix[start:end], int(slot_idx)))
+                )
+
+            next_obs_mats = []
+            next_mask_mats = []
+
+            for worker_idx in range(active_workers):
+                start, end = offsets[worker_idx], offsets[worker_idx + 1]
+                msg = self._check_message(self.parents[worker_idx].recv(), "step_result")
+
+                next_obs_mats.append(msg[1])
+                next_mask_mats.append(msg[2])
+                accumulated[start:end] += msg[3]
+                invalid[start:end] |= msg[4]
+
+            obs_matrix = np.vstack(next_obs_mats)
+            mask_matrix = np.vstack(next_mask_mats)
+            env_seconds += time.perf_counter() - env_start
+
+        accumulated[invalid] = np.inf
+        return accumulated, float(policy_seconds), float(env_seconds), gpu_batch_sizes
+
+    def close(self) -> None:
+        for parent in self.parents:
+            try:
+                parent.send(("close", None))
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            try:
+                parent.close()
+            except OSError:
+                pass
+
+        for process in self.processes:
+            process.join(timeout=5.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2.0)
 
 
 class SlowDPPEvaluator:
-    """Current frozen Fast policy로 complete slow actions의 round DPP 평가."""
-
     def __init__(
         self,
         env: Env,
@@ -613,11 +849,19 @@ class SlowDPPEvaluator:
         self.agent = agent
         self.train_cfg = train_cfg
         self.cache: Dict[bytes, float] = {}
+
         self.candidate_requests = 0
         self.finite_candidates = 0
         self.policy_seconds = 0.0
         self.env_seconds = 0.0
         self.gpu_batch_sizes: list[int] = []
+
+        self.process_pool = _PersistentShadowProcessPool(
+            int(train_cfg.dpp_forecast_workers)
+        )
+
+    def close(self) -> None:
+        self.process_pool.close()
 
     def evaluate(
         self,
@@ -638,21 +882,26 @@ class SlowDPPEvaluator:
                 missing_actions.append(action)
 
         batch_limit = int(self.train_cfg.dpp_candidate_batch_size)
+
         for start in range(0, len(missing_actions), batch_limit):
             batch_actions = missing_actions[start : start + batch_limit]
             batch_scores = self._evaluate_uncached_batch(batch_actions)
+
             for local_idx, score in enumerate(batch_scores):
                 global_missing_idx = start + local_idx
                 original_idx = missing_indices[global_missing_idx]
+
                 scores[original_idx] = float(score)
                 key = _candidate_key(batch_actions[local_idx])
                 self.cache[key] = float(score)
+
                 if np.isfinite(score):
                     self.finite_candidates += 1
 
         if any(score is None for score in scores):
             raise RuntimeError("Internal DPP score assignment failure.")
-        return [float(score) for score in scores]  # type: ignore[arg-type]
+
+        return [float(score) for score in scores]
 
     def _evaluate_uncached_batch(
         self,
@@ -664,104 +913,32 @@ class SlowDPPEvaluator:
             dtype=np.float64,
         )
 
-        workers = int(self.train_cfg.dpp_forecast_workers)
-        executor: Optional[ThreadPoolExecutor]
-        executor = (
-            ThreadPoolExecutor(max_workers=workers)
-            if workers > 1 and count > 1
-            else None
-        )
+        for scenario_idx in range(int(self.train_cfg.dpp_forecast_scenarios)):
+            (
+                accumulated,
+                policy_seconds,
+                env_seconds,
+                batch_sizes,
+            ) = self.process_pool.rollout(
+                base_env=self.env,
+                actions=actions,
+                scenario_idx=scenario_idx,
+                train_cfg=self.train_cfg,
+                agent=self.agent,
+            )
 
-        try:
-            for scenario_idx in range(
-                int(self.train_cfg.dpp_forecast_scenarios)
-            ):
-                shadows = [
-                    _make_shadow_env(
-                        self.env,
-                        action,
-                        self.train_cfg,
-                        scenario_idx,
-                    )
-                    for action in actions
-                ]
-                observations = [shadow.get_fast_obs() for shadow in shadows]
-                invalid = np.zeros(count, dtype=bool)
-                accumulated = np.zeros(count, dtype=np.float64)
-
-                for slot_idx in range(
-                    int(self.train_cfg.dpp_forecast_horizon)
-                ):
-                    policy_start = time.perf_counter()
-                    selected = self.agent.select_env_actions_batch(
-                        observations,
-                        deterministic=bool(
-                            self.train_cfg.dpp_deterministic_fast_forecast
-                        ),
-                        update_norm=False,
-                    )
-                    if self.agent.device.type == "cuda":
-                        torch.cuda.synchronize(self.agent.device)
-                    self.policy_seconds += time.perf_counter() - policy_start
-                    self.gpu_batch_sizes.append(count)
-
-                    step_items = list(zip(shadows, selected["env_actions"]))
-                    env_start = time.perf_counter()
-                    if executor is None:
-                        results = [_step_shadow(item) for item in step_items]
-                    else:
-                        results = list(executor.map(_step_shadow, step_items))
-                    self.env_seconds += time.perf_counter() - env_start
-
-                    next_observations: list[Dict[str, Any]] = []
-                    for idx, result in enumerate(results):
-                        next_obs, reward, terminated, truncated, info = result
-                        expected_boundary = (
-                            slot_idx
-                            == int(self.train_cfg.dpp_forecast_horizon) - 1
-                        )
-                        actual_boundary = bool(
-                            info.get("is_round_boundary", False)
-                        )
-                        if actual_boundary != expected_boundary:
-                            raise RuntimeError(
-                                "Forecast round boundary mismatch: "
-                                f"slot={slot_idx}, actual={actual_boundary}."
-                            )
-                        if terminated or truncated:
-                            invalid[idx] = True
-
-                        _, slot_cost = formulation_reward_from_env_step(
-                            env_reward=reward,
-                            info=info,
-                            env_cfg=self.env.cfg,
-                        )
-                        accumulated[idx] += slot_cost
-
-                        if bool(
-                            self.train_cfg.dpp_reject_forecast_outage
-                        ) and np.any(
-                            np.asarray(
-                                info.get("outage", []), dtype=np.int32
-                            )
-                            > 0
-                        ):
-                            invalid[idx] = True
-                        next_observations.append(next_obs)
-                    observations = next_observations
-
-                accumulated[invalid] = np.inf
-                scenario_costs[scenario_idx] = accumulated
-        finally:
-            if executor is not None:
-                executor.shutdown(wait=True)
+            scenario_costs[scenario_idx] = accumulated
+            self.policy_seconds += policy_seconds
+            self.env_seconds += env_seconds
+            self.gpu_batch_sizes.extend(batch_sizes)
 
         mean_fast_cost = np.mean(scenario_costs, axis=0)
+
         for idx, action in enumerate(actions):
             if np.isfinite(mean_fast_cost[idx]):
                 mean_fast_cost[idx] += _hiring_cost(self.env, action)
-        return mean_fast_cost
 
+        return mean_fast_cost
 
 def select_slow_action_dpp(
     env: Env,
@@ -770,96 +947,332 @@ def select_slow_action_dpp(
 ) -> SlowSelectionResult:
     if int(env.round_slot) != 0:
         raise RuntimeError(
-            f"Slow-DPP must run at round boundary, got {env.round_slot}."
+            "Slow-DPP must run at round boundary, "
+            f"got {env.round_slot}."
         )
 
     env_digest_before = _env_state_digest(env)
-    model_digest_before = _model_parameter_digest(agent)
+    model_digest_before = (
+        _model_parameter_digest(agent)
+    )
+
     normalizer_state_before = (
-        copy.deepcopy(agent.obs_normalizer.state_dict())
+        copy.deepcopy(
+            agent.obs_normalizer.state_dict()
+        )
         if agent.obs_normalizer is not None
         else None
     )
 
     wall_start = time.perf_counter()
+
     agent.model.eval()
-    evaluator = SlowDPPEvaluator(env, agent, train_cfg)
 
-    current_action = _zero_slow_action(env)
-    current_score = evaluator.evaluate([current_action])[0]
-    if not np.isfinite(current_score):
-        raise RuntimeError("All-zero initial slow action produced nonfinite cost.")
+    evaluator = SlowDPPEvaluator(
+        env,
+        agent,
+        train_cfg,
+    )
 
-    completed_sweeps = 0
-    for sweep_idx in range(int(train_cfg.dpp_coordinate_sweeps)):
-        sweep_improved = False
-        for region_idx in range(int(env.num_rsu)):
-            local_candidates = _region_candidates(
-                env,
-                region_idx,
-                train_cfg,
-            )
-            trial_actions = [
-                _replace_region_candidate(
-                    current_action,
-                    region_idx,
-                    local,
-                )
-                for local in local_candidates
-            ]
-            trial_scores = np.asarray(
-                evaluator.evaluate(trial_actions), dtype=np.float64
-            )
-            finite = np.flatnonzero(np.isfinite(trial_scores))
-            if finite.size == 0:
-                continue
+    try:
+        current_action = _zero_slow_action(env)
+        current_score = float("inf")
 
-            best_idx = int(finite[np.argmin(trial_scores[finite])])
-            best_score = float(trial_scores[best_idx])
-            if (
-                best_score
-                < current_score
-                - float(train_cfg.dpp_improvement_tolerance)
+        completed_sweeps = 0
+
+        for sweep_idx in range(
+            int(train_cfg.dpp_coordinate_sweeps)
+        ):
+            # 현재 complete action과 모든 one-region complete-action
+            # neighbor를 한 번의 evaluator 호출로 묶는다.
+            #
+            # 기존 코드:
+            #   region별 evaluator.evaluate()를 순차 호출
+            #
+            # 개선 코드:
+            #   한 sweep의 모든 region 후보를 모아 evaluator.evaluate()
+            #   한 번으로 처리
+            trial_actions: list[
+                Dict[str, np.ndarray]
+            ] = [current_action]
+
+            region_blocks: list[
+                Tuple[
+                    int,
+                    int,
+                    int,
+                    list[RegionSlowCandidate],
+                ]
+            ] = []
+
+            for region_idx in range(
+                int(env.num_rsu)
             ):
-                current_action = trial_actions[best_idx]
-                current_score = best_score
-                sweep_improved = True
+                local_candidates = (
+                    _region_candidates(
+                        env,
+                        region_idx,
+                        train_cfg,
+                    )
+                )
 
-        completed_sweeps = sweep_idx + 1
-        if not sweep_improved:
-            break
+                block_start = len(trial_actions)
 
-    _validate_candidate(env, current_action, train_cfg)
-    wall_seconds = time.perf_counter() - wall_start
+                trial_actions.extend(
+                    _replace_region_candidate(
+                        current_action,
+                        region_idx,
+                        local,
+                    )
+                    for local in local_candidates
+                )
 
-    if _env_state_digest(env) != env_digest_before:
-        raise RuntimeError("Slow forecast mutated the real environment.")
-    if _model_parameter_digest(agent) != model_digest_before:
-        raise RuntimeError("Slow forecast mutated Fast policy parameters.")
+                block_end = len(trial_actions)
+
+                region_blocks.append(
+                    (
+                        region_idx,
+                        block_start,
+                        block_end,
+                        local_candidates,
+                    )
+                )
+
+            trial_scores = np.asarray(
+                evaluator.evaluate(
+                    trial_actions
+                ),
+                dtype=np.float64,
+            )
+
+            current_score = float(
+                trial_scores[0]
+            )
+
+            if not np.isfinite(current_score):
+                raise RuntimeError(
+                    "Current complete slow action "
+                    "produced nonfinite cost."
+                )
+
+            # 같은 current action을 기준으로 각 region의 최선 candidate를
+            # 구한다. 이 단계는 parallel/Jacobi proposal이다.
+            combined_action = {
+                key: np.asarray(value).copy()
+                for key, value
+                in current_action.items()
+            }
+
+            proposed_any = False
+
+            # combined action이 cross-region interaction 때문에 악화될
+            # 경우를 대비하여, 이미 full-round 평가된 one-region 후보 중
+            # 전체 최선 후보도 저장한다.
+            best_single_action = current_action
+            best_single_score = current_score
+
+            for (
+                region_idx,
+                block_start,
+                block_end,
+                local_candidates,
+            ) in region_blocks:
+                block_scores = trial_scores[
+                    block_start:block_end
+                ]
+
+                finite = np.flatnonzero(
+                    np.isfinite(block_scores)
+                )
+
+                if finite.size == 0:
+                    continue
+
+                local_idx = int(
+                    finite[
+                        np.argmin(
+                            block_scores[finite]
+                        )
+                    ]
+                )
+
+                score = float(
+                    block_scores[local_idx]
+                )
+
+                action_idx = (
+                    block_start + local_idx
+                )
+
+                if score < best_single_score:
+                    best_single_score = score
+                    best_single_action = (
+                        trial_actions[action_idx]
+                    )
+
+                if (
+                    score
+                    < current_score
+                    - float(
+                        train_cfg
+                        .dpp_improvement_tolerance
+                    )
+                ):
+                    combined_action = (
+                        _replace_region_candidate(
+                            combined_action,
+                            region_idx,
+                            local_candidates[
+                                local_idx
+                            ],
+                        )
+                    )
+                    proposed_any = True
+
+            if not proposed_any:
+                completed_sweeps = (
+                    sweep_idx + 1
+                )
+                break
+
+            # 여러 region의 변경을 합친 complete action은 반드시 다시
+            # full 3600-slot DPP 평가를 수행한다.
+            combined_score = float(
+                evaluator.evaluate(
+                    [combined_action]
+                )[0]
+            )
+
+            if (
+                np.isfinite(combined_score)
+                and combined_score
+                < current_score
+                - float(
+                    train_cfg
+                    .dpp_improvement_tolerance
+                )
+            ):
+                current_action = combined_action
+                current_score = combined_score
+
+            elif (
+                np.isfinite(best_single_score)
+                and best_single_score
+                < current_score
+                - float(
+                    train_cfg
+                    .dpp_improvement_tolerance
+                )
+            ):
+                # combined action은 악화됐지만 one-region neighbor가
+                # 개선된 경우, 이미 exact full-round 평가된 최선의
+                # one-region action을 채택한다.
+                current_action = (
+                    best_single_action
+                )
+                current_score = (
+                    best_single_score
+                )
+
+            else:
+                completed_sweeps = (
+                    sweep_idx + 1
+                )
+                break
+
+            completed_sweeps = (
+                sweep_idx + 1
+            )
+
+    finally:
+        evaluator.close()
+
+    _validate_candidate(
+        env,
+        current_action,
+        train_cfg,
+    )
+
+    wall_seconds = (
+        time.perf_counter() - wall_start
+    )
+
+    if (
+        _env_state_digest(env)
+        != env_digest_before
+    ):
+        raise RuntimeError(
+            "Slow forecast mutated "
+            "the real environment."
+        )
+
+    if (
+        _model_parameter_digest(agent)
+        != model_digest_before
+    ):
+        raise RuntimeError(
+            "Slow forecast mutated "
+            "Fast policy parameters."
+        )
+
     if agent.obs_normalizer is not None:
-        after = agent.obs_normalizer.state_dict()
-        if pickle.dumps(after) != pickle.dumps(normalizer_state_before):
-            raise RuntimeError("Slow forecast mutated observation normalizer.")
+        after = (
+            agent.obs_normalizer.state_dict()
+        )
+
+        if (
+            pickle.dumps(after)
+            != pickle.dumps(
+                normalizer_state_before
+            )
+        ):
+            raise RuntimeError(
+                "Slow forecast mutated "
+                "observation normalizer."
+            )
 
     mean_batch = (
-        float(np.mean(evaluator.gpu_batch_sizes))
+        float(
+            np.mean(
+                evaluator.gpu_batch_sizes
+            )
+        )
         if evaluator.gpu_batch_sizes
         else 0.0
     )
+
     return SlowSelectionResult(
         action=current_action,
-        predicted_round_cost=float(current_score),
-        solver_mode="region_coordinate_complete_action",
-        coordinate_sweeps=int(completed_sweeps),
-        candidate_requests=int(evaluator.candidate_requests),
-        unique_candidates=int(len(evaluator.cache)),
-        finite_candidates=int(evaluator.finite_candidates),
-        forecast_seconds=float(wall_seconds),
-        policy_seconds=float(evaluator.policy_seconds),
-        env_seconds=float(evaluator.env_seconds),
+        predicted_round_cost=float(
+            current_score
+        ),
+        solver_mode=(
+            "parallel_jacobi_complete_action_"
+            "exact_acceptance"
+        ),
+        coordinate_sweeps=int(
+            completed_sweeps
+        ),
+        candidate_requests=int(
+            evaluator.candidate_requests
+        ),
+        unique_candidates=int(
+            len(evaluator.cache)
+        ),
+        finite_candidates=int(
+            evaluator.finite_candidates
+        ),
+        forecast_seconds=float(
+            wall_seconds
+        ),
+        policy_seconds=float(
+            evaluator.policy_seconds
+        ),
+        env_seconds=float(
+            evaluator.env_seconds
+        ),
         mean_gpu_batch=mean_batch,
     )
-
 
 # ======================================================================
 # Metrics / plots

@@ -697,3 +697,45 @@ class FastPPOAgent:
             "num_transferred_tensors": len(compatible),
             "source_extra": extra,
         }
+
+    # agent/PPO/fast/fast_agent.py 의 FastPPOAgent 클래스 내부에 추가
+
+    @torch.inference_mode()
+    def select_env_actions_from_matrices_batch(
+        self,
+        obs_matrix: np.ndarray,      # (N, obs_dim) float32
+        mask_matrix: np.ndarray,     # (N, action_dim) float32
+        *,
+        deterministic: bool = True,
+    ) -> np.ndarray:                 # (N, action_dim) float32
+        """
+        Forecast 전용 Zero-Dict GPU 배치 추론.
+        Dict 변환 오버헤드 없이 Float32 NumPy Matrix를 즉시 GPU로 전달합니다.
+        """
+        if obs_matrix.shape[0] == 0:
+            return np.zeros((0, self.action_dim), dtype=np.float32)
+
+        self._check_finite_array("obs_matrix", obs_matrix)
+        self._check_finite_array("mask_matrix", mask_matrix)
+
+        # 1. Normalization (PyTorch Tensor 단위 고속 처리)
+        obs_tensor = to_tensor(obs_matrix, device=self.device)
+        mask_tensor = to_tensor(mask_matrix, device=self.device)
+
+        if self.obs_normalizer is not None:
+            mean = torch.as_tensor(self.obs_normalizer.rms.mean, device=self.device, dtype=torch.float32)
+            std = torch.as_tensor(self.obs_normalizer.rms.std, device=self.device, dtype=torch.float32)
+            eps = float(self.obs_normalizer.eps)
+            clip_val = float(self.obs_normalizer.clip)
+            obs_tensor = torch.clamp((obs_tensor - mean) / (std + eps), -clip_val, clip_val)
+
+        # 2. Actor Policy Forward
+        action_tensor, _ = self.model.policy_action(
+            obs=obs_tensor,
+            deterministic=bool(deterministic),
+            action_mask=mask_tensor,
+        )
+
+        raw_actions = action_tensor.detach().cpu().numpy().astype(np.float32)
+        self._check_finite_array("batch_policy_actions", raw_actions)
+        return raw_actions

@@ -257,8 +257,20 @@ if cfg.slow_decision_mode != "dpp":
         "slow_decision_mode must be 'dpp' for the final joint run, "
         f"got {cfg.slow_decision_mode!r}"
     )
-if cfg.checkpoint is None:
-    raise SystemExit("A pretrained Fast-PPO checkpoint is required.")
+checkpoint = None
+checkpoint_strict_load = False
+initialization = "from_scratch"
+
+if cfg.checkpoint is not None:
+    checkpoint = fast_train._resolve_checkpoint(cfg.checkpoint)
+
+    if checkpoint is None or not checkpoint.is_file():
+        raise SystemExit(
+            f"Checkpoint does not exist: {checkpoint}"
+        )
+
+    checkpoint_strict_load = True
+    initialization = "checkpoint"
 if workers < 1:
     raise SystemExit("dpp_forecast_workers must be at least 1.")
 if workers > max(1, allocated_cpus - 2):
@@ -274,9 +286,7 @@ if int(cfg.dpp_candidate_batch_size) < workers:
         f"workers={workers}"
     )
 
-checkpoint = fast_train._resolve_checkpoint(cfg.checkpoint)
-if checkpoint is None or not checkpoint.is_file():
-    raise SystemExit(f"Checkpoint does not exist: {checkpoint}")
+
 
 # Verify that the patched fast_train.py, not the obsolete joint/ entrypoint,
 # contains the finalized Slow-DPP selector.
@@ -310,8 +320,11 @@ resolved = {
     "mode": cfg.mode,
     "slow_decision_mode": cfg.slow_decision_mode,
     "run_name": cfg.run_name,
-    "checkpoint": str(checkpoint),
-    "checkpoint_strict_load": True,
+    "initialization": initialization,
+    "checkpoint": (
+        None if checkpoint is None else str(checkpoint)
+    ),
+    "checkpoint_strict_load": checkpoint_strict_load,
     "device": str(probe_agent.device),
     "gpu_name": torch.cuda.get_device_name(0),
     "parameter_count": int(parameter_count),

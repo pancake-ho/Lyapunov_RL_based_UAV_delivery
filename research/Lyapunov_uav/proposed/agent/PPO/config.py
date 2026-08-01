@@ -31,25 +31,22 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 상대경로면 proposed/ 아래에 생성된다.
     output_root: str = "joint"
-    run_name: Optional[str] = "joint_dpp_fastppo_full_seed2026"
+    run_name: Optional[str] = "joint_dpp_fastppo_scratch_seed2026"
 
     # None이면 fast_train.py에서 자동 이름 생성
-    checkpoint: Optional[str] = (
-        "fast/fast_mixed_seed2026_continuous_mobility_slot1s_noklstop/"
-        "checkpoints/fast_ppo_final.pt"
-    )
+    checkpoint: Optional[str] = None
 
     # resume=True이면 model/optimizer/normalizer를 모두 복원한다.
     # dpp warm start에서는 보통 False로 두고 model/normalizer만 가져온다.
     resume: bool = False
     legacy_transfer: bool = False
     load_optimizer_on_warm_start: bool = False
-    require_pretrained_fast_for_dpp: bool = True
+    require_pretrained_fast_for_dpp: bool = False
 
     # ------------------------------------------------------------------
     # 3) episode / rollout
     # ------------------------------------------------------------------
-    num_episodes: int = 100
+    num_episodes: int = 200
     eval_episodes: int = 5
 
     rounds_per_episode: int = 10
