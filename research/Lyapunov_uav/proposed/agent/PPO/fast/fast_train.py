@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import ctypes
 import hashlib
 import itertools
 import json
@@ -170,17 +171,43 @@ def save_configs(
         run_dir / "env_config.json",
     )
     save_json(asdict(ppo_cfg), run_dir / "ppo_config.json")
+    initialization = (
+        "checkpoint_initialized"
+        if train_cfg.checkpoint is not None
+        else "from_scratch"
+    )
+
     save_json(
         {
-            "proposed_root": str(PROPOSED_ROOT),
+            "proposed_root": str(
+                PROPOSED_ROOT
+            ),
             "obs_dim": int(obs_dim),
             "action_dim": int(action_dim),
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "algorithm": (
-                "pretrained Fast-PPO -> frozen round-wise Slow-DPP forecast "
-                "-> real Fast round -> one PPO update"
+            "created_at": time.strftime(
+                "%Y-%m-%d %H:%M:%S"
             ),
-            "slow_solver": "complete-action region-coordinate minimization",
+            "initialization": initialization,
+            "checkpoint": (
+                None
+                if train_cfg.checkpoint is None
+                else str(
+                    _resolve_checkpoint(
+                        train_cfg.checkpoint
+                    )
+                )
+            ),
+            "algorithm": (
+                "round-wise Slow-DPP forecast "
+                "using the current frozen Fast-PPO "
+                "policy -> one real Fast round -> "
+                "one PPO update"
+            ),
+            "slow_solver": (
+                "parallel Jacobi complete-action "
+                "region-coordinate minimization "
+                "with exact full-round acceptance"
+            ),
             "global_optimum_guaranteed": False,
         },
         run_dir / "run_info.json",
@@ -623,13 +650,55 @@ def _make_shadow_env(
     shadow.apply_slow_action(action)
     return shadow
 
-def _forecast_worker_loop(connection) -> None:
-    """
-    Slow-DPP shadow environment worker.
 
-    Worker가 각 candidate의 현재 Dict observation을 내부에 유지한다.
-    Env.step()이 반환한 next_obs를 다음 action decode에 그대로 재사용한다.
+def _forecast_worker_loop(
+    connection,
+    worker_idx: int,
+    obs_raw,
+    mask_raw,
+    action_raw,
+    cost_raw,
+    invalid_raw,
+    batch_capacity: int,
+    obs_dim: int,
+    action_dim: int,
+) -> None:
     """
+    Shared-memory 기반 Slow-DPP shadow worker.
+
+    대형 observation/mask/action/cost 배열은 Pipe로 전송하지 않는다.
+    Pipe는 command와 completion signal에만 사용한다.
+    """
+    obs_matrix = np.frombuffer(
+        obs_raw,
+        dtype=np.float32,
+        count=int(batch_capacity) * int(obs_dim),
+    ).reshape(int(batch_capacity), int(obs_dim))
+
+    mask_matrix = np.frombuffer(
+        mask_raw,
+        dtype=np.uint8,
+        count=int(batch_capacity) * int(action_dim),
+    ).reshape(int(batch_capacity), int(action_dim))
+
+    action_matrix = np.frombuffer(
+        action_raw,
+        dtype=np.float32,
+        count=int(batch_capacity) * int(action_dim),
+    ).reshape(int(batch_capacity), int(action_dim))
+
+    cost_vector = np.frombuffer(
+        cost_raw,
+        dtype=np.float64,
+        count=int(batch_capacity),
+    )
+
+    invalid_vector = np.frombuffer(
+        invalid_raw,
+        dtype=np.uint8,
+        count=int(batch_capacity),
+    )
+
     base_env: Optional[Env] = None
     train_cfg: Optional[FastTrainConfig] = None
     codec: Optional[FastActionCodec] = None
@@ -637,145 +706,199 @@ def _forecast_worker_loop(connection) -> None:
     shadows: list[Env] = []
     current_observations: list[Dict[str, Any]] = []
 
+    loaded_start = 0
+    loaded_end = 0
+
     try:
         while True:
-            command, payload = connection.recv()
+            message = connection.recv()
+            if not isinstance(message, tuple) or len(message) == 0:
+                raise RuntimeError(
+                    f"Malformed worker command: {message!r}"
+                )
+
+            command = str(message[0])
+            payload = message[1] if len(message) > 1 else None
 
             if command == "close":
-                connection.send(("closed", None))
+                connection.send(
+                    ("closed", int(worker_idx))
+                )
                 break
 
             if command == "set_round_context":
                 base_env, train_cfg = payload
                 codec = FastActionCodec(base_env.cfg)
 
+                if int(codec.action_dim) != int(action_dim):
+                    raise RuntimeError(
+                        "Worker action_dim mismatch: "
+                        f"codec={codec.action_dim}, "
+                        f"shared={action_dim}"
+                    )
+
                 shadows = []
                 current_observations = []
+                loaded_start = 0
+                loaded_end = 0
 
-                connection.send(("context_ready", None))
+                connection.send(
+                    ("context_ready", int(worker_idx))
+                )
                 continue
 
             if command == "load_batch":
-                if base_env is None:
+                if (
+                    base_env is None
+                    or train_cfg is None
+                    or codec is None
+                ):
                     raise RuntimeError(
-                        "Worker received load_batch before "
+                        "load_batch received before "
                         "set_round_context."
                     )
-                if train_cfg is None or codec is None:
-                    raise RuntimeError(
-                        "Worker context is incomplete."
-                    )
 
-                actions, scenario_idx = payload
+                (
+                    actions,
+                    scenario_idx,
+                    start,
+                    end,
+                ) = payload
+
+                actions = list(actions)
+                start = int(start)
+                end = int(end)
+
+                if start < 0 or end > int(batch_capacity):
+                    raise ValueError(
+                        "Worker shared-memory slice is invalid: "
+                        f"start={start}, end={end}, "
+                        f"capacity={batch_capacity}"
+                    )
+                if end - start != len(actions):
+                    raise ValueError(
+                        "Worker action/slice count mismatch: "
+                        f"actions={len(actions)}, "
+                        f"slice={end - start}"
+                    )
+                if len(actions) == 0:
+                    raise ValueError(
+                        "Active worker received an empty batch."
+                    )
 
                 shadows = [
                     _make_shadow_env(
-                        base_env,
-                        action,
-                        train_cfg,
-                        int(scenario_idx),
+                        base_env=base_env,
+                        action=action,
+                        train_cfg=train_cfg,
+                        scenario_idx=int(scenario_idx),
                     )
                     for action in actions
                 ]
+
                 current_observations = [
                     shadow.get_fast_obs()
                     for shadow in shadows
                 ]
 
-                obs_matrix = np.stack(
-                    [
-                        flatten_fast_obs(obs).astype(
-                            np.float32,
-                            copy=False,
-                        )
-                        for obs in current_observations
-                    ],
-                    axis=0,
-                )
+                loaded_start = start
+                loaded_end = end
 
-                # mask는 binary이므로 pipe/shared-memory에서는 uint8로 유지
-                mask_matrix = np.stack(
-                    [
-                        codec.build_base_action_mask(obs).astype(
+                for local_idx, observation in enumerate(
+                    current_observations
+                ):
+                    global_idx = start + local_idx
+
+                    flattened = flatten_fast_obs(
+                        observation
+                    ).astype(
+                        np.float32,
+                        copy=False,
+                    )
+
+                    if flattened.shape != (int(obs_dim),):
+                        raise ValueError(
+                            "Forecast observation dimension "
+                            "mismatch: "
+                            f"expected={(obs_dim,)}, "
+                            f"got={flattened.shape}"
+                        )
+
+                    obs_matrix[global_idx] = flattened
+
+                    mask = (
+                        codec.build_base_action_mask(
+                            observation
+                        )
+                        .astype(
                             np.uint8,
                             copy=False,
                         )
-                        for obs in current_observations
-                    ],
-                    axis=0,
-                )
+                    )
+                    if mask.shape != (int(action_dim),):
+                        raise ValueError(
+                            "Forecast action-mask dimension "
+                            "mismatch: "
+                            f"expected={(action_dim,)}, "
+                            f"got={mask.shape}"
+                        )
+
+                    mask_matrix[global_idx] = mask
+                    cost_vector[global_idx] = 0.0
+                    invalid_vector[global_idx] = 0
 
                 connection.send(
                     (
                         "batch_ready",
-                        obs_matrix,
-                        mask_matrix,
+                        int(worker_idx),
+                        start,
+                        end,
                     )
                 )
                 continue
 
             if command == "step":
-                if train_cfg is None or codec is None:
+                if (
+                    train_cfg is None
+                    or codec is None
+                    or not shadows
+                ):
                     raise RuntimeError(
-                        "Worker received step before context."
+                        "step received before a batch was loaded."
                     )
-                if not shadows:
+
+                slot_idx, start, end = payload
+                slot_idx = int(slot_idx)
+                start = int(start)
+                end = int(end)
+
+                if (
+                    start != loaded_start
+                    or end != loaded_end
+                ):
                     raise RuntimeError(
-                        "Worker received step before load_batch."
+                        "Worker step slice differs from loaded "
+                        "batch: "
+                        f"loaded=({loaded_start},{loaded_end}), "
+                        f"received=({start},{end})"
                     )
-
-                raw_actions_chunk, slot_idx = payload
-                raw_actions_chunk = np.asarray(
-                    raw_actions_chunk,
-                    dtype=np.float32,
-                )
-
-                count = len(shadows)
-                if raw_actions_chunk.shape[0] != count:
-                    raise ValueError(
-                        "Worker action count mismatch: "
-                        f"actions={raw_actions_chunk.shape[0]}, "
-                        f"shadows={count}"
-                    )
-
-                next_obs_matrix = np.empty(
-                    (
-                        count,
-                        flatten_fast_obs(
-                            current_observations[0]
-                        ).size,
-                    ),
-                    dtype=np.float32,
-                )
-                next_mask_matrix = np.empty(
-                    (
-                        count,
-                        codec.action_dim,
-                    ),
-                    dtype=np.uint8,
-                )
-                slot_costs = np.empty(
-                    count,
-                    dtype=np.float64,
-                )
-                invalid = np.zeros(
-                    count,
-                    dtype=np.uint8,
-                )
 
                 expected_boundary = (
-                    int(slot_idx)
+                    slot_idx
                     == int(
                         train_cfg.dpp_forecast_horizon
                     )
                     - 1
                 )
 
-                for idx, shadow in enumerate(shadows):
-                    current_obs = current_observations[idx]
+                for local_idx, shadow in enumerate(shadows):
+                    global_idx = start + local_idx
+                    current_obs = current_observations[
+                        local_idx
+                    ]
 
                     env_action = codec.decode(
-                        raw_actions_chunk[idx],
+                        action_matrix[global_idx],
                         current_obs,
                     )
 
@@ -801,13 +924,11 @@ def _forecast_worker_loop(connection) -> None:
                     if actual_boundary != expected_boundary:
                         raise RuntimeError(
                             "Forecast boundary mismatch: "
+                            f"worker={worker_idx}, "
                             f"slot={slot_idx}, "
                             f"expected={expected_boundary}, "
                             f"actual={actual_boundary}"
                         )
-
-                    if terminated or truncated:
-                        invalid[idx] = 1
 
                     slot_cost = float(
                         info.get(
@@ -817,41 +938,52 @@ def _forecast_worker_loop(connection) -> None:
                     )
                     if not np.isfinite(slot_cost):
                         raise RuntimeError(
-                            "Forecast slot DPP cost is NaN "
-                            f"or Inf: candidate={idx}, "
-                            f"slot={slot_idx}"
+                            "Forecast slot cost is nonfinite: "
+                            f"worker={worker_idx}, "
+                            f"candidate={global_idx}, "
+                            f"slot={slot_idx}, "
+                            f"cost={slot_cost}"
                         )
 
-                    slot_costs[idx] = slot_cost
-
-                    if (
-                        bool(
-                            train_cfg
-                            .dpp_reject_forecast_outage
-                        )
-                        and np.any(
-                            np.asarray(
-                                info.get("outage", []),
-                                dtype=np.int32,
-                            )
-                            > 0
-                        )
-                    ):
-                        invalid[idx] = 1
-
-                    current_observations[idx] = next_obs
-
-                    next_obs_matrix[idx] = (
-                        flatten_fast_obs(
-                            next_obs
-                        ).astype(
-                            np.float32,
-                            copy=False,
+                    has_outage = bool(
+                        info.get(
+                            "has_outage",
+                            np.any(
+                                np.asarray(
+                                    info.get("outage", []),
+                                    dtype=np.int32,
+                                )
+                                > 0
+                            ),
                         )
                     )
-                    next_mask_matrix[idx] = (
-                        codec
-                        .build_base_action_mask(
+
+                    invalid = bool(
+                        terminated
+                        or truncated
+                        or (
+                            bool(
+                                train_cfg
+                                .dpp_reject_forecast_outage
+                            )
+                            and has_outage
+                        )
+                    )
+
+                    current_observations[
+                        local_idx
+                    ] = next_obs
+
+                    flattened = flatten_fast_obs(
+                        next_obs
+                    ).astype(
+                        np.float32,
+                        copy=False,
+                    )
+                    obs_matrix[global_idx] = flattened
+
+                    mask_matrix[global_idx] = (
+                        codec.build_base_action_mask(
                             next_obs
                         )
                         .astype(
@@ -860,29 +992,33 @@ def _forecast_worker_loop(connection) -> None:
                         )
                     )
 
+                    cost_vector[global_idx] = slot_cost
+                    invalid_vector[global_idx] = int(
+                        invalid
+                    )
+
                 connection.send(
                     (
-                        "step_result",
-                        next_obs_matrix,
-                        next_mask_matrix,
-                        slot_costs,
-                        invalid,
+                        "step_done",
+                        int(worker_idx),
+                        slot_idx,
                     )
                 )
                 continue
 
             raise RuntimeError(
-                "Unknown forecast-worker command: "
-                f"{command!r}"
+                f"Unknown forecast command: {command!r}"
             )
 
     except EOFError:
         return
+
     except BaseException as exc:
         try:
             connection.send(
                 (
                     "error",
+                    int(worker_idx),
                     type(exc).__name__,
                     str(exc),
                 )
@@ -890,42 +1026,178 @@ def _forecast_worker_loop(connection) -> None:
         except BaseException:
             pass
         raise
+
     finally:
         connection.close()
 
+
 class _PersistentShadowProcessPool:
-    def __init__(self, worker_count: int) -> None:
-        self.worker_count = max(1, int(worker_count))
+    """
+    학습 전체에서 한 번 생성되는 shared-memory shadow pool.
+    """
+
+    def __init__(
+        self,
+        *,
+        worker_count: int,
+        batch_capacity: int,
+        obs_dim: int,
+        action_dim: int,
+    ) -> None:
+        self.worker_count = max(
+            1,
+            int(worker_count),
+        )
+        self.batch_capacity = int(batch_capacity)
+        self.obs_dim = int(obs_dim)
+        self.action_dim = int(action_dim)
+
+        if self.batch_capacity <= 0:
+            raise ValueError(
+                "batch_capacity must be positive."
+            )
+        if self.obs_dim <= 0:
+            raise ValueError(
+                "obs_dim must be positive."
+            )
+        if self.action_dim <= 0:
+            raise ValueError(
+                "action_dim must be positive."
+            )
+
         self.context = mp.get_context("spawn")
+
+        self._obs_raw = self.context.RawArray(
+            ctypes.c_float,
+            self.batch_capacity * self.obs_dim,
+        )
+        self._mask_raw = self.context.RawArray(
+            ctypes.c_ubyte,
+            self.batch_capacity * self.action_dim,
+        )
+        self._action_raw = self.context.RawArray(
+            ctypes.c_float,
+            self.batch_capacity * self.action_dim,
+        )
+        self._cost_raw = self.context.RawArray(
+            ctypes.c_double,
+            self.batch_capacity,
+        )
+        self._invalid_raw = self.context.RawArray(
+            ctypes.c_ubyte,
+            self.batch_capacity,
+        )
+
+        self.obs_matrix = np.frombuffer(
+            self._obs_raw,
+            dtype=np.float32,
+        ).reshape(
+            self.batch_capacity,
+            self.obs_dim,
+        )
+        self.mask_matrix = np.frombuffer(
+            self._mask_raw,
+            dtype=np.uint8,
+        ).reshape(
+            self.batch_capacity,
+            self.action_dim,
+        )
+        self.action_matrix = np.frombuffer(
+            self._action_raw,
+            dtype=np.float32,
+        ).reshape(
+            self.batch_capacity,
+            self.action_dim,
+        )
+        self.cost_vector = np.frombuffer(
+            self._cost_raw,
+            dtype=np.float64,
+        )
+        self.invalid_vector = np.frombuffer(
+            self._invalid_raw,
+            dtype=np.uint8,
+        )
+
         self.parents = []
         self.processes = []
+        self._closed = False
 
         for worker_idx in range(self.worker_count):
-            parent_conn, child_conn = self.context.Pipe(duplex=True)
+            parent_conn, child_conn = (
+                self.context.Pipe(
+                    duplex=True
+                )
+            )
+
             process = self.context.Process(
                 target=_forecast_worker_loop,
-                args=(child_conn,),
+                args=(
+                    child_conn,
+                    int(worker_idx),
+                    self._obs_raw,
+                    self._mask_raw,
+                    self._action_raw,
+                    self._cost_raw,
+                    self._invalid_raw,
+                    self.batch_capacity,
+                    self.obs_dim,
+                    self.action_dim,
+                ),
                 name=f"dpp-shadow-{worker_idx}",
                 daemon=True,
             )
             process.start()
             child_conn.close()
+
             self.parents.append(parent_conn)
             self.processes.append(process)
 
     @staticmethod
-    def _partition_sizes(count: int, workers: int) -> list[int]:
-        base, remainder = divmod(int(count), int(workers))
-        return [base + (1 if idx < remainder else 0) for idx in range(int(workers))]
+    def _partition_sizes(
+        count: int,
+        workers: int,
+    ) -> list[int]:
+        base, remainder = divmod(
+            int(count),
+            int(workers),
+        )
+        return [
+            base + (
+                1
+                if worker_idx < remainder
+                else 0
+            )
+            for worker_idx in range(int(workers))
+        ]
 
     @staticmethod
-    def _check_message(message, expected: str):
-        if not isinstance(message, tuple) or not message:
-            raise RuntimeError(f"Malformed worker message: {message!r}")
+    def _check_message(
+        message,
+        expected: str,
+    ):
+        if (
+            not isinstance(message, tuple)
+            or len(message) == 0
+        ):
+            raise RuntimeError(
+                f"Malformed worker message: {message!r}"
+            )
+
         if message[0] == "error":
-            raise RuntimeError(f"Forecast worker failed: {message[1]}: {message[2]}")
+            raise RuntimeError(
+                "Forecast worker failed: "
+                f"worker={message[1]}, "
+                f"{message[2]}: {message[3]}"
+            )
+
         if message[0] != expected:
-            raise RuntimeError(f"Unexpected worker message: expected={expected}, got={message[0]}")
+            raise RuntimeError(
+                "Unexpected worker message: "
+                f"expected={expected!r}, "
+                f"got={message[0]!r}, "
+                f"message={message!r}"
+            )
+
         return message
 
     def set_round_context(
@@ -934,6 +1206,11 @@ class _PersistentShadowProcessPool:
         base_env: Env,
         train_cfg: FastTrainConfig,
     ) -> None:
+        if self._closed:
+            raise RuntimeError(
+                "Forecast pool is already closed."
+            )
+
         for parent in self.parents:
             parent.send(
                 (
@@ -945,33 +1222,65 @@ class _PersistentShadowProcessPool:
                 )
             )
 
-        for worker_idx, parent in enumerate(self.parents):
-            message = self._check_message(
-                self.parents[worker_idx].recv(),
-                "batch_ready",
+        for parent in self.parents:
+            message = parent.recv()
+            self._check_message(
+                message,
+                "context_ready",
             )
-            del message
 
     def rollout(
         self,
         *,
-        base_env: Env,
-        actions: Sequence[Dict[str, np.ndarray]],
+        actions: Sequence[
+            Dict[str, np.ndarray]
+        ],
         scenario_idx: int,
         train_cfg: FastTrainConfig,
         agent: FastPPOAgent,
-    ) -> Tuple[np.ndarray, float, float, list[int]]:
+    ) -> Tuple[
+        np.ndarray,
+        float,
+        float,
+        list[int],
+    ]:
         count = len(actions)
-        if count <= 0:
-            return np.zeros(0, dtype=np.float64), 0.0, 0.0, []
 
-        active_workers = min(self.worker_count, count)
-        sizes = self._partition_sizes(count, active_workers)
+        if count == 0:
+            return (
+                np.zeros(0, dtype=np.float64),
+                0.0,
+                0.0,
+                [],
+            )
+
+        if count > self.batch_capacity:
+            raise ValueError(
+                "Forecast batch exceeds shared-memory "
+                "capacity: "
+                f"count={count}, "
+                f"capacity={self.batch_capacity}"
+            )
+
+        active_workers = min(
+            self.worker_count,
+            count,
+        )
+
+        sizes = self._partition_sizes(
+            count,
+            active_workers,
+        )
+
         offsets = [0]
         for size in sizes:
-            offsets.append(offsets[-1] + size)
+            offsets.append(
+                offsets[-1] + int(size)
+            )
 
-        # 1. Worker 초기화 및 첫 관측값/마스크 Matrix 수신
+        self.cost_vector[:count] = 0.0
+        self.invalid_vector[:count] = 0
+
         for worker_idx in range(active_workers):
             start = offsets[worker_idx]
             end = offsets[worker_idx + 1]
@@ -982,72 +1291,168 @@ class _PersistentShadowProcessPool:
                     (
                         list(actions[start:end]),
                         int(scenario_idx),
+                        start,
+                        end,
                     ),
                 )
             )
 
-        worker_obs_mats = []
-        worker_mask_mats = []
         for worker_idx in range(active_workers):
-            msg = self._check_message(self.parents[worker_idx].recv(), "ready")
-            worker_obs_mats.append(msg[1])   # (K_w, obs_dim)
-            worker_mask_mats.append(msg[2])  # (K_w, action_dim)
+            message = self.parents[
+                worker_idx
+            ].recv()
+            self._check_message(
+                message,
+                "batch_ready",
+            )
 
-        obs_matrix = np.vstack(worker_obs_mats)
-        mask_matrix = np.vstack(worker_mask_mats)
-
-        accumulated = np.zeros(count, dtype=np.float64)
-        invalid = np.zeros(count, dtype=bool)
+        accumulated = np.zeros(
+            count,
+            dtype=np.float64,
+        )
+        invalid = np.zeros(
+            count,
+            dtype=bool,
+        )
 
         policy_seconds = 0.0
         env_seconds = 0.0
         gpu_batch_sizes: list[int] = []
 
-        # 2. 3,600 Slot Zero-Dict High-Speed Loop
-        for slot_idx in range(int(train_cfg.dpp_forecast_horizon)):
-            # [GPU] Float32 Matrix 다이렉트 배치 추론 (Dict 변환 0회)
-            policy_start = time.perf_counter()
-            raw_actions_matrix = agent.select_env_actions_from_matrices_batch(
-                obs_matrix=obs_matrix,
-                mask_matrix=mask_matrix,
-                deterministic=bool(train_cfg.dpp_deterministic_fast_forecast),
+        for slot_idx in range(
+            int(
+                train_cfg
+                .dpp_forecast_horizon
             )
-            policy_seconds += time.perf_counter() - policy_start
+        ):
+            policy_start = time.perf_counter()
+
+            raw_actions = (
+                agent
+                .select_env_actions_from_matrices_batch(
+                    obs_matrix=self.obs_matrix[
+                        :count
+                    ],
+                    mask_matrix=self.mask_matrix[
+                        :count
+                    ],
+                    deterministic=bool(
+                        train_cfg
+                        .dpp_deterministic_fast_forecast
+                    ),
+                )
+            )
+
+            np.copyto(
+                self.action_matrix[:count],
+                raw_actions,
+                casting="no",
+            )
+
+            policy_seconds += (
+                time.perf_counter()
+                - policy_start
+            )
             gpu_batch_sizes.append(count)
 
-            # [CPU] Worker 분할 전송 (Float32 Array만 전달)
             env_start = time.perf_counter()
-            for worker_idx in range(active_workers):
-                start, end = offsets[worker_idx], offsets[worker_idx + 1]
+
+            for worker_idx in range(
+                active_workers
+            ):
+                start = offsets[worker_idx]
+                end = offsets[worker_idx + 1]
+
                 self.parents[worker_idx].send(
-                    ("step", (raw_actions_matrix[start:end], int(slot_idx)))
+                    (
+                        "step",
+                        (
+                            int(slot_idx),
+                            start,
+                            end,
+                        ),
+                    )
                 )
 
-            next_obs_mats = []
-            next_mask_mats = []
+            for worker_idx in range(
+                active_workers
+            ):
+                message = self.parents[
+                    worker_idx
+                ].recv()
+                self._check_message(
+                    message,
+                    "step_done",
+                )
 
-            for worker_idx in range(active_workers):
-                start, end = offsets[worker_idx], offsets[worker_idx + 1]
-                msg = self._check_message(self.parents[worker_idx].recv(), "step_result")
+            accumulated += self.cost_vector[
+                :count
+            ]
+            invalid |= self.invalid_vector[
+                :count
+            ].astype(
+                bool,
+                copy=False,
+            )
 
-                next_obs_mats.append(msg[1])
-                next_mask_mats.append(msg[2])
-                accumulated[start:end] += msg[3]
-                invalid[start:end] |= msg[4]
-
-            obs_matrix = np.vstack(next_obs_mats)
-            mask_matrix = np.vstack(next_mask_mats)
-            env_seconds += time.perf_counter() - env_start
+            env_seconds += (
+                time.perf_counter()
+                - env_start
+            )
 
         accumulated[invalid] = np.inf
-        return accumulated, float(policy_seconds), float(env_seconds), gpu_batch_sizes
+
+        return (
+            accumulated,
+            float(policy_seconds),
+            float(env_seconds),
+            gpu_batch_sizes,
+        )
 
     def close(self) -> None:
-        for parent in self.parents:
+        if self._closed:
+            return
+
+        self._closed = True
+
+        for parent, process in zip(
+            self.parents,
+            self.processes,
+        ):
+            if not process.is_alive():
+                continue
+
             try:
-                parent.send(("close", None))
-            except (BrokenPipeError, EOFError, OSError):
+                parent.send(
+                    ("close", None)
+                )
+            except (
+                BrokenPipeError,
+                EOFError,
+                OSError,
+            ):
                 pass
+
+        for parent, process in zip(
+            self.parents,
+            self.processes,
+        ):
+            if process.is_alive():
+                try:
+                    if parent.poll(3.0):
+                        message = parent.recv()
+                        self._check_message(
+                            message,
+                            "closed",
+                        )
+                except (
+                    BrokenPipeError,
+                    EOFError,
+                    OSError,
+                    RuntimeError,
+                ):
+                    pass
+
             try:
                 parent.close()
             except OSError:
@@ -1055,6 +1460,8 @@ class _PersistentShadowProcessPool:
 
         for process in self.processes:
             process.join(timeout=5.0)
+
+            if process.is_alive():
                 process.terminate()
                 process.join(timeout=2.0)
 
@@ -1145,7 +1552,6 @@ class SlowDPPEvaluator:
                 env_seconds,
                 batch_sizes,
             ) = self.process_pool.rollout(
-                base_env=self.env,
                 actions=actions,
                 scenario_idx=scenario_idx,
                 train_cfg=self.train_cfg,
@@ -1177,16 +1583,30 @@ def select_slow_action_dpp(
             f"got {env.round_slot}."
         )
 
-    env_digest_before = _env_state_digest(env)
+    audit_runtime = bool(
+        train_cfg.audit_runtime_invariants
+    )
+
+    env_digest_before = (
+        _env_state_digest(env)
+        if audit_runtime
+        else None
+    )
+
     model_digest_before = (
         _model_parameter_digest(agent)
+        if audit_runtime
+        else None
     )
 
     normalizer_state_before = (
         copy.deepcopy(
             agent.obs_normalizer.state_dict()
         )
-        if agent.obs_normalizer is not None
+        if (
+            audit_runtime
+            and agent.obs_normalizer is not None
+        )
         else None
     )
 
@@ -1425,7 +1845,8 @@ def select_slow_action_dpp(
     )
 
     if (
-        _env_state_digest(env)
+        env_digest_before is not None
+        and _env_state_digest(env)
         != env_digest_before
     ):
         raise RuntimeError(
@@ -1434,7 +1855,8 @@ def select_slow_action_dpp(
         )
 
     if (
-        _model_parameter_digest(agent)
+        model_digest_before is not None
+        and _model_parameter_digest(agent)
         != model_digest_before
     ):
         raise RuntimeError(
@@ -1442,10 +1864,8 @@ def select_slow_action_dpp(
             "Fast policy parameters."
         )
 
-    if agent.obs_normalizer is not None:
-        after = (
-            agent.obs_normalizer.state_dict()
-        )
+    if normalizer_state_before is not None:
+        after = agent.obs_normalizer.state_dict()
 
         if (
             pickle.dumps(after)
@@ -1738,7 +2158,13 @@ def _execute_real_round_train(
     if len(agent.buffer) != 0:
         raise RuntimeError("PPO buffer must be empty at real round start.")
 
-    model_digest_before = _model_parameter_digest(agent)
+    model_digest_before = (
+        _model_parameter_digest(agent)
+        if bool(
+            train_cfg.audit_runtime_invariants
+        )
+        else None
+    )
     raw_obs_batch: list[np.ndarray] = []
 
     totals = {
@@ -1840,8 +2266,14 @@ def _execute_real_round_train(
             "One completed real round must exactly fill the PPO buffer: "
             f"len={len(agent.buffer)}, expected={env.slow_T}."
         )
-    if _model_parameter_digest(agent) != model_digest_before:
-        raise RuntimeError("Fast policy changed inside a real round.")
+    if (
+        model_digest_before is not None
+        and _model_parameter_digest(agent)
+        != model_digest_before
+    ):
+        raise RuntimeError(
+            "Fast policy changed inside a real round."
+        )
 
     # Round is a finite-horizon Fast subproblem under one fixed slow action.
     agent.finish_rollout(last_obs=obs, last_done=True)
@@ -1986,7 +2418,11 @@ def train(train_cfg: FastTrainConfig) -> None:
 
     print("=" * 100, flush=True)
     print("[SLOW-DPP + FAST-PPO TRAIN START]", flush=True)
-    print(f"branch_basis   : feat/fast-hrl@bf31c6f", flush=True)
+    print(
+        "branch_basis   : feat/no-hrl "
+        "(exact commit is recorded by run/joint_train.sh)",
+        flush=True,
+    )
     print(f"run_dir        : {run_dir}", flush=True)
     print(f"device         : {agent.device}", flush=True)
     print(f"slow_mode      : {train_cfg.slow_decision_mode}", flush=True)
@@ -2001,193 +2437,143 @@ def train(train_cfg: FastTrainConfig) -> None:
     update_idx = 0
 
     forecast_pool: Optional[
-        _PersistentShadowProcessPool
+    _PersistentShadowProcessPool
     ] = None
 
     if train_cfg.slow_decision_mode == "dpp":
         forecast_pool = _PersistentShadowProcessPool(
-            int(train_cfg.dpp_forecast_workers)
+            worker_count=int(
+                train_cfg.dpp_forecast_workers
+            ),
+            batch_capacity=int(
+                train_cfg.dpp_candidate_batch_size
+            ),
+            obs_dim=int(agent.obs_dim),
+            action_dim=int(agent.action_dim),
         )
 
     try:
-        for episode_idx in range(1, int(train_cfg.num_episodes) + 1):
-            env.cfg.move_prob = get_episode_move_prob(train_cfg, episode_idx)
-            obs, _ = split_env_reset(env.reset())
+        for episode_idx in range(
+            1,
+            int(train_cfg.eval_episodes) + 1,
+        ):
+            obs, _ = split_env_reset(
+                env.reset()
+            )
 
-            ep = {
+            totals = {
                 "reward": 0.0,
                 "delivery": 0.0,
                 "quality": 0.0,
                 "quality_degradation": 0.0,
                 "stall": 0.0,
                 "outage_slots": 0.0,
-                "forecast_seconds": 0.0,
-                "real_seconds": 0.0,
-                "update_seconds": 0.0,
                 "prediction_gap_sum": 0.0,
                 "prediction_gap_count": 0,
-                "min_soc": float("inf"),
             }
 
-            for round_in_episode in range(1, int(train_cfg.rounds_per_episode) + 1):
-                if int(env.round_slot) != 0:
-                    raise RuntimeError("Episode loop is not at a round boundary.")
-
-                obs, slow_info = _select_and_apply_slow_action(
-                    env,
-                    agent,
-                    train_cfg,
-                    slow_rng,
-                    forecast_pool,
+            for _ in range(
+                int(
+                    train_cfg
+                    .eval_rounds_per_episode
                 )
-                policy_version = update_idx
-
-                obs, realized, update_logs = _execute_real_round_train(
-                    env,
-                    agent,
-                    obs,
-                    train_cfg,
-                )
-                update_idx += 1
-                global_round += 1
-                global_real_slot += int(env_cfg.slow_T)
-
-                predicted = float(slow_info["predicted_round_cost"])
-                realized_cost = float(realized["realized_round_cost"])
-                gap = (
-                    realized_cost - predicted
-                    if np.isfinite(predicted)
-                    else float("nan")
+            ):
+                obs, slow_info = (
+                    _select_and_apply_slow_action(
+                        env=env,
+                        agent=agent,
+                        train_cfg=train_cfg,
+                        slow_rng=slow_rng,
+                        process_pool=forecast_pool,
+                    )
                 )
 
-                round_row = {
-                    "global_round": global_round,
-                    "episode": episode_idx,
-                    "round_in_episode": round_in_episode,
-                    "policy_version": policy_version,
-                    "global_real_slot": global_real_slot,
-                    **slow_info,
-                    **realized,
-                    "prediction_gap": gap,
-                }
-                round_logger.write(round_row)
-                update_logger.write(
-                    {
-                        "update": update_idx,
-                        "global_round": global_round,
-                        "episode": episode_idx,
-                        "global_real_slot": global_real_slot,
-                        **update_logs,
-                    }
+                obs, realized = (
+                    _execute_real_round_eval(
+                        env,
+                        agent,
+                        obs,
+                    )
                 )
 
-                ep["reward"] += realized["formulation_reward"]
-                ep["delivery"] += realized["delivery"]
-                ep["quality"] += realized["quality"]
-                ep["quality_degradation"] += realized[
-                    "quality_degradation"
+                predicted = float(
+                    slow_info[
+                        "predicted_round_cost"
+                    ]
+                )
+
+                if np.isfinite(predicted):
+                    totals[
+                        "prediction_gap_sum"
+                    ] += (
+                        realized[
+                            "realized_round_cost"
+                        ]
+                        - predicted
+                    )
+                    totals[
+                        "prediction_gap_count"
+                    ] += 1
+
+                totals["reward"] += realized[
+                    "formulation_reward"
                 ]
-                ep["stall"] += realized["stall"]
-                ep["outage_slots"] += realized["outage_slots"]
-                ep["forecast_seconds"] += slow_info["forecast_seconds"]
-                ep["real_seconds"] += realized["real_round_seconds"]
-                ep["update_seconds"] += realized["ppo_update_seconds"]
-                ep["min_soc"] = min(ep["min_soc"], realized["min_soc"])
-                if np.isfinite(gap):
-                    ep["prediction_gap_sum"] += gap
-                    ep["prediction_gap_count"] += 1
 
-                print(
-                    "[ROUND] "
-                    f"ep={episode_idx}/{train_cfg.num_episodes} "
-                    f"r={round_in_episode}/{train_cfg.rounds_per_episode} "
-                    f"policy_v={policy_version} "
-                    f"pred={predicted:.4f} "
-                    f"real={realized_cost:.4f} "
-                    f"gap={gap:.4f} "
-                    f"candidates={int(slow_info['unique_candidates'])} "
-                    f"forecast_s={slow_info['forecast_seconds']:.2f} "
-                    f"real_sps={realized['real_slots_per_second']:.2f} "
-                    f"kl={update_logs['approx_kl']:.6f}",
-                    flush=True,
-                )
+                for key in (
+                    "delivery",
+                    "quality",
+                    "quality_degradation",
+                    "stall",
+                    "outage_slots",
+                ):
+                    totals[key] += realized[key]
 
-            if not np.isfinite(ep["min_soc"]):
-                ep["min_soc"] = 0.0
             gap_mean = (
-                ep["prediction_gap_sum"] / ep["prediction_gap_count"]
-                if ep["prediction_gap_count"] > 0
+                totals["prediction_gap_sum"]
+                / totals[
+                    "prediction_gap_count"
+                ]
+                if totals[
+                    "prediction_gap_count"
+                ]
+                > 0
                 else float("nan")
             )
-            episode_logger.write(
+
+            logger.write(
                 {
                     "episode": episode_idx,
-                    "global_round": global_round,
-                    "global_real_slot": global_real_slot,
-                    "move_prob": float(env.cfg.move_prob),
-                    "episode_formulation_reward": ep["reward"],
-                    "episode_delivery": ep["delivery"],
-                    "episode_quality": ep["quality"],
-                    "episode_quality_degradation": ep[
-                        "quality_degradation"
+                    "reward": totals["reward"],
+                    "delivery": totals[
+                        "delivery"
                     ],
-                    "episode_stall": ep["stall"],
-                    "episode_outage_slots": ep["outage_slots"],
-                    "episode_min_soc": ep["min_soc"],
-                    "episode_forecast_seconds": ep["forecast_seconds"],
-                    "episode_real_seconds": ep["real_seconds"],
-                    "episode_update_seconds": ep["update_seconds"],
-                    "episode_prediction_gap_mean": gap_mean,
+                    "quality": totals["quality"],
+                    "quality_degradation":
+                        totals[
+                            "quality_degradation"
+                        ],
+                    "stall": totals["stall"],
+                    "outage_slots":
+                        totals[
+                            "outage_slots"
+                        ],
+                    "prediction_gap_mean":
+                        gap_mean,
                 }
             )
 
             print(
-                "[EPISODE] "
-                f"ep={episode_idx}/{train_cfg.num_episodes} "
-                f"reward={ep['reward']:.4f} "
-                f"delivery={ep['delivery']:.1f} "
-                f"stall={ep['stall']:.1f} "
-                f"gap_mean={gap_mean:.4f} "
-                f"outage_slots={ep['outage_slots']:.0f}",
+                "[EVAL] "
+                f"ep={episode_idx}/"
+                f"{train_cfg.eval_episodes} "
+                f"reward={totals['reward']:.4f} "
+                f"delivery="
+                f"{totals['delivery']:.1f} "
+                f"stall={totals['stall']:.1f} "
+                f"gap={gap_mean:.4f}",
                 flush=True,
             )
 
-            if (
-                int(train_cfg.save_every_episodes) > 0
-                and episode_idx % int(train_cfg.save_every_episodes) == 0
-            ):
-                checkpoint_path = (
-                    run_dir
-                    / "checkpoints"
-                    / f"fast_ppo_joint_ep{episode_idx}.pt"
-                )
-                agent.save(
-                    checkpoint_path,
-                    extra={
-                        "episode": episode_idx,
-                        "global_round": global_round,
-                        "global_real_slot": global_real_slot,
-                        "update_idx": update_idx,
-                        "slow_decision_mode": train_cfg.slow_decision_mode,
-                        "env_config": (
-                            env_cfg.as_dict()
-                            if hasattr(env_cfg, "as_dict")
-                            else asdict(env_cfg)
-                        ),
-                        "train_config": train_cfg.to_dict(),
-                        "ppo_config": asdict(ppo_cfg),
-                    },
-                )
-                print(f"[SAVE] {checkpoint_path}", flush=True)
-
-            if (
-                int(train_cfg.plot_every_episodes) > 0
-                and episode_idx % int(train_cfg.plot_every_episodes) == 0
-            ):
-                save_training_plots(
-                    run_dir,
-                    smooth_window=int(train_cfg.plot_smooth_window),
-                )
     finally:
         if forecast_pool is not None:
             forecast_pool.close()

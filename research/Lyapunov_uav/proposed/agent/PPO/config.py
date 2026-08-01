@@ -31,7 +31,7 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 상대경로면 proposed/ 아래에 생성된다.
     output_root: str = "joint"
-    run_name: Optional[str] = "joint_dpp_fastppo_scratch_seed2026"
+    run_name: Optional[str] = "joint_dpp_fastppo_gpuopt_seed2026_v1"
 
     # None이면 fast_train.py에서 자동 이름 생성
     checkpoint: Optional[str] = None
@@ -130,7 +130,8 @@ class FastTrainConfig:
     # DPP mode: current Fast policy를 고정하여 complete round forecast
     dpp_forecast_horizon: int = 3600
     dpp_forecast_scenarios: int = 1
-    dpp_candidate_batch_size: int = 128
+
+    dpp_candidate_batch_size: int = 256
     dpp_forecast_workers: int = 8
 
     # 전체 region Cartesian product는 사용하지 않는다.
@@ -161,6 +162,9 @@ class FastTrainConfig:
     # 9) Debug
     # ------------------------------------------------------------------
     fail_on_nan: bool = True
+    # True이면 매 round마다 전체 GPU parameter를 CPU로 복사해 SHA를 계산한다.
+    # production 학습에서는 GPU synchronization을 유발하므로 False로 둔다.
+    audit_runtime_invariants: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in {"train", "eval"}:
@@ -295,6 +299,13 @@ class FastTrainConfig:
         ):
             raise ValueError(
                 "mobility_curriculum must start from episode 1."
+            )
+        if int(self.dpp_candidate_batch_size) < int(
+            self.dpp_forecast_workers
+        ):
+            raise ValueError(
+                "dpp_candidate_batch_size must be at least "
+                "dpp_forecast_workers."
             )
 
     def to_dict(self) -> Dict[str, object]:

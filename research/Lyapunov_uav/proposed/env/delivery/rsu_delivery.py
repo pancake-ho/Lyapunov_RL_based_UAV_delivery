@@ -210,59 +210,130 @@ def compute_rsu_delivery(
 
     # candidate link 별 achievable delivery 계산
     for m in range(num_rsu):
-        candidate_users = np.flatnonzero(requested_mask[m])
-        for n in candidate_users:
-            distance = max(float(rsu_user_distance[m, n]), float(cfg.rsu_channel.min_distance))
-            layer = int(rsu_layers[m, n])
-            requested_chunks = int(rsu_chunks[m, n])
+        candidate_links = np.argwhere(
+            requested_mask
+        )
 
-            raw_gain = float(rsu_channel.compute_gain(distance=distance, rng=rng))
-            cap_bps = float(rsu_channel.capacity_from_gain(raw_gain))
-                            
+        for m, n in candidate_links:
+            m = int(m)
+            n = int(n)
+
+            distance = max(
+                float(
+                    rsu_user_distance[m, n]
+                ),
+                float(
+                    cfg.rsu_channel.min_distance
+                ),
+            )
+            layer = int(
+                rsu_layers[m, n]
+            )
+            requested_chunks = int(
+                rsu_chunks[m, n]
+            )
+
+            raw_gain = float(
+                rsu_channel.compute_gain(
+                    distance=distance,
+                    rng=rng,
+                )
+            )
+            cap_bps = float(
+                rsu_channel.capacity_from_gain(
+                    raw_gain
+                )
+            )
+
             raw_channel_gain[m, n] = raw_gain
             link_capacity_bps[m, n] = cap_bps
 
-            chunk_bits = _chunk_size_bits(cfg, layer)
-            if chunk_bits <= 0.0 or cap_bps <= 0.0:
+            chunk_bits = _chunk_size_bits(
+                cfg,
+                layer,
+            )
+
+            if (
+                chunk_bits <= 0.0
+                or cap_bps <= 0.0
+            ):
                 feasible_chunks = 0
             else:
-                bit_budget = cap_bps * slot_duration
-                feasible_chunks = int(np.floor(bit_budget / chunk_bits))
-            
-            feasible_chunks = max(0, min(requested_chunks, feasible_chunks))
-            potential_chunks[m, n] = feasible_chunks
+                feasible_chunks = int(
+                    np.floor(
+                        cap_bps
+                        * slot_duration
+                        / chunk_bits
+                    )
+                )
+
+            potential_chunks[m, n] = max(
+                0,
+                min(
+                    requested_chunks,
+                    feasible_chunks,
+                ),
+            )
     
     # RSU별 동시 서비스 가능 user 수 제한 반영
     capped_mask = np.zeros((num_rsu, num_user), dtype=bool)
 
     for m in range(num_rsu):
-        candidate_users = np.flatnonzero(requested_mask[m])
-        if candidate_users.size == 0:
-            continue
-        if rsu_capacity <= 0:
-            continue
-
-        scores = np.array(
-            [
-                _priority_score(
-                    cfg=cfg,
-                    feasible_chunks=int(potential_chunks[m, n]),
-                    layer=int(rsu_layers[m, n]),
-                    cap_bps=float(link_capacity_bps[m, n]),
-                    user_virtual_queue=float(user_virtual_queue[n]),
-                )
-                for n in candidate_users
-            ],
-            dtype=np.float64
+        candidate_users = np.flatnonzero(
+            requested_mask[m]
         )
 
-        # score가 높은 user부터 RSU capacity만큼 선택
-        order = np.argsort(-scores)
-        selected_users = candidate_users[order[:rsu_capacity]]
+        if (
+            candidate_users.size == 0
+            or rsu_capacity <= 0
+        ):
+            continue
 
-        for n in selected_users:
-            if potential_chunks[m, n] > 0:
-                capped_mask[m, n] = True
+        if candidate_users.size <= rsu_capacity:
+            selected_users = candidate_users
+
+        else:
+            scores = np.asarray(
+                [
+                    _priority_score(
+                        cfg=cfg,
+                        feasible_chunks=int(
+                            potential_chunks[m, n]
+                        ),
+                        layer=int(
+                            rsu_layers[m, n]
+                        ),
+                        cap_bps=float(
+                            link_capacity_bps[m, n]
+                        ),
+                        user_virtual_queue=float(
+                            user_virtual_queue[n]
+                        ),
+                    )
+                    for n in candidate_users
+                ],
+                dtype=np.float64,
+            )
+
+            order = np.argsort(
+                -scores
+            )
+            selected_users = candidate_users[
+                order[:rsu_capacity]
+            ]
+
+        positive = (
+            potential_chunks[
+                m,
+                selected_users,
+            ]
+            > 0
+        )
+
+        capped_mask[
+            m,
+            selected_users[positive],
+        ] = True
     
     # 동일 user를 여러 RSU가 동시에 서비스하는 경우 방지 (안전장치)
     active_mask = np.zeros((num_rsu, num_user), dtype=bool)
