@@ -2,7 +2,7 @@
 
 #SBATCH -J joint-train
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=10
+#SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:1
 #SBATCH --mem=29G
 #SBATCH -p batch_eebme_ugrad

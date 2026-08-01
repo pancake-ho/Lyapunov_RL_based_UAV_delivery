@@ -132,7 +132,7 @@ class FastTrainConfig:
     dpp_forecast_scenarios: int = 1
 
     dpp_candidate_batch_size: int = 256
-    dpp_forecast_workers: int = 8
+    dpp_forecast_workers: int = 18
 
     # 전체 region Cartesian product는 사용하지 않는다.
     # 완전한 global action을 평가하는 region-coordinate minimization으로 고정.
