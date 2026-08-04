@@ -2806,6 +2806,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 agent,
                 train_cfg,
                 slow_rng,
+                process_pool=forecast_pool,
             )
             obs, realized = _execute_real_round_eval(env, agent, obs)
             predicted = float(slow_info["predicted_round_cost"])
