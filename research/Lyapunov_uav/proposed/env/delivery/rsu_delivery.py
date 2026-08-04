@@ -208,72 +208,53 @@ def compute_rsu_delivery(
 
     potential_chunks = np.zeros((num_rsu, num_user), dtype=np.int32)
 
-    # candidate link 별 achievable delivery 계산
-    for m in range(num_rsu):
-        candidate_links = np.argwhere(
-            requested_mask
+    # 각 candidate link의 slot-t channel realization은 정확히 한 번만
+    # 샘플링한다. 과거 구현의 불필요한 ``for m in range(num_rsu)``
+    # 바깥 루프는 동일 link를 num_rsu번 다시 계산하고 RNG도 그만큼
+    # 소비하여 물리 모델과 실행시간을 모두 왜곡했다.
+    candidate_links = np.argwhere(requested_mask)
+
+    for m, n in candidate_links:
+        m = int(m)
+        n = int(n)
+
+        distance = max(
+            float(rsu_user_distance[m, n]),
+            float(cfg.rsu_channel.min_distance),
+        )
+        layer = int(rsu_layers[m, n])
+        requested_chunks = int(rsu_chunks[m, n])
+
+        raw_gain = float(
+            rsu_channel.compute_gain(
+                distance=distance,
+                rng=rng,
+            )
+        )
+        cap_bps = float(
+            rsu_channel.capacity_from_gain(raw_gain)
         )
 
-        for m, n in candidate_links:
-            m = int(m)
-            n = int(n)
+        raw_channel_gain[m, n] = raw_gain
+        link_capacity_bps[m, n] = cap_bps
 
-            distance = max(
-                float(
-                    rsu_user_distance[m, n]
-                ),
-                float(
-                    cfg.rsu_channel.min_distance
-                ),
-            )
-            layer = int(
-                rsu_layers[m, n]
-            )
-            requested_chunks = int(
-                rsu_chunks[m, n]
-            )
+        chunk_bits = _chunk_size_bits(cfg, layer)
 
-            raw_gain = float(
-                rsu_channel.compute_gain(
-                    distance=distance,
-                    rng=rng,
-                )
-            )
-            cap_bps = float(
-                rsu_channel.capacity_from_gain(
-                    raw_gain
+        if chunk_bits <= 0.0 or cap_bps <= 0.0:
+            feasible_chunks = 0
+        else:
+            feasible_chunks = int(
+                np.floor(
+                    cap_bps
+                    * slot_duration
+                    / chunk_bits
                 )
             )
 
-            raw_channel_gain[m, n] = raw_gain
-            link_capacity_bps[m, n] = cap_bps
-
-            chunk_bits = _chunk_size_bits(
-                cfg,
-                layer,
-            )
-
-            if (
-                chunk_bits <= 0.0
-                or cap_bps <= 0.0
-            ):
-                feasible_chunks = 0
-            else:
-                feasible_chunks = int(
-                    np.floor(
-                        cap_bps
-                        * slot_duration
-                        / chunk_bits
-                    )
-                )
-
-            potential_chunks[m, n] = max(
-                0,
-                min(
-                    requested_chunks,
-                    feasible_chunks,
-                ),
-            )
+        potential_chunks[m, n] = max(
+            0,
+            min(requested_chunks, feasible_chunks),
+        )
     
     # RSU별 동시 서비스 가능 user 수 제한 반영
     capped_mask = np.zeros((num_rsu, num_user), dtype=bool)

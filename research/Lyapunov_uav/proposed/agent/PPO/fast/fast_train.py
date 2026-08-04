@@ -230,23 +230,24 @@ def _assert_joint_config(
     train_cfg: FastTrainConfig,
     env_cfg: EnvConfig,
 ) -> None:
+    if int(train_cfg.rollout_slots) != int(env_cfg.slow_T):
+        raise ValueError(
+            "Round-wise Fast-PPO requires rollout_slots == env.slow_T: "
+            f"{train_cfg.rollout_slots} != {env_cfg.slow_T}."
+        )
+    if not bool(train_cfg.freeze_obs_norm_within_round):
+        raise ValueError(
+            "Round-wise training requires observation normalizer fixed "
+            "within every round."
+        )
+
     if train_cfg.slow_decision_mode != "dpp":
         return
 
-    if int(train_cfg.rollout_slots) != int(env_cfg.slow_T):
-        raise ValueError(
-            "Joint mode requires rollout_slots == env.slow_T: "
-            f"{train_cfg.rollout_slots} != {env_cfg.slow_T}."
-        )
     if int(train_cfg.dpp_forecast_horizon) != int(env_cfg.slow_T):
         raise ValueError(
             "Joint mode requires dpp_forecast_horizon == env.slow_T: "
             f"{train_cfg.dpp_forecast_horizon} != {env_cfg.slow_T}."
-        )
-    if not bool(train_cfg.freeze_obs_norm_within_round):
-        raise ValueError(
-            "Joint mode requires observation normalizer to remain fixed "
-            "within every round."
         )
 
 
@@ -430,6 +431,8 @@ class SlowSelectionResult:
     action: Dict[str, np.ndarray]
     predicted_round_cost: float
     solver_mode: str
+    estimator_mode: str
+    global_optimum_guaranteed: bool
     coordinate_sweeps: int
     candidate_requests: int
     unique_candidates: int
@@ -1894,9 +1897,18 @@ def select_slow_action_dpp(
             current_score
         ),
         solver_mode=(
-            "parallel_jacobi_complete_action_"
-            "exact_acceptance"
+            "parallel_jacobi_coordinate_descent_"
+            "full_action_rollout"
         ),
+        estimator_mode=(
+            "single_scenario_mean_rsu_channel_proxy"
+            if (
+                int(train_cfg.dpp_forecast_scenarios) == 1
+                and bool(train_cfg.dpp_use_mean_rsu_channel)
+            )
+            else "sample_average_rollout"
+        ),
+        global_optimum_guaranteed=False,
         coordinate_sweeps=int(
             completed_sweeps
         ),
@@ -2081,6 +2093,11 @@ def _select_and_apply_slow_action(
         return env.get_fast_obs(), {
             "predicted_round_cost":
                 selected.predicted_round_cost,
+            "solver_mode": selected.solver_mode,
+            "estimator_mode": selected.estimator_mode,
+            "global_optimum_guaranteed": float(
+                selected.global_optimum_guaranteed
+            ),
             "candidate_requests":
                 float(selected.candidate_requests),
             "unique_candidates":
@@ -2129,6 +2146,9 @@ def _select_and_apply_slow_action(
 
     return env.get_fast_obs(), {
         "predicted_round_cost": float("nan"),
+        "solver_mode": "random_feasible_baseline",
+        "estimator_mode": "not_applicable",
+        "global_optimum_guaranteed": 0.0,
         "candidate_requests": 0.0,
         "unique_candidates": 0.0,
         "finite_candidates": 0.0,
@@ -2402,6 +2422,11 @@ def train(train_cfg: FastTrainConfig) -> None:
     agent = _initialize_agent(env, initial_obs, train_cfg, ppo_cfg)
 
     run_dir = make_run_dir(train_cfg, env_cfg)
+    checkpoint_stem = (
+        "fast_ppo_pretrain"
+        if train_cfg.slow_decision_mode == "random"
+        else "fast_ppo_joint"
+    )
     save_configs(
         run_dir,
         train_cfg,
@@ -2417,7 +2442,12 @@ def train(train_cfg: FastTrainConfig) -> None:
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 10_007)
 
     print("=" * 100, flush=True)
-    print("[SLOW-DPP + FAST-PPO TRAIN START]", flush=True)
+    phase_label = (
+        "FAST-PPO PRETRAIN"
+        if train_cfg.slow_decision_mode == "random"
+        else "SLOW-DPP + FAST-PPO JOINT TRAIN"
+    )
+    print(f"[{phase_label} START]", flush=True)
     print(
         "branch_basis   : feat/no-hrl "
         "(exact commit is recorded by run/joint_train.sh)",
@@ -2437,7 +2467,7 @@ def train(train_cfg: FastTrainConfig) -> None:
     update_idx = 0
 
     forecast_pool: Optional[
-    _PersistentShadowProcessPool
+        _PersistentShadowProcessPool
     ] = None
 
     if train_cfg.slow_decision_mode == "dpp":
@@ -2453,126 +2483,244 @@ def train(train_cfg: FastTrainConfig) -> None:
         )
 
     try:
-        for episode_idx in range(
-            1,
-            int(train_cfg.eval_episodes) + 1,
-        ):
-            obs, _ = split_env_reset(
-                env.reset()
+        for episode_idx in range(1, int(train_cfg.num_episodes) + 1):
+            env.cfg.move_prob = get_episode_move_prob(
+                train_cfg,
+                episode_idx,
             )
+            obs, _ = split_env_reset(env.reset())
 
-            totals = {
+            episode_totals = {
                 "reward": 0.0,
                 "delivery": 0.0,
                 "quality": 0.0,
                 "quality_degradation": 0.0,
                 "stall": 0.0,
                 "outage_slots": 0.0,
+                "forecast_seconds": 0.0,
+                "real_seconds": 0.0,
+                "update_seconds": 0.0,
                 "prediction_gap_sum": 0.0,
                 "prediction_gap_count": 0,
+                "min_soc": float("inf"),
             }
 
-            for _ in range(
-                int(
-                    train_cfg
-                    .eval_rounds_per_episode
-                )
+            for round_in_episode in range(
+                1,
+                int(train_cfg.rounds_per_episode) + 1,
             ):
-                obs, slow_info = (
-                    _select_and_apply_slow_action(
-                        env=env,
-                        agent=agent,
-                        train_cfg=train_cfg,
-                        slow_rng=slow_rng,
-                        process_pool=forecast_pool,
+                if int(env.round_slot) != 0:
+                    raise RuntimeError(
+                        "Episode loop is not at a round boundary."
                     )
+
+                # The Slow-DPP forecast uses one fixed pre-update Fast policy.
+                # The selected slow action then stays fixed throughout the real
+                # round, and PPO updates only after that round has completed.
+                obs, slow_info = _select_and_apply_slow_action(
+                    env=env,
+                    agent=agent,
+                    train_cfg=train_cfg,
+                    slow_rng=slow_rng,
+                    process_pool=forecast_pool,
+                )
+                policy_version = update_idx
+
+                obs, realized, update_logs = _execute_real_round_train(
+                    env=env,
+                    agent=agent,
+                    obs=obs,
+                    train_cfg=train_cfg,
                 )
 
-                obs, realized = (
-                    _execute_real_round_eval(
-                        env,
-                        agent,
-                        obs,
-                    )
-                )
+                update_idx += 1
+                global_round += 1
+                global_real_slot += int(env_cfg.slow_T)
 
                 predicted = float(
-                    slow_info[
-                        "predicted_round_cost"
-                    ]
+                    slow_info["predicted_round_cost"]
+                )
+                realized_cost = float(
+                    realized["realized_round_cost"]
+                )
+                prediction_gap = (
+                    realized_cost - predicted
+                    if np.isfinite(predicted)
+                    else float("nan")
                 )
 
-                if np.isfinite(predicted):
-                    totals[
-                        "prediction_gap_sum"
-                    ] += (
-                        realized[
-                            "realized_round_cost"
-                        ]
-                        - predicted
-                    )
-                    totals[
-                        "prediction_gap_count"
-                    ] += 1
+                round_row = {
+                    "global_round": global_round,
+                    "episode": episode_idx,
+                    "round_in_episode": round_in_episode,
+                    "policy_version": policy_version,
+                    "global_real_slot": global_real_slot,
+                    **slow_info,
+                    **realized,
+                    "prediction_gap": prediction_gap,
+                }
+                round_logger.write(round_row)
 
-                totals["reward"] += realized[
+                update_logger.write(
+                    {
+                        "update": update_idx,
+                        "global_round": global_round,
+                        "episode": episode_idx,
+                        "global_real_slot": global_real_slot,
+                        **update_logs,
+                    }
+                )
+
+                episode_totals["reward"] += realized[
                     "formulation_reward"
                 ]
-
-                for key in (
-                    "delivery",
-                    "quality",
-                    "quality_degradation",
-                    "stall",
-                    "outage_slots",
-                ):
-                    totals[key] += realized[key]
-
-            gap_mean = (
-                totals["prediction_gap_sum"]
-                / totals[
-                    "prediction_gap_count"
+                episode_totals["delivery"] += realized["delivery"]
+                episode_totals["quality"] += realized["quality"]
+                episode_totals["quality_degradation"] += realized[
+                    "quality_degradation"
                 ]
-                if totals[
-                    "prediction_gap_count"
+                episode_totals["stall"] += realized["stall"]
+                episode_totals["outage_slots"] += realized[
+                    "outage_slots"
                 ]
-                > 0
+                episode_totals["forecast_seconds"] += slow_info[
+                    "forecast_seconds"
+                ]
+                episode_totals["real_seconds"] += realized[
+                    "real_round_seconds"
+                ]
+                episode_totals["update_seconds"] += realized[
+                    "ppo_update_seconds"
+                ]
+                episode_totals["min_soc"] = min(
+                    episode_totals["min_soc"],
+                    realized["min_soc"],
+                )
+
+                if np.isfinite(prediction_gap):
+                    episode_totals["prediction_gap_sum"] += (
+                        prediction_gap
+                    )
+                    episode_totals["prediction_gap_count"] += 1
+
+                print(
+                    "[JOINT ROUND] "
+                    f"ep={episode_idx}/{train_cfg.num_episodes} "
+                    f"r={round_in_episode}/"
+                    f"{train_cfg.rounds_per_episode} "
+                    f"policy_v={policy_version} "
+                    f"pred={predicted:.4f} "
+                    f"real={realized_cost:.4f} "
+                    f"gap={prediction_gap:.4f} "
+                    f"solver={slow_info['solver_mode']} "
+                    f"candidates="
+                    f"{int(slow_info['unique_candidates'])} "
+                    f"forecast_s="
+                    f"{slow_info['forecast_seconds']:.2f} "
+                    f"real_sps="
+                    f"{realized['real_slots_per_second']:.2f} "
+                    f"kl={update_logs['approx_kl']:.6f}",
+                    flush=True,
+                )
+
+            if not np.isfinite(episode_totals["min_soc"]):
+                episode_totals["min_soc"] = 0.0
+
+            prediction_gap_mean = (
+                episode_totals["prediction_gap_sum"]
+                / episode_totals["prediction_gap_count"]
+                if episode_totals["prediction_gap_count"] > 0
                 else float("nan")
             )
 
-            logger.write(
+            episode_logger.write(
                 {
                     "episode": episode_idx,
-                    "reward": totals["reward"],
-                    "delivery": totals[
-                        "delivery"
+                    "global_round": global_round,
+                    "global_real_slot": global_real_slot,
+                    "move_prob": float(env.cfg.move_prob),
+                    "episode_formulation_reward": episode_totals[
+                        "reward"
                     ],
-                    "quality": totals["quality"],
-                    "quality_degradation":
-                        totals[
-                            "quality_degradation"
-                        ],
-                    "stall": totals["stall"],
-                    "outage_slots":
-                        totals[
-                            "outage_slots"
-                        ],
-                    "prediction_gap_mean":
-                        gap_mean,
+                    "episode_delivery": episode_totals["delivery"],
+                    "episode_quality": episode_totals["quality"],
+                    "episode_quality_degradation": episode_totals[
+                        "quality_degradation"
+                    ],
+                    "episode_stall": episode_totals["stall"],
+                    "episode_outage_slots": episode_totals[
+                        "outage_slots"
+                    ],
+                    "episode_min_soc": episode_totals["min_soc"],
+                    "episode_forecast_seconds": episode_totals[
+                        "forecast_seconds"
+                    ],
+                    "episode_real_seconds": episode_totals[
+                        "real_seconds"
+                    ],
+                    "episode_update_seconds": episode_totals[
+                        "update_seconds"
+                    ],
+                    "episode_prediction_gap_mean": prediction_gap_mean,
                 }
             )
 
             print(
-                "[EVAL] "
-                f"ep={episode_idx}/"
-                f"{train_cfg.eval_episodes} "
-                f"reward={totals['reward']:.4f} "
-                f"delivery="
-                f"{totals['delivery']:.1f} "
-                f"stall={totals['stall']:.1f} "
-                f"gap={gap_mean:.4f}",
+                "[EPISODE] "
+                f"ep={episode_idx}/{train_cfg.num_episodes} "
+                f"reward={episode_totals['reward']:.4f} "
+                f"delivery={episode_totals['delivery']:.1f} "
+                f"stall={episode_totals['stall']:.1f} "
+                f"gap_mean={prediction_gap_mean:.4f} "
+                f"outage_slots="
+                f"{episode_totals['outage_slots']:.0f}",
                 flush=True,
             )
+
+            if (
+                int(train_cfg.save_every_episodes) > 0
+                and episode_idx
+                % int(train_cfg.save_every_episodes)
+                == 0
+            ):
+                checkpoint_path = (
+                    run_dir
+                    / "checkpoints"
+                    / f"{checkpoint_stem}_ep{episode_idx}.pt"
+                )
+                agent.save(
+                    checkpoint_path,
+                    extra={
+                        "episode": episode_idx,
+                        "global_round": global_round,
+                        "global_real_slot": global_real_slot,
+                        "update_idx": update_idx,
+                        "slow_decision_mode": (
+                            train_cfg.slow_decision_mode
+                        ),
+                        "env_config": (
+                            env_cfg.as_dict()
+                            if hasattr(env_cfg, "as_dict")
+                            else asdict(env_cfg)
+                        ),
+                        "train_config": train_cfg.to_dict(),
+                        "ppo_config": asdict(ppo_cfg),
+                    },
+                )
+                print(f"[SAVE] {checkpoint_path}", flush=True)
+
+            if (
+                int(train_cfg.plot_every_episodes) > 0
+                and episode_idx
+                % int(train_cfg.plot_every_episodes)
+                == 0
+            ):
+                save_training_plots(
+                    run_dir,
+                    smooth_window=int(
+                        train_cfg.plot_smooth_window
+                    ),
+                )
 
     finally:
         if forecast_pool is not None:
@@ -2581,7 +2729,11 @@ def train(train_cfg: FastTrainConfig) -> None:
     if len(agent.buffer) != 0:
         raise RuntimeError("Joint training ended with a nonempty PPO buffer.")
 
-    final_path = run_dir / "checkpoints" / "fast_ppo_joint_final.pt"
+    final_path = (
+        run_dir
+        / "checkpoints"
+        / f"{checkpoint_stem}_final.pt"
+    )
     agent.save(
         final_path,
         extra={

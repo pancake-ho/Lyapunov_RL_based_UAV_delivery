@@ -43,6 +43,11 @@ RUNTIME_TMPDIR=""
 # mixing with a previous run that used the same config.run_name.
 ALLOW_EXISTING_RUN_DIR="${ALLOW_EXISTING_RUN_DIR:-0}"
 
+# Formulation requires Slow-DPP candidate costs to be evaluated with a
+# pretrained Fast-PPO policy. Pass an absolute path or a path relative to
+# PROJECT_ROOT when submitting the job.
+JOINT_FAST_CHECKPOINT="${JOINT_FAST_CHECKPOINT:-}"
+
 # ======================================================================
 # Cleanup and signal handling
 # ======================================================================
@@ -86,6 +91,15 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
 fi
 
 cd "${PROJECT_ROOT}"
+
+if [[ -z "${JOINT_FAST_CHECKPOINT}" ]]; then
+    echo "[ERROR] JOINT_FAST_CHECKPOINT is required for Slow-DPP." >&2
+    echo "        Example:" >&2
+    echo "        export JOINT_FAST_CHECKPOINT=/absolute/path/to/fast_ppo.pt" >&2
+    echo "        sbatch run/joint_train.sh" >&2
+    exit 2
+fi
+export JOINT_FAST_CHECKPOINT
 
 CURRENT_BRANCH="$(git branch --show-current)"
 if [[ "${CURRENT_BRANCH}" != "${EXPECTED_BRANCH}" ]]; then
@@ -131,12 +145,13 @@ export TMPDIR="${RUNTIME_TMPDIR}"
 export PYTHONUNBUFFERED=1
 export PYTHONHASHSEED=2026
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export FAST_PPO_PHASE=joint_dpp
 
 # deterministic_torch=True can require a deterministic cuBLAS workspace.
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-# The code already parallelizes forecast Env.step() with ThreadPoolExecutor.
-# Prevent nested BLAS/OpenMP thread teams inside each forecast worker.
+# Forecast Env.step() runs in persistent worker processes. Prevent nested
+# BLAS/OpenMP thread teams inside each worker.
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -257,20 +272,11 @@ if cfg.slow_decision_mode != "dpp":
         "slow_decision_mode must be 'dpp' for the final joint run, "
         f"got {cfg.slow_decision_mode!r}"
     )
-checkpoint = None
-checkpoint_strict_load = False
-initialization = "from_scratch"
-
-if cfg.checkpoint is not None:
-    checkpoint = fast_train._resolve_checkpoint(cfg.checkpoint)
-
-    if checkpoint is None or not checkpoint.is_file():
-        raise SystemExit(
-            f"Checkpoint does not exist: {checkpoint}"
-        )
-
-    checkpoint_strict_load = True
-    initialization = "checkpoint"
+checkpoint = fast_train._resolve_checkpoint(cfg.checkpoint)
+if checkpoint is None or not checkpoint.is_file():
+    raise SystemExit(f"Checkpoint does not exist: {checkpoint}")
+checkpoint_strict_load = True
+initialization = "pretrained_checkpoint"
 if workers < 1:
     raise SystemExit("dpp_forecast_workers must be at least 1.")
 if workers > max(1, allocated_cpus - 2):

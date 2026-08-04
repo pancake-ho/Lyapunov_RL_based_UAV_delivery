@@ -21,6 +21,10 @@ hash -r
 
 cd "${PROJECT_ROOT}"
 
+# Stage 1: formulation-aligned Fast-PPO pretraining under feasible random
+# slow actions. The resulting checkpoint is supplied to joint_train.sh.
+export FAST_PPO_PHASE=pretrain
+
 echo "=================================================="
 echo "[ENVIRONMENT CHECK]"
 echo "=================================================="
@@ -42,6 +46,7 @@ fi
 
 echo "=================================================="
 echo "[FAST PPO TRAIN]"
+echo "Phase     : ${FAST_PPO_PHASE}"
 echo "Start time: $(date)"
 echo "=================================================="
 

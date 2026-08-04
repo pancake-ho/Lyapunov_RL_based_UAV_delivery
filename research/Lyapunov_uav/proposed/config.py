@@ -97,7 +97,7 @@ class BatteryConfig:
     p_0: float = 580.65 # blade profile power [W]
     p_i: float = 790.67 # induced power [W]
 
-    tx_energy_coeff: float = 100.0
+    tx_energy_coeff: float = 1.0
 
     # 충전 모델
     charging_rate: float = 5000.0 # Charging power [W]
@@ -131,8 +131,10 @@ class BatteryConfig:
                 f"p_0와 p_i는 0 이상이어야 합니다. "
                 f"현재 p_0={self.p_0}, p_i={self.p_i}"
             )
-        if self.tx_energy_coeff <= 0.0:
-            raise ValueError("tx_energy_coeff는 양수여야 합니다.")
+        if abs(float(self.tx_energy_coeff) - 1.0) > 1e-12:
+            raise ValueError(
+                "현재 formulation에서는 tx_energy_coeff가 1.0이어야 합니다."
+            )
         if self.charging_rate < 0.0:
             raise ValueError("charging_rate는 0 이상이어야 합니다.")
         if self.eta_c <= 0.0:

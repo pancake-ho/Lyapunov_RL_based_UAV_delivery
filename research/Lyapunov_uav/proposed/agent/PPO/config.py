@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -31,17 +32,23 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 상대경로면 proposed/ 아래에 생성된다.
     output_root: str = "joint"
-    run_name: Optional[str] = "joint_dpp_fastppo_gpuopt_seed2026_v1"
+    run_name: Optional[str] = "joint_dpp_fastppo_formulation_aligned_seed2026_v2"
 
     # None이면 fast_train.py에서 자동 이름 생성
-    checkpoint: Optional[str] = None
+    # Joint DPP는 현재 기준 학습이 완료된 fast policy로 candidate expected cost 평가.
+    # cluster 실행 시 JOINT_FAST_CHECKPOINT에 trusted checkpoint 경로를 지정.
+    checkpoint: Optional[str] = field(
+        default_factory=lambda: (
+            os.environ.get("JOINT_FAST_CHECKPOINT") or None
+        )
+    )
 
     # resume=True이면 model/optimizer/normalizer를 모두 복원한다.
     # dpp warm start에서는 보통 False로 두고 model/normalizer만 가져온다.
     resume: bool = False
     legacy_transfer: bool = False
     load_optimizer_on_warm_start: bool = False
-    require_pretrained_fast_for_dpp: bool = False
+    require_pretrained_fast_for_dpp: bool = True
 
     # ------------------------------------------------------------------
     # 3) episode / rollout
@@ -328,4 +335,30 @@ class FastTrainConfig:
 
 
 def get_fast_ppo_config() -> FastTrainConfig:
-    return FastTrainConfig()
+    phase = os.environ.get(
+        "FAST_PPO_PHASE",
+        "joint_dpp",
+    ).strip().lower()
+
+    if phase == "joint_dpp":
+        return FastTrainConfig()
+
+    if phase == "pretrain":
+        return FastTrainConfig(
+            output_root="fast",
+            run_name=(
+                "fast_pretrain_formulation_aligned_seed2026_v2"
+            ),
+            checkpoint=None,
+            resume=False,
+            legacy_transfer=False,
+            load_optimizer_on_warm_start=False,
+            require_pretrained_fast_for_dpp=False,
+            slow_decision_mode="random",
+            dpp_forecast_workers=0,
+        )
+
+    raise ValueError(
+        "FAST_PPO_PHASE must be 'pretrain' or 'joint_dpp': "
+        f"got {phase!r}."
+    )
