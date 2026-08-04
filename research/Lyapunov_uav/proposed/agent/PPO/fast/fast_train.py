@@ -10,6 +10,7 @@ import math
 import multiprocessing as mp
 import os
 import pickle
+import random
 import sys
 import time
 import types
@@ -75,7 +76,9 @@ from agent.PPO.fast.fast_action import FastActionCodec
 # ======================================================================
 # Configuration / common utilities
 # ======================================================================
-def build_env_config() -> EnvConfig:
+def build_env_config(
+    train_cfg: Optional[FastTrainConfig] = None,
+) -> EnvConfig:
     """
     System/environment parameter source remains proposed/config.py.
 
@@ -84,6 +87,8 @@ def build_env_config() -> EnvConfig:
     separate configuration file.
     """
     cfg = EnvConfig()
+    if train_cfg is not None:
+        cfg.seed = int(train_cfg.seed)
     cfg.battery.target_service_slots_per_round = int(cfg.slow_T)
     return cfg
 
@@ -171,11 +176,27 @@ def save_configs(
         run_dir / "env_config.json",
     )
     save_json(asdict(ppo_cfg), run_dir / "ppo_config.json")
-    initialization = (
-        "checkpoint_initialized"
-        if train_cfg.checkpoint is not None
-        else "from_scratch"
-    )
+    if train_cfg.resume:
+        initialization = "resumed_checkpoint"
+    elif train_cfg.checkpoint is not None:
+        initialization = "pretrained_checkpoint"
+    else:
+        initialization = "from_scratch"
+
+    if train_cfg.slow_decision_mode == "random":
+        algorithm = (
+            "Fast-PPO pretraining under feasible random slow actions"
+        )
+        slow_solver = "random feasible baseline"
+    else:
+        algorithm = (
+            "round-wise Slow-DPP forecast using the current frozen "
+            "Fast-PPO policy -> one real Fast round -> one PPO update"
+        )
+        slow_solver = (
+            "parallel Jacobi complete-action region-coordinate "
+            "minimization with exact full-round acceptance"
+        )
 
     save_json(
         {
@@ -188,6 +209,9 @@ def save_configs(
                 "%Y-%m-%d %H:%M:%S"
             ),
             "initialization": initialization,
+            "phase": train_cfg.phase,
+            "segment_id": int(train_cfg.segment_id),
+            "resume": bool(train_cfg.resume),
             "checkpoint": (
                 None
                 if train_cfg.checkpoint is None
@@ -197,17 +221,8 @@ def save_configs(
                     )
                 )
             ),
-            "algorithm": (
-                "round-wise Slow-DPP forecast "
-                "using the current frozen Fast-PPO "
-                "policy -> one real Fast round -> "
-                "one PPO update"
-            ),
-            "slow_solver": (
-                "parallel Jacobi complete-action "
-                "region-coordinate minimization "
-                "with exact full-round acceptance"
-            ),
+            "algorithm": algorithm,
+            "slow_solver": slow_solver,
             "global_optimum_guaranteed": False,
         },
         run_dir / "run_info.json",
@@ -441,6 +456,7 @@ class SlowSelectionResult:
     policy_seconds: float
     env_seconds: float
     mean_gpu_batch: float
+    forecast_trial_steps: int
 
 
 def _region_candidates(
@@ -1931,6 +1947,11 @@ def select_slow_action_dpp(
             evaluator.env_seconds
         ),
         mean_gpu_batch=mean_batch,
+        forecast_trial_steps=int(
+            len(evaluator.cache)
+            * int(train_cfg.dpp_forecast_scenarios)
+            * int(train_cfg.dpp_forecast_horizon)
+        ),
     )
 
 # ======================================================================
@@ -1945,6 +1966,20 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
     outage = np.asarray(info.get("outage", []), dtype=np.float64)
     charging = np.asarray(info.get("charging_state", []), dtype=np.float64)
 
+    scheduled = np.zeros(stall.shape, dtype=bool)
+    rsu_scheduling = np.asarray(
+        info.get("rsu_scheduling", []), dtype=np.int32
+    )
+    uav_scheduling = np.asarray(
+        info.get("uav_scheduling", []), dtype=np.int32
+    )
+    if stall.ndim == 1:
+        if rsu_scheduling.ndim == 2 and rsu_scheduling.shape[1] == stall.size:
+            scheduled |= np.any(rsu_scheduling > 0, axis=0)
+        if uav_scheduling.ndim == 2 and uav_scheduling.shape[1] == stall.size:
+            scheduled |= np.any(uav_scheduling > 0, axis=0)
+    unscheduled = ~scheduled
+
     return {
         "delivery": float(fast.get("sum_delivery", 0.0)),
         "quality": float(fast.get("sum_quality", 0.0)),
@@ -1954,6 +1989,14 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
         "consumed_soc": float(fast.get("sum_consumed_soc", 0.0)),
         "charged_soc": float(fast.get("sum_charged_soc", 0.0)),
         "stall": float(np.sum(stall)) if stall.size else 0.0,
+        "scheduled_stall": (
+            float(np.sum(stall[scheduled])) if stall.size else 0.0
+        ),
+        "unscheduled_stall": (
+            float(np.sum(stall[unscheduled])) if stall.size else 0.0
+        ),
+        "scheduled_user_slots": float(np.sum(scheduled)),
+        "unscheduled_user_slots": float(np.sum(unscheduled)),
         "min_soc": float(np.min(next_e)) if next_e.size else 0.0,
         "outage_slots": float(np.sum(outage)) if outage.size else 0.0,
         "charging_slots": (
@@ -1972,6 +2015,58 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
             fast.get("quality_degradation_term", 0.0)
         ),
     }
+
+
+def _count_executed_layers(
+    env_action: Dict[str, Any],
+    max_layer: int,
+) -> np.ndarray:
+    counts = np.zeros(int(max_layer), dtype=np.int64)
+    for prefix in ("rsu", "uav"):
+        chunks = np.asarray(env_action[f"{prefix}_chunks"], dtype=np.int32)
+        layers = np.asarray(env_action[f"{prefix}_layers"], dtype=np.int32)
+        active_layers = layers[chunks > 0]
+        for layer in range(1, int(max_layer) + 1):
+            counts[layer - 1] += int(np.sum(active_layers == layer))
+    return counts
+
+
+def _finalize_round_metrics(
+    totals: Dict[str, float],
+    layer_counts: np.ndarray,
+) -> None:
+    delivery = float(totals.get("delivery", 0.0))
+    totals["quality_per_chunk"] = (
+        float(totals.get("quality", 0.0)) / delivery
+        if delivery > 0.0
+        else 0.0
+    )
+    totals["quality_degradation_per_chunk"] = (
+        float(totals.get("quality_degradation", 0.0)) / delivery
+        if delivery > 0.0
+        else 0.0
+    )
+    scheduled_slots = float(totals.get("scheduled_user_slots", 0.0))
+    unscheduled_slots = float(totals.get("unscheduled_user_slots", 0.0))
+    totals["scheduled_stall_rate"] = (
+        float(totals.get("scheduled_stall", 0.0)) / scheduled_slots
+        if scheduled_slots > 0.0
+        else 0.0
+    )
+    totals["unscheduled_stall_rate"] = (
+        float(totals.get("unscheduled_stall", 0.0)) / unscheduled_slots
+        if unscheduled_slots > 0.0
+        else 0.0
+    )
+
+    active_layer_actions = int(np.sum(layer_counts))
+    totals["active_layer_actions"] = float(active_layer_actions)
+    for layer, count in enumerate(layer_counts, start=1):
+        totals[f"layer_{layer}_ratio"] = (
+            float(count) / float(active_layer_actions)
+            if active_layer_actions > 0
+            else 0.0
+        )
 
 
 def _read_scalar_csv(path: Path) -> Dict[str, list[float]]:
@@ -2036,17 +2131,20 @@ def _initialize_agent(
         )
 
     checkpoint = _resolve_checkpoint(train_cfg.checkpoint)
+    loaded_checkpoint: Optional[Dict[str, Any]] = None
     if train_cfg.legacy_transfer:
         if checkpoint is None:
             raise ValueError("legacy_transfer requires checkpoint.")
-        agent.load_legacy_transfer(checkpoint)
+        loaded_checkpoint = agent.load_legacy_transfer(checkpoint)
     elif train_cfg.resume:
         if checkpoint is None:
             raise ValueError("resume requires checkpoint.")
-        agent.load(checkpoint, strict=True, load_optimizer=True)
+        loaded_checkpoint = agent.load(
+            checkpoint, strict=True, load_optimizer=True
+        )
     elif checkpoint is not None:
         # Pretrained initialization followed by online round-wise fine-tuning.
-        agent.load(
+        loaded_checkpoint = agent.load(
             checkpoint,
             strict=True,
             load_optimizer=bool(train_cfg.load_optimizer_on_warm_start),
@@ -2057,7 +2155,113 @@ def _initialize_agent(
     ):
         raise ValueError("DPP mode requires a pretrained Fast-PPO checkpoint.")
 
+    setattr(agent, "_loaded_checkpoint", loaded_checkpoint)
     return agent
+
+
+def _capture_rng_state(
+    env: Env,
+    slow_rng: np.random.Generator,
+) -> Dict[str, Any]:
+    return {
+        "python_random_state": random.getstate(),
+        "numpy_random_state": np.random.get_state(),
+        "torch_cpu_rng_state": torch.get_rng_state(),
+        "torch_cuda_rng_state_all": (
+            torch.cuda.get_rng_state_all()
+            if torch.cuda.is_available()
+            else []
+        ),
+        "env_rng_state": copy.deepcopy(env.rng.bit_generator.state),
+        "slow_rng_state": copy.deepcopy(slow_rng.bit_generator.state),
+        "env_episode": int(env.episode),
+    }
+
+
+def _restore_resume_state(
+    agent: FastPPOAgent,
+    env: Env,
+    slow_rng: np.random.Generator,
+    train_cfg: FastTrainConfig,
+) -> Tuple[int, int, int, int]:
+    checkpoint = getattr(agent, "_loaded_checkpoint", None)
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("Resume checkpoint payload was not retained.")
+    extra = checkpoint.get("extra", {})
+    required = {
+        "episode",
+        "global_round",
+        "global_real_slot",
+        "update_idx",
+        "rng_state",
+    }
+    missing = sorted(required.difference(extra))
+    if missing:
+        raise RuntimeError(
+            "Resume checkpoint is missing required fields: "
+            + ", ".join(missing)
+        )
+    if extra.get("slow_decision_mode") != train_cfg.slow_decision_mode:
+        raise RuntimeError(
+            "Resume checkpoint slow_decision_mode mismatch: "
+            f"checkpoint={extra.get('slow_decision_mode')!r}, "
+            f"requested={train_cfg.slow_decision_mode!r}."
+        )
+
+    rng_state = extra["rng_state"]
+    random.setstate(rng_state["python_random_state"])
+    np.random.set_state(rng_state["numpy_random_state"])
+    torch.set_rng_state(rng_state["torch_cpu_rng_state"])
+    cuda_states = rng_state.get("torch_cuda_rng_state_all", [])
+    if cuda_states:
+        if len(cuda_states) != torch.cuda.device_count():
+            raise RuntimeError(
+                "CUDA device count differs from the resume checkpoint."
+            )
+        torch.cuda.set_rng_state_all(cuda_states)
+    env.rng.bit_generator.state = copy.deepcopy(rng_state["env_rng_state"])
+    slow_rng.bit_generator.state = copy.deepcopy(
+        rng_state["slow_rng_state"]
+    )
+    env.episode = int(rng_state.get("env_episode", extra["episode"]))
+
+    return (
+        int(extra["episode"]),
+        int(extra["global_round"]),
+        int(extra["global_real_slot"]),
+        int(extra["update_idx"]),
+    )
+
+
+def _training_checkpoint_extra(
+    train_cfg: FastTrainConfig,
+    env_cfg: EnvConfig,
+    ppo_cfg: AgentPPOConfig,
+    env: Env,
+    slow_rng: np.random.Generator,
+    episode: int,
+    global_round: int,
+    global_real_slot: int,
+    update_idx: int,
+) -> Dict[str, Any]:
+    return {
+        "episode": int(episode),
+        "global_round": int(global_round),
+        "global_real_slot": int(global_real_slot),
+        "update_idx": int(update_idx),
+        "phase": train_cfg.phase,
+        "segment_id": int(train_cfg.segment_id),
+        "seed": int(train_cfg.seed),
+        "slow_decision_mode": train_cfg.slow_decision_mode,
+        "rng_state": _capture_rng_state(env, slow_rng),
+        "env_config": (
+            env_cfg.as_dict()
+            if hasattr(env_cfg, "as_dict")
+            else asdict(env_cfg)
+        ),
+        "train_config": train_cfg.to_dict(),
+        "ppo_config": asdict(ppo_cfg),
+    }
 
 
 # ======================================================================
@@ -2114,6 +2318,12 @@ def _select_and_apply_slow_action(
                 selected.env_seconds,
             "forecast_mean_gpu_batch":
                 selected.mean_gpu_batch,
+            "forecast_trial_steps": float(
+                selected.forecast_trial_steps
+            ),
+            "forecast_trial_steps_per_second": float(
+                selected.forecast_trial_steps
+            ) / max(float(selected.forecast_seconds), 1e-12),
             "num_rsu_links": float(
                 np.sum(
                     selected.action[
@@ -2157,6 +2367,8 @@ def _select_and_apply_slow_action(
         "forecast_policy_seconds": 0.0,
         "forecast_env_seconds": 0.0,
         "forecast_mean_gpu_batch": 0.0,
+        "forecast_trial_steps": 0.0,
+        "forecast_trial_steps_per_second": 0.0,
         "num_rsu_links": float(
             np.sum(action["rsu_scheduling"])
         ),
@@ -2194,6 +2406,10 @@ def _execute_real_round_train(
         "quality": 0.0,
         "quality_degradation": 0.0,
         "stall": 0.0,
+        "scheduled_stall": 0.0,
+        "unscheduled_stall": 0.0,
+        "scheduled_user_slots": 0.0,
+        "unscheduled_user_slots": 0.0,
         "consumed_soc": 0.0,
         "charged_soc": 0.0,
         "outage_slots": 0.0,
@@ -2208,6 +2424,7 @@ def _execute_real_round_train(
 
     real_start = time.perf_counter()
     agent.model.train()
+    layer_counts = np.zeros(int(env.cfg.layer), dtype=np.int64)
 
     for slot_idx in range(int(env.slow_T)):
         # The normalizer and model are fixed for the whole round.
@@ -2251,6 +2468,9 @@ def _execute_real_round_train(
         )
 
         metrics = extract_info_metrics(info)
+        layer_counts += _count_executed_layers(
+            selected["env_action"], int(env.cfg.layer)
+        )
         totals["formulation_reward"] += formulation_reward
         totals["round_fast_cost"] += slot_cost
         for key in (
@@ -2258,6 +2478,10 @@ def _execute_real_round_train(
             "quality",
             "quality_degradation",
             "stall",
+            "scheduled_stall",
+            "unscheduled_stall",
+            "scheduled_user_slots",
+            "unscheduled_user_slots",
             "consumed_soc",
             "charged_soc",
             "outage_slots",
@@ -2319,6 +2543,8 @@ def _execute_real_round_train(
     if not np.isfinite(totals["min_soc"]):
         totals["min_soc"] = 0.0
 
+    _finalize_round_metrics(totals, layer_counts)
+
     totals["hiring_cost"] = _hiring_cost(
         env,
         {
@@ -2350,10 +2576,18 @@ def _execute_real_round_eval(
         "quality": 0.0,
         "quality_degradation": 0.0,
         "stall": 0.0,
+        "scheduled_stall": 0.0,
+        "unscheduled_stall": 0.0,
+        "scheduled_user_slots": 0.0,
+        "unscheduled_user_slots": 0.0,
+        "consumed_soc": 0.0,
+        "charged_soc": 0.0,
+        "charging_slots": 0.0,
         "outage_slots": 0.0,
         "min_soc": float("inf"),
     }
     agent.model.eval()
+    layer_counts = np.zeros(int(env.cfg.layer), dtype=np.int64)
 
     for slot_idx in range(int(env.slow_T)):
         selected = agent.select_action(
@@ -2376,6 +2610,9 @@ def _execute_real_round_eval(
             env_cfg=env.cfg,
         )
         metrics = extract_info_metrics(info)
+        layer_counts += _count_executed_layers(
+            selected["env_action"], int(env.cfg.layer)
+        )
         totals["formulation_reward"] += reward
         totals["round_fast_cost"] += cost
         for key in (
@@ -2383,6 +2620,13 @@ def _execute_real_round_eval(
             "quality",
             "quality_degradation",
             "stall",
+            "scheduled_stall",
+            "unscheduled_stall",
+            "scheduled_user_slots",
+            "unscheduled_user_slots",
+            "consumed_soc",
+            "charged_soc",
+            "charging_slots",
             "outage_slots",
         ):
             totals[key] += metrics[key]
@@ -2402,6 +2646,7 @@ def _execute_real_round_eval(
     )
     if not np.isfinite(totals["min_soc"]):
         totals["min_soc"] = 0.0
+    _finalize_round_metrics(totals, layer_counts)
     return obs, totals
 
 
@@ -2413,7 +2658,7 @@ def train(train_cfg: FastTrainConfig) -> None:
         int(train_cfg.seed),
         deterministic=bool(train_cfg.deterministic_torch),
     )
-    env_cfg = build_env_config()
+    env_cfg = build_env_config(train_cfg)
     _assert_joint_config(train_cfg, env_cfg)
     ppo_cfg = build_agent_ppo_config(train_cfg)
 
@@ -2441,6 +2686,21 @@ def train(train_cfg: FastTrainConfig) -> None:
     update_logger = ScalarLogger(run_dir / "logs" / "updates.csv")
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 10_007)
 
+    completed_episode = 0
+    global_real_slot = 0
+    global_round = 0
+    update_idx = 0
+    if train_cfg.resume:
+        (
+            completed_episode,
+            global_round,
+            global_real_slot,
+            update_idx,
+        ) = _restore_resume_state(agent, env, slow_rng, train_cfg)
+
+    segment_start_episode = completed_episode + 1
+    segment_end_episode = completed_episode + int(train_cfg.num_episodes)
+
     print("=" * 100, flush=True)
     phase_label = (
         "FAST-PPO PRETRAIN"
@@ -2450,7 +2710,7 @@ def train(train_cfg: FastTrainConfig) -> None:
     print(f"[{phase_label} START]", flush=True)
     print(
         "branch_basis   : feat/no-hrl "
-        "(exact commit is recorded by run/joint_train.sh)",
+        "(exact commit is recorded by the Slurm wrapper)",
         flush=True,
     )
     print(f"run_dir        : {run_dir}", flush=True)
@@ -2459,12 +2719,13 @@ def train(train_cfg: FastTrainConfig) -> None:
     print(f"slow_T         : {env_cfg.slow_T}", flush=True)
     print(f"rollout_slots  : {ppo_cfg.rollout_steps}", flush=True)
     print(f"checkpoint     : {_resolve_checkpoint(train_cfg.checkpoint)}", flush=True)
+    print(f"resume         : {train_cfg.resume}", flush=True)
+    print(
+        f"episode_range  : {segment_start_episode}..{segment_end_episode}",
+        flush=True,
+    )
     print(f"reset_info     : {reset_info}", flush=True)
     print("=" * 100, flush=True)
-
-    global_real_slot = 0
-    global_round = 0
-    update_idx = 0
 
     forecast_pool: Optional[
         _PersistentShadowProcessPool
@@ -2483,7 +2744,10 @@ def train(train_cfg: FastTrainConfig) -> None:
         )
 
     try:
-        for episode_idx in range(1, int(train_cfg.num_episodes) + 1):
+        for episode_idx in range(
+            segment_start_episode,
+            segment_end_episode + 1,
+        ):
             env.cfg.move_prob = get_episode_move_prob(
                 train_cfg,
                 episode_idx,
@@ -2492,11 +2756,20 @@ def train(train_cfg: FastTrainConfig) -> None:
 
             episode_totals = {
                 "reward": 0.0,
+                "realized_round_cost": 0.0,
+                "hiring_cost": 0.0,
                 "delivery": 0.0,
                 "quality": 0.0,
                 "quality_degradation": 0.0,
                 "stall": 0.0,
+                "scheduled_stall": 0.0,
+                "unscheduled_stall": 0.0,
+                "scheduled_user_slots": 0.0,
+                "unscheduled_user_slots": 0.0,
+                "consumed_soc": 0.0,
+                "charged_soc": 0.0,
                 "outage_slots": 0.0,
+                "forecast_trial_steps": 0.0,
                 "forecast_seconds": 0.0,
                 "real_seconds": 0.0,
                 "update_seconds": 0.0,
@@ -2504,6 +2777,9 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "prediction_gap_count": 0,
                 "min_soc": float("inf"),
             }
+            episode_layer_counts = np.zeros(
+                int(env.cfg.layer), dtype=np.float64
+            )
 
             for round_in_episode in range(
                 1,
@@ -2552,6 +2828,10 @@ def train(train_cfg: FastTrainConfig) -> None:
                 round_row = {
                     "global_round": global_round,
                     "episode": episode_idx,
+                    "segment_id": int(train_cfg.segment_id),
+                    "segment_episode": (
+                        episode_idx - segment_start_episode + 1
+                    ),
                     "round_in_episode": round_in_episode,
                     "policy_version": policy_version,
                     "global_real_slot": global_real_slot,
@@ -2574,14 +2854,30 @@ def train(train_cfg: FastTrainConfig) -> None:
                 episode_totals["reward"] += realized[
                     "formulation_reward"
                 ]
+                episode_totals["realized_round_cost"] += realized[
+                    "realized_round_cost"
+                ]
+                episode_totals["hiring_cost"] += realized["hiring_cost"]
                 episode_totals["delivery"] += realized["delivery"]
                 episode_totals["quality"] += realized["quality"]
                 episode_totals["quality_degradation"] += realized[
                     "quality_degradation"
                 ]
                 episode_totals["stall"] += realized["stall"]
+                for key in (
+                    "scheduled_stall",
+                    "unscheduled_stall",
+                    "scheduled_user_slots",
+                    "unscheduled_user_slots",
+                    "consumed_soc",
+                    "charged_soc",
+                ):
+                    episode_totals[key] += realized[key]
                 episode_totals["outage_slots"] += realized[
                     "outage_slots"
+                ]
+                episode_totals["forecast_trial_steps"] += slow_info[
+                    "forecast_trial_steps"
                 ]
                 episode_totals["forecast_seconds"] += slow_info[
                     "forecast_seconds"
@@ -2596,6 +2892,11 @@ def train(train_cfg: FastTrainConfig) -> None:
                     episode_totals["min_soc"],
                     realized["min_soc"],
                 )
+                active_layers = float(realized["active_layer_actions"])
+                for layer in range(1, int(env.cfg.layer) + 1):
+                    episode_layer_counts[layer - 1] += (
+                        active_layers * realized[f"layer_{layer}_ratio"]
+                    )
 
                 if np.isfinite(prediction_gap):
                     episode_totals["prediction_gap_sum"] += (
@@ -2604,8 +2905,13 @@ def train(train_cfg: FastTrainConfig) -> None:
                     episode_totals["prediction_gap_count"] += 1
 
                 print(
-                    "[JOINT ROUND] "
-                    f"ep={episode_idx}/{train_cfg.num_episodes} "
+                    (
+                        "[FAST PRETRAIN ROUND] "
+                        if train_cfg.slow_decision_mode == "random"
+                        else "[JOINT ROUND] "
+                    )
+                    +
+                    f"ep={episode_idx}/{segment_end_episode} "
                     f"r={round_in_episode}/"
                     f"{train_cfg.rounds_per_episode} "
                     f"policy_v={policy_version} "
@@ -2625,6 +2931,12 @@ def train(train_cfg: FastTrainConfig) -> None:
 
             if not np.isfinite(episode_totals["min_soc"]):
                 episode_totals["min_soc"] = 0.0
+            _finalize_round_metrics(
+                episode_totals, episode_layer_counts
+            )
+            episode_totals["forecast_trial_steps_per_second"] = float(
+                episode_totals["forecast_trial_steps"]
+            ) / max(float(episode_totals["forecast_seconds"]), 1e-12)
 
             prediction_gap_mean = (
                 episode_totals["prediction_gap_sum"]
@@ -2636,11 +2948,21 @@ def train(train_cfg: FastTrainConfig) -> None:
             episode_logger.write(
                 {
                     "episode": episode_idx,
+                    "segment_id": int(train_cfg.segment_id),
+                    "segment_episode": (
+                        episode_idx - segment_start_episode + 1
+                    ),
                     "global_round": global_round,
                     "global_real_slot": global_real_slot,
                     "move_prob": float(env.cfg.move_prob),
                     "episode_formulation_reward": episode_totals[
                         "reward"
+                    ],
+                    "episode_realized_round_cost": episode_totals[
+                        "realized_round_cost"
+                    ],
+                    "episode_hiring_cost": episode_totals[
+                        "hiring_cost"
                     ],
                     "episode_delivery": episode_totals["delivery"],
                     "episode_quality": episode_totals["quality"],
@@ -2648,6 +2970,30 @@ def train(train_cfg: FastTrainConfig) -> None:
                         "quality_degradation"
                     ],
                     "episode_stall": episode_totals["stall"],
+                    "episode_scheduled_stall": episode_totals[
+                        "scheduled_stall"
+                    ],
+                    "episode_unscheduled_stall": episode_totals[
+                        "unscheduled_stall"
+                    ],
+                    "episode_scheduled_stall_rate": episode_totals[
+                        "scheduled_stall_rate"
+                    ],
+                    "episode_unscheduled_stall_rate": episode_totals[
+                        "unscheduled_stall_rate"
+                    ],
+                    "episode_quality_per_chunk": episode_totals[
+                        "quality_per_chunk"
+                    ],
+                    "episode_quality_degradation_per_chunk": episode_totals[
+                        "quality_degradation_per_chunk"
+                    ],
+                    "episode_consumed_soc": episode_totals[
+                        "consumed_soc"
+                    ],
+                    "episode_charged_soc": episode_totals[
+                        "charged_soc"
+                    ],
                     "episode_outage_slots": episode_totals[
                         "outage_slots"
                     ],
@@ -2662,12 +3008,26 @@ def train(train_cfg: FastTrainConfig) -> None:
                         "update_seconds"
                     ],
                     "episode_prediction_gap_mean": prediction_gap_mean,
+                    "episode_forecast_trial_steps": episode_totals[
+                        "forecast_trial_steps"
+                    ],
+                    "episode_forecast_trial_steps_per_second": (
+                        episode_totals[
+                            "forecast_trial_steps_per_second"
+                        ]
+                    ),
+                    **{
+                        f"episode_layer_{layer}_ratio": episode_totals[
+                            f"layer_{layer}_ratio"
+                        ]
+                        for layer in range(1, int(env.cfg.layer) + 1)
+                    },
                 }
             )
 
             print(
                 "[EPISODE] "
-                f"ep={episode_idx}/{train_cfg.num_episodes} "
+                f"ep={episode_idx}/{segment_end_episode} "
                 f"reward={episode_totals['reward']:.4f} "
                 f"delivery={episode_totals['delivery']:.1f} "
                 f"stall={episode_totals['stall']:.1f} "
@@ -2690,24 +3050,41 @@ def train(train_cfg: FastTrainConfig) -> None:
                 )
                 agent.save(
                     checkpoint_path,
-                    extra={
-                        "episode": episode_idx,
-                        "global_round": global_round,
-                        "global_real_slot": global_real_slot,
-                        "update_idx": update_idx,
-                        "slow_decision_mode": (
-                            train_cfg.slow_decision_mode
-                        ),
-                        "env_config": (
-                            env_cfg.as_dict()
-                            if hasattr(env_cfg, "as_dict")
-                            else asdict(env_cfg)
-                        ),
-                        "train_config": train_cfg.to_dict(),
-                        "ppo_config": asdict(ppo_cfg),
-                    },
+                    extra=_training_checkpoint_extra(
+                        train_cfg=train_cfg,
+                        env_cfg=env_cfg,
+                        ppo_cfg=ppo_cfg,
+                        env=env,
+                        slow_rng=slow_rng,
+                        episode=episode_idx,
+                        global_round=global_round,
+                        global_real_slot=global_real_slot,
+                        update_idx=update_idx,
+                    ),
                 )
                 print(f"[SAVE] {checkpoint_path}", flush=True)
+
+            if bool(train_cfg.save_latest_every_episode):
+                latest_path = (
+                    run_dir
+                    / "checkpoints"
+                    / f"{checkpoint_stem}_latest.pt"
+                )
+                agent.save(
+                    latest_path,
+                    extra=_training_checkpoint_extra(
+                        train_cfg=train_cfg,
+                        env_cfg=env_cfg,
+                        ppo_cfg=ppo_cfg,
+                        env=env,
+                        slow_rng=slow_rng,
+                        episode=episode_idx,
+                        global_round=global_round,
+                        global_real_slot=global_real_slot,
+                        update_idx=update_idx,
+                    ),
+                )
+                print(f"[SAVE LATEST] {latest_path}", flush=True)
 
             if (
                 int(train_cfg.plot_every_episodes) > 0
@@ -2736,20 +3113,17 @@ def train(train_cfg: FastTrainConfig) -> None:
     )
     agent.save(
         final_path,
-        extra={
-            "episode": int(train_cfg.num_episodes),
-            "global_round": global_round,
-            "global_real_slot": global_real_slot,
-            "update_idx": update_idx,
-            "slow_decision_mode": train_cfg.slow_decision_mode,
-            "train_config": train_cfg.to_dict(),
-            "env_config": (
-                env_cfg.as_dict()
-                if hasattr(env_cfg, "as_dict")
-                else asdict(env_cfg)
-            ),
-            "ppo_config": asdict(ppo_cfg),
-        },
+        extra=_training_checkpoint_extra(
+            train_cfg=train_cfg,
+            env_cfg=env_cfg,
+            ppo_cfg=ppo_cfg,
+            env=env,
+            slow_rng=slow_rng,
+            episode=segment_end_episode,
+            global_round=global_round,
+            global_real_slot=global_real_slot,
+            update_idx=update_idx,
+        ),
     )
     save_json(
         {
@@ -2757,6 +3131,14 @@ def train(train_cfg: FastTrainConfig) -> None:
             "global_round": global_round,
             "global_real_slot": global_real_slot,
             "updates": update_idx,
+            "segment_id": int(train_cfg.segment_id),
+            "segment_start_episode": segment_start_episode,
+            "segment_end_episode": segment_end_episode,
+            "resumed_from": (
+                str(_resolve_checkpoint(train_cfg.checkpoint))
+                if train_cfg.resume
+                else None
+            ),
         },
         run_dir / "train_summary.json",
     )
@@ -2766,7 +3148,7 @@ def train(train_cfg: FastTrainConfig) -> None:
 
 def evaluate(train_cfg: FastTrainConfig) -> None:
     set_seed(int(train_cfg.seed), deterministic=True)
-    env_cfg = build_env_config()
+    env_cfg = build_env_config(train_cfg)
     _assert_joint_config(train_cfg, env_cfg)
     env_cfg.move_prob = float(train_cfg.mobility_curriculum[-1][1])
     ppo_cfg = build_agent_ppo_config(train_cfg)
@@ -2786,72 +3168,128 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
 
     logger = ScalarLogger(run_dir / "logs" / "eval_episodes.csv")
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 20_011)
-
-    for episode_idx in range(1, int(train_cfg.eval_episodes) + 1):
-        obs, _ = split_env_reset(env.reset())
-        totals = {
-            "reward": 0.0,
-            "delivery": 0.0,
-            "quality": 0.0,
-            "quality_degradation": 0.0,
-            "stall": 0.0,
-            "outage_slots": 0.0,
-            "prediction_gap_sum": 0.0,
-            "prediction_gap_count": 0,
-        }
-
-        for _ in range(int(train_cfg.eval_rounds_per_episode)):
-            obs, slow_info = _select_and_apply_slow_action(
-                env,
-                agent,
-                train_cfg,
-                slow_rng,
-                process_pool=forecast_pool,
-            )
-            obs, realized = _execute_real_round_eval(env, agent, obs)
-            predicted = float(slow_info["predicted_round_cost"])
-            if np.isfinite(predicted):
-                totals["prediction_gap_sum"] += (
-                    realized["realized_round_cost"] - predicted
-                )
-                totals["prediction_gap_count"] += 1
-            totals["reward"] += realized["formulation_reward"]
-            for key in (
-                "delivery",
-                "quality",
-                "quality_degradation",
-                "stall",
-                "outage_slots",
-            ):
-                totals[key] += realized[key]
-
-        gap_mean = (
-            totals["prediction_gap_sum"]
-            / totals["prediction_gap_count"]
-            if totals["prediction_gap_count"] > 0
-            else float("nan")
+    forecast_pool: Optional[_PersistentShadowProcessPool] = None
+    if train_cfg.slow_decision_mode == "dpp":
+        forecast_pool = _PersistentShadowProcessPool(
+            worker_count=int(train_cfg.dpp_forecast_workers),
+            batch_capacity=int(train_cfg.dpp_candidate_batch_size),
+            obs_dim=int(agent.obs_dim),
+            action_dim=int(agent.action_dim),
         )
-        logger.write(
-            {
-                "episode": episode_idx,
-                "reward": totals["reward"],
-                "delivery": totals["delivery"],
-                "quality": totals["quality"],
-                "quality_degradation": totals["quality_degradation"],
-                "stall": totals["stall"],
-                "outage_slots": totals["outage_slots"],
-                "prediction_gap_mean": gap_mean,
+
+    try:
+        for episode_idx in range(1, int(train_cfg.eval_episodes) + 1):
+            obs, _ = split_env_reset(env.reset())
+            totals = {
+                "reward": 0.0,
+                "realized_round_cost": 0.0,
+                "hiring_cost": 0.0,
+                "delivery": 0.0,
+                "quality": 0.0,
+                "quality_degradation": 0.0,
+                "stall": 0.0,
+                "scheduled_stall": 0.0,
+                "unscheduled_stall": 0.0,
+                "scheduled_user_slots": 0.0,
+                "unscheduled_user_slots": 0.0,
+                "consumed_soc": 0.0,
+                "charged_soc": 0.0,
+                "outage_slots": 0.0,
+                "min_soc": float("inf"),
+                "prediction_gap_sum": 0.0,
+                "prediction_gap_count": 0,
+                "forecast_seconds": 0.0,
+                "forecast_trial_steps": 0.0,
             }
-        )
-        print(
-            "[EVAL] "
-            f"ep={episode_idx}/{train_cfg.eval_episodes} "
-            f"reward={totals['reward']:.4f} "
-            f"delivery={totals['delivery']:.1f} "
-            f"stall={totals['stall']:.1f} "
-            f"gap={gap_mean:.4f}",
-            flush=True,
-        )
+            layer_counts = np.zeros(int(env.cfg.layer), dtype=np.float64)
+
+            for _ in range(int(train_cfg.eval_rounds_per_episode)):
+                obs, slow_info = _select_and_apply_slow_action(
+                    env,
+                    agent,
+                    train_cfg,
+                    slow_rng,
+                    process_pool=forecast_pool,
+                )
+                obs, realized = _execute_real_round_eval(env, agent, obs)
+                predicted = float(slow_info["predicted_round_cost"])
+                if np.isfinite(predicted):
+                    totals["prediction_gap_sum"] += (
+                        realized["realized_round_cost"] - predicted
+                    )
+                    totals["prediction_gap_count"] += 1
+                totals["reward"] += realized["formulation_reward"]
+                totals["realized_round_cost"] += realized[
+                    "realized_round_cost"
+                ]
+                totals["hiring_cost"] += realized["hiring_cost"]
+                for key in (
+                    "delivery",
+                    "quality",
+                    "quality_degradation",
+                    "stall",
+                    "scheduled_stall",
+                    "unscheduled_stall",
+                    "scheduled_user_slots",
+                    "unscheduled_user_slots",
+                    "consumed_soc",
+                    "charged_soc",
+                    "outage_slots",
+                ):
+                    totals[key] += realized[key]
+                totals["min_soc"] = min(
+                    totals["min_soc"], realized["min_soc"]
+                )
+                totals["forecast_seconds"] += slow_info["forecast_seconds"]
+                totals["forecast_trial_steps"] += slow_info[
+                    "forecast_trial_steps"
+                ]
+                active_layers = float(realized["active_layer_actions"])
+                for layer in range(1, int(env.cfg.layer) + 1):
+                    layer_counts[layer - 1] += (
+                        active_layers * realized[f"layer_{layer}_ratio"]
+                    )
+
+            gap_mean = (
+                totals["prediction_gap_sum"]
+                / totals["prediction_gap_count"]
+                if totals["prediction_gap_count"] > 0
+                else float("nan")
+            )
+            if not np.isfinite(totals["min_soc"]):
+                totals["min_soc"] = 0.0
+            _finalize_round_metrics(totals, layer_counts)
+            totals["forecast_trial_steps_per_second"] = float(
+                totals["forecast_trial_steps"]
+            ) / max(float(totals["forecast_seconds"]), 1e-12)
+
+            logger.write(
+                {
+                    "episode": episode_idx,
+                    **{
+                        key: value
+                        for key, value in totals.items()
+                        if key not in {
+                            "prediction_gap_sum",
+                            "prediction_gap_count",
+                        }
+                    },
+                    "prediction_gap_mean": gap_mean,
+                }
+            )
+            print(
+                "[EVAL] "
+                f"ep={episode_idx}/{train_cfg.eval_episodes} "
+                f"reward={totals['reward']:.4f} "
+                f"delivery={totals['delivery']:.1f} "
+                f"quality/chunk={totals['quality_per_chunk']:.4f} "
+                f"stall={totals['stall']:.1f} "
+                f"gap={gap_mean:.4f}",
+                flush=True,
+            )
+    finally:
+        if forecast_pool is not None:
+            forecast_pool.close()
 
 
 def main() -> None:

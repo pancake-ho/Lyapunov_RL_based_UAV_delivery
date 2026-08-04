@@ -6,6 +6,38 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def _env_text(name: str, default: Optional[str] = None) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = _env_text(name)
+    return int(default if value is None else value)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = _env_text(name)
+    if value is None:
+        return bool(default)
+    normalized = value.lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name} must be one of {sorted(_TRUE_VALUES | _FALSE_VALUES)}, "
+        f"got {value!r}."
+    )
+
+
 @dataclass(frozen=True)
 class FastTrainConfig:
     """
@@ -21,6 +53,7 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 1) 실행 모드 / seed / device
     # ------------------------------------------------------------------
+    phase: str = "joint_dpp"
     mode: str = "train"  # train | eval
     seed: int = 2026
     deterministic_torch: bool = False
@@ -37,11 +70,7 @@ class FastTrainConfig:
     # None이면 fast_train.py에서 자동 이름 생성
     # Joint DPP는 현재 기준 학습이 완료된 fast policy로 candidate expected cost 평가.
     # cluster 실행 시 JOINT_FAST_CHECKPOINT에 trusted checkpoint 경로를 지정.
-    checkpoint: Optional[str] = field(
-        default_factory=lambda: (
-            os.environ.get("JOINT_FAST_CHECKPOINT") or None
-        )
-    )
+    checkpoint: Optional[str] = None
 
     # resume=True이면 model/optimizer/normalizer를 모두 복원한다.
     # dpp warm start에서는 보통 False로 두고 model/normalizer만 가져온다.
@@ -49,6 +78,8 @@ class FastTrainConfig:
     legacy_transfer: bool = False
     load_optimizer_on_warm_start: bool = False
     require_pretrained_fast_for_dpp: bool = True
+    segment_id: int = 1
+    save_latest_every_episode: bool = True
 
     # ------------------------------------------------------------------
     # 3) episode / rollout
@@ -174,6 +205,13 @@ class FastTrainConfig:
     audit_runtime_invariants: bool = False
 
     def __post_init__(self) -> None:
+        if self.phase not in {
+            "pretrain",
+            "joint_dpp",
+            "eval_pretrain",
+            "eval_joint",
+        }:
+            raise ValueError(f"Unsupported phase: {self.phase!r}.")
         if self.mode not in {"train", "eval"}:
             raise ValueError("mode must be 'train' or 'eval'.")
 
@@ -259,6 +297,10 @@ class FastTrainConfig:
             raise ValueError(
                 "resume and legacy_transfer cannot both be True."
             )
+        if self.mode == "eval" and self.resume:
+            raise ValueError("Evaluation must not use resume=True.")
+        if int(self.segment_id) <= 0:
+            raise ValueError("segment_id must be positive.")
 
         checkpoint_required = (
             self.resume
@@ -335,30 +377,94 @@ class FastTrainConfig:
 
 
 def get_fast_ppo_config() -> FastTrainConfig:
-    phase = os.environ.get(
-        "FAST_PPO_PHASE",
+    phase = (_env_text("FAST_PPO_PHASE", "joint_dpp") or "joint_dpp").lower()
+    if phase not in {
+        "pretrain",
         "joint_dpp",
-    ).strip().lower()
-
-    if phase == "joint_dpp":
-        return FastTrainConfig()
-
-    if phase == "pretrain":
-        return FastTrainConfig(
-            output_root="fast",
-            run_name=(
-                "fast_pretrain_formulation_aligned_seed2026_v2"
-            ),
-            checkpoint=None,
-            resume=False,
-            legacy_transfer=False,
-            load_optimizer_on_warm_start=False,
-            require_pretrained_fast_for_dpp=False,
-            slow_decision_mode="random",
-            dpp_forecast_workers=0,
+        "eval_pretrain",
+        "eval_joint",
+    }:
+        raise ValueError(
+            "FAST_PPO_PHASE must be pretrain, joint_dpp, eval_pretrain, "
+            f"or eval_joint; got {phase!r}."
         )
 
-    raise ValueError(
-        "FAST_PPO_PHASE must be 'pretrain' or 'joint_dpp': "
-        f"got {phase!r}."
+    seed = _env_int("FAST_PPO_SEED", 2026)
+    segment_id = _env_int("FAST_PPO_SEGMENT_ID", 1)
+    is_eval = phase.startswith("eval_")
+    is_dpp = phase in {"joint_dpp", "eval_joint"}
+
+    if phase == "pretrain":
+        resume_checkpoint = _env_text("FAST_PRETRAIN_RESUME_CHECKPOINT")
+        checkpoint = resume_checkpoint
+        resume = resume_checkpoint is not None
+        output_root = "fast"
+        default_name = f"fast_pretrain_seed{seed}_seg{segment_id:02d}"
+        default_save_every = 5
+    elif phase == "joint_dpp":
+        resume_checkpoint = _env_text("JOINT_RESUME_CHECKPOINT")
+        warm_start_checkpoint = _env_text("JOINT_FAST_CHECKPOINT")
+        if resume_checkpoint is not None and warm_start_checkpoint is not None:
+            raise ValueError(
+                "Set only one of JOINT_RESUME_CHECKPOINT and "
+                "JOINT_FAST_CHECKPOINT."
+            )
+        checkpoint = resume_checkpoint or warm_start_checkpoint
+        resume = resume_checkpoint is not None
+        output_root = "joint"
+        default_name = f"joint_dpp_fastppo_seed{seed}_seg{segment_id:02d}"
+        default_save_every = 1
+    else:
+        checkpoint = _env_text("FAST_PPO_CHECKPOINT")
+        resume = False
+        output_root = "eval"
+        kind = "joint" if is_dpp else "pretrain"
+        default_name = f"eval_{kind}_seed{seed}_seg{segment_id:02d}"
+        default_save_every = 1
+
+    explicit_resume = _env_text("FAST_PPO_RESUME")
+    if explicit_resume is not None:
+        requested_resume = _env_bool("FAST_PPO_RESUME", resume)
+        if requested_resume != resume:
+            raise ValueError(
+                "FAST_PPO_RESUME conflicts with the selected checkpoint "
+                "environment variable."
+            )
+
+    run_name = _env_text("FAST_PPO_RUN_NAME", default_name)
+    output_root = _env_text("FAST_PPO_OUTPUT_ROOT", output_root) or output_root
+
+    return FastTrainConfig(
+        phase=phase,
+        mode="eval" if is_eval else "train",
+        seed=seed,
+        output_root=output_root,
+        run_name=run_name,
+        checkpoint=checkpoint,
+        resume=resume,
+        legacy_transfer=False,
+        load_optimizer_on_warm_start=False,
+        require_pretrained_fast_for_dpp=is_dpp,
+        segment_id=segment_id,
+        num_episodes=_env_int("FAST_PPO_NUM_EPISODES", 200),
+        eval_episodes=_env_int("FAST_PPO_EVAL_EPISODES", 5),
+        rounds_per_episode=_env_int("FAST_PPO_ROUNDS_PER_EPISODE", 10),
+        eval_rounds_per_episode=_env_int(
+            "FAST_PPO_EVAL_ROUNDS_PER_EPISODE", 5
+        ),
+        save_every_episodes=_env_int(
+            "FAST_PPO_SAVE_EVERY_EPISODES", default_save_every
+        ),
+        plot_every_episodes=_env_int(
+            "FAST_PPO_PLOT_EVERY_EPISODES", default_save_every
+        ),
+        save_latest_every_episode=_env_bool(
+            "FAST_PPO_SAVE_LATEST_EVERY_EPISODE", True
+        ),
+        slow_decision_mode="dpp" if is_dpp else "random",
+        dpp_forecast_workers=(
+            _env_int("FAST_PPO_DPP_FORECAST_WORKERS", 18)
+            if is_dpp
+            else 0
+        ),
     )

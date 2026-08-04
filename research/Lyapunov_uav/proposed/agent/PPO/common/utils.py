@@ -166,7 +166,18 @@ def save_checkpoint(
     if extra is not None:
         checkpoint["extra"] = extra
     
-    torch.save(checkpoint, path_obj)
+    temp_path = path_obj.with_name(
+        f".{path_obj.name}.{os.getpid()}.tmp"
+    )
+    try:
+        with temp_path.open("wb") as handle:
+            torch.save(checkpoint, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path_obj)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def load_checkpoint(
