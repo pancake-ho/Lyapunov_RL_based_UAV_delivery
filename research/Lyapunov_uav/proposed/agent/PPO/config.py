@@ -399,7 +399,7 @@ def get_fast_ppo_config() -> FastTrainConfig:
         checkpoint = resume_checkpoint
         resume = resume_checkpoint is not None
         output_root = "fast"
-        default_name = f"fast_pretrain_seed{seed}_seg{segment_id:02d}"
+        default_name = f"fast_pretrain_seed{seed}_seg{segment_id:02d}_noklstop"
         default_save_every = 5
     elif phase == "joint_dpp":
         resume_checkpoint = _env_text("JOINT_RESUME_CHECKPOINT")
