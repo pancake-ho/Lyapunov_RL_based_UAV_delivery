@@ -65,7 +65,7 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 상대경로면 proposed/ 아래에 생성된다.
     output_root: str = "joint"
-    run_name: Optional[str] = "joint_dpp_fastppo_formulation_aligned_seed2026_v2"
+    run_name: Optional[str] = "joint_dpp_fastppo_formulation_noklstop_seed2026"
 
     # None이면 fast_train.py에서 자동 이름 생성
     # Joint DPP는 현재 기준 학습이 완료된 fast policy로 candidate expected cost 평가.
@@ -112,7 +112,7 @@ class FastTrainConfig:
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
     lr: float = 3e-5
     clip_coef: float = 0.15
-    target_kl: Optional[float] = 0.015
+    target_kl: Optional[float] = None
 
     # ppo_reward_scale 적용 후 critic loss가 actor를 압도하지 않도록
     # value_coef는 0.5로 유지한다
