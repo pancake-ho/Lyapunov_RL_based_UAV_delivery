@@ -50,12 +50,15 @@ class FastPPOConfig:
 
     actor_lr: float = 1.5e-5
     critic_lr: float = 3e-5
+    # Read-only compatibility for legacy joint/slow call sites and old
+    # checkpoint metadata. New Fast pretraining must leave this as None.
+    lr: Optional[float] = None
     max_grad_norm: float = 0.5
 
     clip_coef: float = 0.15
     value_coef: float = 0.5
 
-    categorical_entropy_coef: float = 5e-4
+    categorical_entropy_coef: float = 1e-4
     power_entropy_coef: float = 1e-4
 
     normalize_obs: bool = True
@@ -69,9 +72,50 @@ class FastPPOConfig:
     value_clip_coef: float = 0.5
 
     fail_on_nan: bool = True
-    target_kl: Optional[float] = 0.02
+    target_kl: Optional[float] = None
 
     device: str = "auto"
+
+    def __post_init__(self) -> None:
+        if self.lr is not None:
+            legacy_lr = float(self.lr)
+            if legacy_lr <= 0.0:
+                raise ValueError("legacy lr must be positive.")
+            self.actor_lr = legacy_lr
+            self.critic_lr = legacy_lr
+        for name in ("rollout_steps", "update_epochs", "batch_size"):
+            if int(getattr(self, name)) <= 0:
+                raise ValueError(f"{name} must be positive.")
+        if int(self.rollout_steps) < int(self.batch_size):
+            raise ValueError("rollout_steps must be at least batch_size.")
+        if int(self.rollout_steps) % int(self.batch_size) != 0:
+            raise ValueError(
+                "rollout_steps must be divisible by batch_size."
+            )
+        if not (0.0 < float(self.gamma) <= 1.0):
+            raise ValueError("gamma must be in (0, 1].")
+        if not (0.0 < float(self.gae_lambda) <= 1.0):
+            raise ValueError("gae_lambda must be in (0, 1].")
+        if float(self.actor_lr) <= 0.0 or float(self.critic_lr) <= 0.0:
+            raise ValueError("actor_lr and critic_lr must be positive.")
+        if float(self.max_grad_norm) <= 0.0:
+            raise ValueError("max_grad_norm must be positive.")
+        if float(self.clip_coef) <= 0.0:
+            raise ValueError("clip_coef must be positive.")
+        if float(self.value_coef) < 0.0:
+            raise ValueError("value_coef must be non-negative.")
+        if float(self.categorical_entropy_coef) < 0.0:
+            raise ValueError("categorical_entropy_coef must be non-negative.")
+        if float(self.power_entropy_coef) < 0.0:
+            raise ValueError("power_entropy_coef must be non-negative.")
+        if not self.hidden_dims or any(
+            int(value) <= 0 for value in self.hidden_dims
+        ):
+            raise ValueError("hidden_dims must contain positive integers.")
+        if float(self.value_clip_coef) <= 0.0:
+            raise ValueError("value_clip_coef must be positive.")
+        if self.target_kl is not None and float(self.target_kl) <= 0.0:
+            raise ValueError("target_kl must be None or positive.")
 
 
 class FastPPOAgent:
@@ -165,6 +209,7 @@ class FastPPOAgent:
             ],
             eps=1e-5,
         )
+        self._validate_optimizer_param_groups()
 
         self.buffer = RolloutBuffer(
             obs_dim=self.obs_dim,
@@ -182,6 +227,14 @@ class FastPPOAgent:
             self.obs_normalizer = None
         
         self._forecast_norm_cache: Optional[Tuple[float, torch.Tensor, torch.Tensor,]] = None
+
+    def _validate_optimizer_param_groups(self) -> None:
+        names = [group.get("name") for group in self.optimizer.param_groups]
+        if names != ["actor", "critic"]:
+            raise RuntimeError(
+                "Fast PPO optimizer must have ordered actor/critic groups; "
+                f"got {names}."
+            )
 
     # ------------------------------------------------------------------
     # validation / observation handling
@@ -547,15 +600,33 @@ class FastPPOAgent:
         if not self.buffer.advantages_ready:
             raise RuntimeError("finish_rollout() must be called before update().")
 
+        (
+            obs_all,
+            actions_all,
+            old_log_probs_all,
+            returns_all,
+            _,
+            old_values_all,
+        ) = self.buffer.get_tensors()
+        action_masks_all = self.buffer.get_action_masks_tensor()
+
         policy_losses: list[float] = []
         value_losses: list[float] = []
         categorical_entropies: list[float] = []
         power_entropies: list[float] = []
         approx_kls: list[float] = []
         clip_fracs: list[float] = []
+        actor_grad_norms: list[float] = []
+        critic_grad_norms: list[float] = []
 
         early_stopped = False
         completed_minibatches = 0
+        minibatches_per_epoch = (
+            len(self.buffer) + int(self.ppo_cfg.batch_size) - 1
+        ) // int(self.ppo_cfg.batch_size)
+        expected_minibatches = int(self.ppo_cfg.update_epochs) * int(
+            minibatches_per_epoch
+        )
 
         self.model.train()
         for _ in range(int(self.ppo_cfg.update_epochs)):
@@ -640,13 +711,35 @@ class FastPPOAgent:
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
+
+                actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.actor_parameters,
                     max_norm=float(self.ppo_cfg.max_grad_norm),
                 )
+                critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.critic_parameters,
+                    max_norm=float(self.ppo_cfg.max_grad_norm),
+                )
+                actor_grad_norm_value = float(
+                    actor_grad_norm.detach().cpu().item()
+                )
+                critic_grad_norm_value = float(
+                    critic_grad_norm.detach().cpu().item()
+                )
+                if bool(self.ppo_cfg.fail_on_nan) and not np.isfinite(
+                    actor_grad_norm_value
+                ):
+                    raise RuntimeError("actor_grad_norm is NaN or Inf.")
+                if bool(self.ppo_cfg.fail_on_nan) and not np.isfinite(
+                    critic_grad_norm_value
+                ):
+                    raise RuntimeError("critic_grad_norm is NaN or Inf.")
+
                 self.optimizer.step()
 
                 completed_minibatches += 1
+                actor_grad_norms.append(actor_grad_norm_value)
+                critic_grad_norms.append(critic_grad_norm_value)
                 policy_losses.append(float(policy_loss.detach().cpu()))
                 value_losses.append(float(value_loss.detach().cpu()))
                 categorical_entropies.append(
@@ -661,16 +754,50 @@ class FastPPOAgent:
             if early_stopped:
                 break
 
-        obs, actions, _, returns, _, _ = self.buffer.get_tensors()
-        action_masks = self.buffer.get_action_masks_tensor()
-        with torch.no_grad():
-            _, _, _, value_after = self.model.evaluate_actions(
-                obs, actions, action_masks
+        if (
+            self.ppo_cfg.target_kl is None
+            and completed_minibatches != expected_minibatches
+        ):
+            raise RuntimeError(
+                "No-KL-stop PPO must consume every minibatch: "
+                f"completed={completed_minibatches}, "
+                f"expected={expected_minibatches}."
             )
+
+        with torch.no_grad():
+            final_log_prob, _, _, value_after = self.model.evaluate_actions(
+                obs=obs_all,
+                actions=actions_all,
+                action_mask=action_masks_all,
+            )
+            self._check_finite_tensor("final_log_prob", final_log_prob)
             self._check_finite_tensor("value_after", value_after)
+
+            final_log_ratio = final_log_prob - old_log_probs_all
+            final_ratio = torch.exp(final_log_ratio)
+            self._check_finite_tensor("final_ppo_ratio", final_ratio)
+
+            approx_kl_post = (
+                (final_ratio - 1.0) - final_log_ratio
+            ).mean()
+            clipfrac_post = (
+                torch.abs(final_ratio - 1.0)
+                > float(self.ppo_cfg.clip_coef)
+            ).float().mean()
+
+            value_error = value_after - returns_all
+            return_mean = returns_all.mean()
+            return_std = returns_all.std(unbiased=False)
+            value_before_mean = old_values_all.mean()
+            value_before_std = old_values_all.std(unbiased=False)
+            value_mean = value_after.mean()
+            value_std = value_after.std(unbiased=False)
+            value_mae = value_error.abs().mean()
+            value_rmse = torch.sqrt(value_error.pow(2).mean())
+
             explained_v = explained_var(
                 y_pred=value_after.detach().cpu().numpy(),
-                y_true=returns.detach().cpu().numpy(),
+                y_true=returns_all.detach().cpu().numpy(),
             )
 
         buffer_summary = self.buffer.summary()
@@ -701,17 +828,50 @@ class FastPPOAgent:
             "clipfrac": (
                 float(np.mean(clip_fracs)) if clip_fracs else 0.0
             ),
+            "approx_kl_post": float(approx_kl_post.detach().cpu()),
+            "clipfrac_post": float(clipfrac_post.detach().cpu()),
             "explained_variance": float(explained_v),
+            "return_mean": float(return_mean.detach().cpu()),
+            "return_std": float(return_std.detach().cpu()),
+            "value_before_mean": float(value_before_mean.detach().cpu()),
+            "value_before_std": float(value_before_std.detach().cpu()),
+            "value_mean": float(value_mean.detach().cpu()),
+            "value_std": float(value_std.detach().cpu()),
+            "value_mae": float(value_mae.detach().cpu()),
+            "value_rmse": float(value_rmse.detach().cpu()),
+            "actor_grad_norm": (
+                float(np.mean(actor_grad_norms))
+                if actor_grad_norms
+                else 0.0
+            ),
+            "critic_grad_norm": (
+                float(np.mean(critic_grad_norms))
+                if critic_grad_norms
+                else 0.0
+            ),
+            "actor_grad_norm_max": (
+                float(np.max(actor_grad_norms))
+                if actor_grad_norms
+                else 0.0
+            ),
+            "critic_grad_norm_max": (
+                float(np.max(critic_grad_norms))
+                if critic_grad_norms
+                else 0.0
+            ),
+            "actor_lr": float(self.optimizer.param_groups[0]["lr"]),
+            "critic_lr": float(self.optimizer.param_groups[1]["lr"]),
             "buffer_reward_mean": float(buffer_summary["reward_mean"]),
             "buffer_reward_std": float(buffer_summary["reward_std"]),
             "active_action_dims_mean": float(
-                action_masks.sum(dim=-1).mean().detach().cpu().item()
+                action_masks_all.sum(dim=-1).mean().detach().cpu().item()
             ),
             "active_action_ratio_mean": float(
-                action_masks.mean().detach().cpu().item()
+                action_masks_all.mean().detach().cpu().item()
             ),
             "early_stopped": float(early_stopped),
             "completed_minibatches": float(completed_minibatches),
+            "expected_minibatches": float(expected_minibatches),
         }
 
         self.buffer.reset()
@@ -758,6 +918,8 @@ class FastPPOAgent:
             device=self.device,
             strict=bool(strict),
         )
+        if load_optimizer:
+            self._validate_optimizer_param_groups()
         extra = checkpoint.get("extra", {})
         obs_norm_state = extra.get("obs_normalizer")
         if obs_norm_state is not None and self.obs_normalizer is not None:

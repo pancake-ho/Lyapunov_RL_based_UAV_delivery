@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import random
@@ -123,8 +124,18 @@ def save_json(data: Dict[str, Any], path: str | os.PathLike[str]) -> None:
     path_obj = Path(path)
     ensure_dir(path_obj.parent)
 
-    with path_obj.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    temp_path = path_obj.with_name(
+        f".{path_obj.name}.{os.getpid()}.tmp"
+    )
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path_obj)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def load_json(path: str | os.PathLike[str]) -> Dict[str, Any]:
@@ -257,7 +268,12 @@ class ScalarLogger:
     def __init__(self, log_path: str | os.PathLike[str]) -> None:
         self.log_path = Path(log_path)
         ensure_dir(self.log_path.parent)
-        self._header_written = self.log_path.exists() and self.log_path.stat().st_size > 0
+        self._header: Optional[list[str]] = None
+        if self.log_path.exists() and self.log_path.stat().st_size > 0:
+            with self.log_path.open(
+                "r", newline="", encoding="utf-8"
+            ) as handle:
+                self._header = next(csv.reader(handle), None)
 
     def write(self, row: Dict[str, Any]) -> None:
         if len(row) == 0:
@@ -265,10 +281,20 @@ class ScalarLogger:
 
         keys = list(row.keys())
 
-        if not self._header_written:
-            with self.log_path.open("w", encoding="utf-8") as f:
-                f.write(",".join(keys) + "\n")
-            self._header_written = True
+        if self._header is None:
+            with self.log_path.open(
+                "w", newline="", encoding="utf-8"
+            ) as handle:
+                writer = csv.writer(handle)
+                writer.writerow(keys)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._header = keys
+        elif keys != self._header:
+            raise RuntimeError(
+                "CSV schema mismatch while appending to "
+                f"{self.log_path}: expected={self._header}, got={keys}."
+            )
 
         values = []
         for key in keys:
@@ -278,5 +304,9 @@ class ScalarLogger:
             else:
                 values.append(str(value))
 
-        with self.log_path.open("a", encoding="utf-8") as f:
-            f.write(",".join(values) + "\n")
+        with self.log_path.open(
+            "a", newline="", encoding="utf-8"
+        ) as handle:
+            csv.writer(handle).writerow(values)
+            handle.flush()
+            os.fsync(handle.fileno())

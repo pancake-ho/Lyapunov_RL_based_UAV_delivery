@@ -2,9 +2,9 @@
 
 #SBATCH -J fast-ppo
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-gpu=8
+#SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-#SBATCH --mem-per-gpu=29G
+#SBATCH --mem=29G
 #SBATCH -p batch_eebme_ugrad
 #SBATCH -t 1-0
 #SBATCH -o logs/slurm-%A.out
@@ -12,14 +12,14 @@
 set -euo pipefail
 umask 027
 
-PROJECT_ROOT="/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed"
-CONDA_ROOT="/data/surt321/anaconda3"
-CONDA_ENV_PATH="${CONDA_ROOT}/envs/lab"
+PROJECT_ROOT="${FAST_PROJECT_ROOT:-/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed}"
+CONDA_ROOT="${FAST_CONDA_ROOT:-/data/surt321/anaconda3}"
+CONDA_ENV_PATH="${FAST_CONDA_ENV_PATH:-${CONDA_ROOT}/envs/lab}"
 PYTHON_BIN="${CONDA_ENV_PATH}/bin/python"
 EXPECTED_BRANCH="feat/no-hrl"
 
 JOB_ID="${SLURM_JOB_ID:-manual}"
-ALLOCATED_CPUS="${SLURM_CPUS_PER_TASK:-8}"
+ALLOCATED_CPUS="${SLURM_CPUS_PER_TASK:-4}"
 REQUIRE_CLEAN_TREE="${REQUIRE_CLEAN_TREE:-1}"
 ALLOW_EXISTING_RUN_DIR="${ALLOW_EXISTING_RUN_DIR:-0}"
 
@@ -78,14 +78,33 @@ CURRENT_BRANCH="$(git branch --show-current)"
     || die "Wrong branch: expected=${EXPECTED_BRANCH}, actual=${CURRENT_BRANCH}"
 
 if [[ "${REQUIRE_CLEAN_TREE}" == "1" ]]; then
-    git diff --quiet || die "Tracked working-tree changes exist. Commit or stash them first."
-    git diff --cached --quiet || die "Staged but uncommitted changes exist."
+    [[ -z "$(git status --porcelain --untracked-files=normal)" ]] \
+        || die "Working tree is not clean. Commit or stash source changes first."
 fi
 
 REQUESTED_PHASE="${FAST_PPO_PHASE:-pretrain}"
 [[ "${REQUESTED_PHASE}" == "pretrain" ]] \
     || die "run/fast_train.sh only supports FAST_PPO_PHASE=pretrain."
 export FAST_PPO_PHASE=pretrain
+export FAST_PPO_MODE=train
+export FAST_PPO_SLOW_MODE=random
+export FAST_PPO_SEED="${FAST_PPO_SEED:-2026}"
+export FAST_PPO_DETERMINISTIC_TORCH="${FAST_PPO_DETERMINISTIC_TORCH:-1}"
+export FAST_PPO_SEGMENT_ID="${FAST_PPO_SEGMENT_ID:-1}"
+export FAST_PPO_NUM_EPISODES="${FAST_PPO_NUM_EPISODES:-50}"
+export FAST_PPO_TARGET_TOTAL_EPISODES="${FAST_PPO_TARGET_TOTAL_EPISODES:-200}"
+export FAST_PPO_RUN_NAME="${FAST_PPO_RUN_NAME:-fast_pretrain_h1_seed${FAST_PPO_SEED}_noklstop}"
+export FAST_PPO_ACTOR_LR="${FAST_PPO_ACTOR_LR:-1.5e-5}"
+export FAST_PPO_CRITIC_LR="${FAST_PPO_CRITIC_LR:-3e-5}"
+export FAST_PPO_CAT_ENTROPY_COEF="${FAST_PPO_CAT_ENTROPY_COEF:-1e-4}"
+export FAST_PPO_POWER_ENTROPY_COEF="${FAST_PPO_POWER_ENTROPY_COEF:-1e-4}"
+export FAST_PPO_TARGET_KL="${FAST_PPO_TARGET_KL:-none}"
+
+if [[ -n "${FAST_PRETRAIN_RESUME_CHECKPOINT:-}" ]]; then
+    export FAST_PPO_RESUME=1
+    ALLOW_EXISTING_RUN_DIR=1
+    export ALLOW_EXISTING_RUN_DIR
+fi
 
 mkdir -p "${JOB_LOG_ROOT}" "${RUNTIME_CACHE_PARENT}"
 RUNTIME_TMPDIR="$(mktemp -d "${RUNTIME_CACHE_PARENT}/fast-ppo-${JOB_ID}-XXXXXX")"
@@ -122,6 +141,9 @@ export MALLOC_ARENA_MAX=2
     agent/PPO/common \
     agent/PPO/fast
 
+"${PYTHON_BIN}" -m unittest \
+    agent.PPO.fast.test_fast_pretrain_contract
+
 RUN_DIR="$("${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
 from agent.PPO.config import get_fast_ppo_config
@@ -157,10 +179,11 @@ from pathlib import Path
 import torch
 
 from agent.PPO.config import get_fast_ppo_config
-from agent.PPO.fast.fast_train import build_env_config
+from agent.PPO.fast.fast_train import build_agent_ppo_config, build_env_config
 
 cfg = get_fast_ppo_config()
 env_cfg = build_env_config(cfg)
+ppo_cfg = build_agent_ppo_config(cfg)
 
 if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
     raise SystemExit("CUDA GPU is required; CPU fallback is not allowed.")
@@ -177,10 +200,20 @@ resolved = {
     "resume": cfg.resume,
     "seed": cfg.seed,
     "num_episodes": cfg.num_episodes,
+    "target_total_episodes": cfg.target_total_episodes,
+    "segment_id": cfg.segment_id,
     "rounds_per_episode": cfg.rounds_per_episode,
     "rollout_slots": cfg.rollout_slots,
     "batch_size": cfg.batch_size,
     "update_epochs": cfg.update_epochs,
+    "actor_lr": ppo_cfg.actor_lr,
+    "critic_lr": ppo_cfg.critic_lr,
+    "clip_coef": ppo_cfg.clip_coef,
+    "target_kl": ppo_cfg.target_kl,
+    "categorical_entropy_coef": ppo_cfg.categorical_entropy_coef,
+    "power_entropy_coef": ppo_cfg.power_entropy_coef,
+    "ppo_reward_scale": cfg.ppo_reward_scale,
+    "max_grad_norm": ppo_cfg.max_grad_norm,
     "slow_decision_mode": cfg.slow_decision_mode,
     "device": cfg.device,
     "torch": torch.__version__,

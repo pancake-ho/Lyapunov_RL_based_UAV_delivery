@@ -58,6 +58,7 @@ from env.validators import (
 
 from agent.PPO.config import FastTrainConfig, get_fast_ppo_config
 from agent.PPO.common import (
+    FAST_OBS_KEYS,
     ensure_dir,
     infer_fast_obs_dim,
     set_seed,
@@ -100,7 +101,8 @@ def build_agent_ppo_config(train_cfg: FastTrainConfig) -> AgentPPOConfig:
         batch_size=int(train_cfg.batch_size),
         gamma=float(train_cfg.gamma),
         gae_lambda=float(train_cfg.gae_lambda),
-        lr=float(train_cfg.lr),
+        actor_lr=float(train_cfg.actor_lr),
+        critic_lr=float(train_cfg.critic_lr),
         max_grad_norm=float(train_cfg.max_grad_norm),
         clip_coef=float(train_cfg.clip_coef),
         value_coef=float(train_cfg.value_coef),
@@ -134,6 +136,98 @@ def _resolve_checkpoint(path: Optional[str]) -> Optional[Path]:
     return result.resolve()
 
 
+def _trusted_checkpoint_payload(path: Path) -> Dict[str, Any]:
+    """Read a checkpoint produced by this repository for metadata checks."""
+    if not path.is_file():
+        raise FileNotFoundError(f"checkpoint file not found: {path}")
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise TypeError("checkpoint payload must be a dictionary.")
+    return payload
+
+
+def _resume_signature(
+    train_cfg: FastTrainConfig,
+    env_cfg: EnvConfig,
+    ppo_cfg: AgentPPOConfig,
+    obs_dim: int,
+    action_dim: int,
+) -> str:
+    """Hash every setting that changes the learned process or optimizer."""
+    train_payload = train_cfg.to_dict()
+    for mutable_key in (
+        "checkpoint",
+        "resume",
+        "segment_id",
+        "num_episodes",
+        "target_total_episodes",
+        "output_root",
+        "run_name",
+        "allow_existing_run_dir",
+        "save_every_episodes",
+        "save_latest_every_episode",
+        "plot_every_episodes",
+        "plot_smooth_window",
+        "eval_episodes",
+        "eval_rounds_per_episode",
+    ):
+        train_payload.pop(mutable_key, None)
+
+    ppo_payload = asdict(ppo_cfg)
+    # cuda and cuda:0 are equivalent for a one-GPU allocation and do not
+    # change optimizer/model semantics.
+    ppo_payload.pop("device", None)
+
+    payload = {
+        "schema": "fast_pretrain_resume_v2",
+        "policy_type": "conditional_mixed_categorical_gaussian_v1",
+        "fast_obs_keys": list(FAST_OBS_KEYS),
+        "obs_dim": int(obs_dim),
+        "action_dim": int(action_dim),
+        "train": train_payload,
+        "environment": env_cfg.as_dict(),
+        "ppo": ppo_payload,
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_resume_checkpoint(
+    checkpoint_path: Path,
+    expected_signature: str,
+    train_cfg: FastTrainConfig,
+) -> None:
+    payload = _trusted_checkpoint_payload(checkpoint_path)
+    extra = payload.get("extra", {})
+    actual_signature = extra.get("resume_signature")
+    if actual_signature is None:
+        raise RuntimeError(
+            "Checkpoint predates the strict actor/critic-LR resume schema. "
+            "Start the H1 run from scratch; do not resume an H0 checkpoint."
+        )
+    if str(actual_signature) != str(expected_signature):
+        raise RuntimeError(
+            "Resume signature mismatch. Model/optimizer/environment settings "
+            "differ from the checkpoint; start a new run instead."
+        )
+
+    checkpoint_train_cfg = extra.get("train_config", {})
+    previous_run_name = checkpoint_train_cfg.get("run_name")
+    if previous_run_name != train_cfg.run_name:
+        raise RuntimeError(
+            "Resume run_name mismatch: "
+            f"checkpoint={previous_run_name!r}, requested={train_cfg.run_name!r}."
+        )
+
+
 def make_run_dir(
     train_cfg: FastTrainConfig,
     env_cfg: EnvConfig,
@@ -162,6 +256,31 @@ def make_run_dir(
     return run_dir
 
 
+def _run_dir_has_files(run_dir: Path) -> bool:
+    return any(path.is_file() for path in run_dir.rglob("*"))
+
+
+def _validate_run_dir_contract(
+    run_dir: Path,
+    train_cfg: FastTrainConfig,
+) -> None:
+    has_files = _run_dir_has_files(run_dir)
+    if train_cfg.resume:
+        if not (run_dir / "logs" / "episodes.csv").is_file():
+            raise RuntimeError(
+                "Resume requires the original run directory and episodes.csv. "
+                f"Missing under: {run_dir}"
+            )
+        return
+
+    if has_files and not bool(train_cfg.allow_existing_run_dir):
+        raise RuntimeError(
+            "Run directory already contains files. Use a new "
+            "FAST_PPO_RUN_NAME instead of mixing experiments: "
+            f"{run_dir}"
+        )
+
+
 def save_configs(
     run_dir: Path,
     train_cfg: FastTrainConfig,
@@ -170,12 +289,28 @@ def save_configs(
     obs_dim: int,
     action_dim: int,
 ) -> None:
-    save_json(train_cfg.to_dict(), run_dir / "train_config.json")
-    save_json(
-        env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg),
-        run_dir / "env_config.json",
+    env_payload = (
+        env_cfg.as_dict() if hasattr(env_cfg, "as_dict") else asdict(env_cfg)
     )
-    save_json(asdict(ppo_cfg), run_dir / "ppo_config.json")
+    segment_config_dir = (
+        run_dir / "configs" / f"segment_{int(train_cfg.segment_id):02d}"
+    )
+    ensure_dir(segment_config_dir)
+    save_json(train_cfg.to_dict(), segment_config_dir / "train_config.json")
+    save_json(env_payload, segment_config_dir / "env_config.json")
+    save_json(asdict(ppo_cfg), segment_config_dir / "ppo_config.json")
+
+    # Preserve the original experiment contract at the run root. Segment
+    # resumes get their own immutable config snapshot above.
+    root_configs = {
+        "train_config.json": train_cfg.to_dict(),
+        "env_config.json": env_payload,
+        "ppo_config.json": asdict(ppo_cfg),
+    }
+    for filename, payload in root_configs.items():
+        root_path = run_dir / filename
+        if not root_path.exists():
+            save_json(payload, root_path)
     if train_cfg.resume:
         initialization = "resumed_checkpoint"
     elif train_cfg.checkpoint is not None:
@@ -198,35 +333,28 @@ def save_configs(
             "minimization with exact full-round acceptance"
         )
 
-    save_json(
-        {
-            "proposed_root": str(
-                PROPOSED_ROOT
-            ),
-            "obs_dim": int(obs_dim),
-            "action_dim": int(action_dim),
-            "created_at": time.strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
-            "initialization": initialization,
-            "phase": train_cfg.phase,
-            "segment_id": int(train_cfg.segment_id),
-            "resume": bool(train_cfg.resume),
-            "checkpoint": (
-                None
-                if train_cfg.checkpoint is None
-                else str(
-                    _resolve_checkpoint(
-                        train_cfg.checkpoint
-                    )
-                )
-            ),
-            "algorithm": algorithm,
-            "slow_solver": slow_solver,
-            "global_optimum_guaranteed": False,
-        },
-        run_dir / "run_info.json",
-    )
+    run_info = {
+        "proposed_root": str(PROPOSED_ROOT),
+        "obs_dim": int(obs_dim),
+        "action_dim": int(action_dim),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "initialization": initialization,
+        "phase": train_cfg.phase,
+        "segment_id": int(train_cfg.segment_id),
+        "resume": bool(train_cfg.resume),
+        "checkpoint": (
+            None
+            if train_cfg.checkpoint is None
+            else str(_resolve_checkpoint(train_cfg.checkpoint))
+        ),
+        "algorithm": algorithm,
+        "slow_solver": slow_solver,
+        "global_optimum_guaranteed": False,
+    }
+    save_json(run_info, segment_config_dir / "run_info.json")
+    root_run_info = run_dir / "run_info.json"
+    if not root_run_info.exists():
+        save_json(run_info, root_run_info)
 
 
 def get_episode_move_prob(
@@ -2132,6 +2260,13 @@ def _initialize_agent(
 
     checkpoint = _resolve_checkpoint(train_cfg.checkpoint)
     loaded_checkpoint: Optional[Dict[str, Any]] = None
+    expected_resume_signature = _resume_signature(
+        train_cfg=train_cfg,
+        env_cfg=env.cfg,
+        ppo_cfg=ppo_cfg,
+        obs_dim=agent.obs_dim,
+        action_dim=agent.action_dim,
+    )
     if train_cfg.legacy_transfer:
         if checkpoint is None:
             raise ValueError("legacy_transfer requires checkpoint.")
@@ -2139,6 +2274,11 @@ def _initialize_agent(
     elif train_cfg.resume:
         if checkpoint is None:
             raise ValueError("resume requires checkpoint.")
+        _validate_resume_checkpoint(
+            checkpoint_path=checkpoint,
+            expected_signature=expected_resume_signature,
+            train_cfg=train_cfg,
+        )
         loaded_checkpoint = agent.load(
             checkpoint, strict=True, load_optimizer=True
         )
@@ -2156,6 +2296,7 @@ def _initialize_agent(
         raise ValueError("DPP mode requires a pretrained Fast-PPO checkpoint.")
 
     setattr(agent, "_loaded_checkpoint", loaded_checkpoint)
+    setattr(agent, "_resume_signature", expected_resume_signature)
     return agent
 
 
@@ -2243,6 +2384,7 @@ def _training_checkpoint_extra(
     global_round: int,
     global_real_slot: int,
     update_idx: int,
+    resume_signature: str,
 ) -> Dict[str, Any]:
     return {
         "episode": int(episode),
@@ -2253,6 +2395,7 @@ def _training_checkpoint_extra(
         "segment_id": int(train_cfg.segment_id),
         "seed": int(train_cfg.seed),
         "slow_decision_mode": train_cfg.slow_decision_mode,
+        "resume_signature": str(resume_signature),
         "rng_state": _capture_rng_state(env, slow_rng),
         "env_config": (
             env_cfg.as_dict()
@@ -2545,6 +2688,21 @@ def _execute_real_round_train(
 
     _finalize_round_metrics(totals, layer_counts)
 
+    if bool(train_cfg.fail_on_outage) and totals["outage_slots"] > 0.0:
+        raise RuntimeError(
+            "Battery outage occurred during Fast pretraining: "
+            f"outage_slots={totals['outage_slots']}."
+        )
+    minimum_allowed_soc = float(env.cfg.battery.e_min) - float(
+        train_cfg.battery_soc_tolerance
+    )
+    if totals["min_soc"] < minimum_allowed_soc:
+        raise RuntimeError(
+            "Battery SoC fell below the configured tolerance: "
+            f"min_soc={totals['min_soc']:.6f}, "
+            f"allowed={minimum_allowed_soc:.6f}."
+        )
+
     totals["hiring_cost"] = _hiring_cost(
         env,
         {
@@ -2568,6 +2726,7 @@ def _execute_real_round_eval(
     env: Env,
     agent: FastPPOAgent,
     obs: Dict[str, Any],
+    train_cfg: FastTrainConfig,
 ) -> Tuple[Dict[str, Any], Dict[str, float]]:
     totals = {
         "formulation_reward": 0.0,
@@ -2585,6 +2744,11 @@ def _execute_real_round_eval(
         "charging_slots": 0.0,
         "outage_slots": 0.0,
         "min_soc": float("inf"),
+        "service_rate": 0.0,
+        "requested_chunks": 0.0,
+        "active_action_dims": 0.0,
+        "active_action_ratio": 0.0,
+        "action_saturation_ratio": 0.0,
     }
     agent.model.eval()
     layer_counts = np.zeros(int(env.cfg.layer), dtype=np.int64)
@@ -2631,7 +2795,30 @@ def _execute_real_round_eval(
         ):
             totals[key] += metrics[key]
         totals["min_soc"] = min(totals["min_soc"], metrics["min_soc"])
+        totals["service_rate"] += float(selected.get("service_rate", 0.0))
+        totals["requested_chunks"] += float(
+            selected.get("mean_requested_chunks", 0.0)
+        )
+        totals["active_action_dims"] += float(
+            selected["active_action_dims"]
+        )
+        totals["active_action_ratio"] += float(
+            selected["active_action_ratio"]
+        )
+        totals["action_saturation_ratio"] += float(
+            selected["action_saturation_ratio"]
+        )
         obs = next_obs
+
+    denominator = float(max(int(env.slow_T), 1))
+    for key in (
+        "service_rate",
+        "requested_chunks",
+        "active_action_dims",
+        "active_action_ratio",
+        "action_saturation_ratio",
+    ):
+        totals[key] /= denominator
 
     totals["hiring_cost"] = _hiring_cost(
         env,
@@ -2647,6 +2834,20 @@ def _execute_real_round_eval(
     if not np.isfinite(totals["min_soc"]):
         totals["min_soc"] = 0.0
     _finalize_round_metrics(totals, layer_counts)
+    if bool(train_cfg.fail_on_outage) and totals["outage_slots"] > 0.0:
+        raise RuntimeError(
+            "Battery outage occurred during evaluation: "
+            f"outage_slots={totals['outage_slots']}."
+        )
+    minimum_allowed_soc = float(env.cfg.battery.e_min) - float(
+        train_cfg.battery_soc_tolerance
+    )
+    if totals["min_soc"] < minimum_allowed_soc:
+        raise RuntimeError(
+            "Evaluation battery SoC violated tolerance: "
+            f"min_soc={totals['min_soc']:.6f}, "
+            f"allowed={minimum_allowed_soc:.6f}."
+        )
     return obs, totals
 
 
@@ -2667,6 +2868,7 @@ def train(train_cfg: FastTrainConfig) -> None:
     agent = _initialize_agent(env, initial_obs, train_cfg, ppo_cfg)
 
     run_dir = make_run_dir(train_cfg, env_cfg)
+    _validate_run_dir_contract(run_dir, train_cfg)
     checkpoint_stem = (
         "fast_ppo_pretrain"
         if train_cfg.slow_decision_mode == "random"
@@ -2685,6 +2887,7 @@ def train(train_cfg: FastTrainConfig) -> None:
     round_logger = ScalarLogger(run_dir / "logs" / "rounds.csv")
     update_logger = ScalarLogger(run_dir / "logs" / "updates.csv")
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 10_007)
+    resume_signature = str(getattr(agent, "_resume_signature"))
 
     completed_episode = 0
     global_real_slot = 0
@@ -2698,8 +2901,36 @@ def train(train_cfg: FastTrainConfig) -> None:
             update_idx,
         ) = _restore_resume_state(agent, env, slow_rng, train_cfg)
 
+    if not train_cfg.resume and train_cfg.checkpoint is None:
+        initial_extra = _training_checkpoint_extra(
+            train_cfg=train_cfg,
+            env_cfg=env_cfg,
+            ppo_cfg=ppo_cfg,
+            env=env,
+            slow_rng=slow_rng,
+            episode=0,
+            global_round=0,
+            global_real_slot=0,
+            update_idx=0,
+            resume_signature=resume_signature,
+        )
+        initial_extra["checkpoint_role"] = "initial_untrained_policy"
+        initial_path = (
+            run_dir
+            / "checkpoints"
+            / f"{checkpoint_stem}_initial.pt"
+        )
+        agent.save(initial_path, extra=initial_extra)
+        print(f"[SAVE INITIAL] {initial_path}", flush=True)
+
     segment_start_episode = completed_episode + 1
     segment_end_episode = completed_episode + int(train_cfg.num_episodes)
+    if segment_end_episode > int(train_cfg.target_total_episodes):
+        raise RuntimeError(
+            "Requested segment exceeds FAST_PPO_TARGET_TOTAL_EPISODES: "
+            f"completed={completed_episode}, segment={train_cfg.num_episodes}, "
+            f"target={train_cfg.target_total_episodes}."
+        )
 
     print("=" * 100, flush=True)
     phase_label = (
@@ -2718,6 +2949,13 @@ def train(train_cfg: FastTrainConfig) -> None:
     print(f"slow_mode      : {train_cfg.slow_decision_mode}", flush=True)
     print(f"slow_T         : {env_cfg.slow_T}", flush=True)
     print(f"rollout_slots  : {ppo_cfg.rollout_steps}", flush=True)
+    print(f"actor_lr       : {ppo_cfg.actor_lr}", flush=True)
+    print(f"critic_lr      : {ppo_cfg.critic_lr}", flush=True)
+    print(
+        f"cat_entropy    : {ppo_cfg.categorical_entropy_coef}",
+        flush=True,
+    )
+    print(f"target_kl      : {ppo_cfg.target_kl}", flush=True)
     print(f"checkpoint     : {_resolve_checkpoint(train_cfg.checkpoint)}", flush=True)
     print(f"resume         : {train_cfg.resume}", flush=True)
     print(
@@ -2769,6 +3007,11 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "consumed_soc": 0.0,
                 "charged_soc": 0.0,
                 "outage_slots": 0.0,
+                "service_rate": 0.0,
+                "requested_chunks": 0.0,
+                "active_action_dims": 0.0,
+                "active_action_ratio": 0.0,
+                "action_saturation_ratio": 0.0,
                 "forecast_trial_steps": 0.0,
                 "forecast_seconds": 0.0,
                 "real_seconds": 0.0,
@@ -2871,6 +3114,11 @@ def train(train_cfg: FastTrainConfig) -> None:
                     "unscheduled_user_slots",
                     "consumed_soc",
                     "charged_soc",
+                    "service_rate",
+                    "requested_chunks",
+                    "active_action_dims",
+                    "active_action_ratio",
+                    "action_saturation_ratio",
                 ):
                     episode_totals[key] += realized[key]
                 episode_totals["outage_slots"] += realized[
@@ -2925,7 +3173,10 @@ def train(train_cfg: FastTrainConfig) -> None:
                     f"{slow_info['forecast_seconds']:.2f} "
                     f"real_sps="
                     f"{realized['real_slots_per_second']:.2f} "
-                    f"kl={update_logs['approx_kl']:.6f}",
+                    f"kl_mb={update_logs['approx_kl']:.6f} "
+                    f"kl_post={update_logs['approx_kl_post']:.6f} "
+                    f"clip_post={update_logs['clipfrac_post']:.4f} "
+                    f"ev={update_logs['explained_variance']:.4f}",
                     flush=True,
                 )
 
@@ -2934,6 +3185,17 @@ def train(train_cfg: FastTrainConfig) -> None:
             _finalize_round_metrics(
                 episode_totals, episode_layer_counts
             )
+            round_denominator = float(
+                max(int(train_cfg.rounds_per_episode), 1)
+            )
+            for key in (
+                "service_rate",
+                "requested_chunks",
+                "active_action_dims",
+                "active_action_ratio",
+                "action_saturation_ratio",
+            ):
+                episode_totals[key] /= round_denominator
             episode_totals["forecast_trial_steps_per_second"] = float(
                 episode_totals["forecast_trial_steps"]
             ) / max(float(episode_totals["forecast_seconds"]), 1e-12)
@@ -2998,6 +3260,21 @@ def train(train_cfg: FastTrainConfig) -> None:
                         "outage_slots"
                     ],
                     "episode_min_soc": episode_totals["min_soc"],
+                    "episode_service_rate": episode_totals[
+                        "service_rate"
+                    ],
+                    "episode_requested_chunks": episode_totals[
+                        "requested_chunks"
+                    ],
+                    "episode_active_action_dims": episode_totals[
+                        "active_action_dims"
+                    ],
+                    "episode_active_action_ratio": episode_totals[
+                        "active_action_ratio"
+                    ],
+                    "episode_action_saturation_ratio": episode_totals[
+                        "action_saturation_ratio"
+                    ],
                     "episode_forecast_seconds": episode_totals[
                         "forecast_seconds"
                     ],
@@ -3060,6 +3337,7 @@ def train(train_cfg: FastTrainConfig) -> None:
                         global_round=global_round,
                         global_real_slot=global_real_slot,
                         update_idx=update_idx,
+                        resume_signature=resume_signature,
                     ),
                 )
                 print(f"[SAVE] {checkpoint_path}", flush=True)
@@ -3082,6 +3360,7 @@ def train(train_cfg: FastTrainConfig) -> None:
                         global_round=global_round,
                         global_real_slot=global_real_slot,
                         update_idx=update_idx,
+                        resume_signature=resume_signature,
                     ),
                 )
                 print(f"[SAVE LATEST] {latest_path}", flush=True)
@@ -3123,6 +3402,7 @@ def train(train_cfg: FastTrainConfig) -> None:
             global_round=global_round,
             global_real_slot=global_real_slot,
             update_idx=update_idx,
+            resume_signature=resume_signature,
         ),
     )
     save_json(
@@ -3157,6 +3437,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
     obs, _ = split_env_reset(env.reset())
     agent = _initialize_agent(env, obs, train_cfg, ppo_cfg)
     run_dir = make_run_dir(train_cfg, env_cfg)
+    _validate_run_dir_contract(run_dir, train_cfg)
     save_configs(
         run_dir,
         train_cfg,
@@ -3196,6 +3477,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 "charged_soc": 0.0,
                 "outage_slots": 0.0,
                 "min_soc": float("inf"),
+                "service_rate": 0.0,
+                "requested_chunks": 0.0,
+                "active_action_dims": 0.0,
+                "active_action_ratio": 0.0,
+                "action_saturation_ratio": 0.0,
                 "prediction_gap_sum": 0.0,
                 "prediction_gap_count": 0,
                 "forecast_seconds": 0.0,
@@ -3211,7 +3497,9 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     slow_rng,
                     process_pool=forecast_pool,
                 )
-                obs, realized = _execute_real_round_eval(env, agent, obs)
+                obs, realized = _execute_real_round_eval(
+                    env, agent, obs, train_cfg
+                )
                 predicted = float(slow_info["predicted_round_cost"])
                 if np.isfinite(predicted):
                     totals["prediction_gap_sum"] += (
@@ -3235,6 +3523,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     "consumed_soc",
                     "charged_soc",
                     "outage_slots",
+                    "service_rate",
+                    "requested_chunks",
+                    "active_action_dims",
+                    "active_action_ratio",
+                    "action_saturation_ratio",
                 ):
                     totals[key] += realized[key]
                 totals["min_soc"] = min(
@@ -3259,6 +3552,17 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             if not np.isfinite(totals["min_soc"]):
                 totals["min_soc"] = 0.0
             _finalize_round_metrics(totals, layer_counts)
+            eval_round_denominator = float(
+                max(int(train_cfg.eval_rounds_per_episode), 1)
+            )
+            for key in (
+                "service_rate",
+                "requested_chunks",
+                "active_action_dims",
+                "active_action_ratio",
+                "action_saturation_ratio",
+            ):
+                totals[key] /= eval_round_denominator
             totals["forecast_trial_steps_per_second"] = float(
                 totals["forecast_trial_steps"]
             ) / max(float(totals["forecast_seconds"]), 1e-12)

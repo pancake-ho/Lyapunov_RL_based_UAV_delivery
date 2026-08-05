@@ -38,6 +38,63 @@ def _env_bool(name: str, default: bool) -> bool:
     )
 
 
+def _env_float(name: str, default: float) -> float:
+    value = _env_text(name)
+    return float(default if value is None else value)
+
+
+def _env_optional_float(
+    name: str,
+    default: Optional[float],
+) -> Optional[float]:
+    value = _env_text(name)
+    if value is None:
+        return default
+
+    normalized = value.lower()
+    if normalized in {"none", "null", "off"}:
+        return None
+
+    return float(value)
+
+
+def _env_int_list(name: str, default: List[int]) -> List[int]:
+    value = _env_text(name)
+    if value is None:
+        return list(default)
+    parsed = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not parsed:
+        raise ValueError(f"{name} must contain at least one integer.")
+    return parsed
+
+
+def _env_mobility_curriculum(
+    name: str,
+    default: Tuple[Tuple[int, float], ...],
+) -> Tuple[Tuple[int, float], ...]:
+    """Parse ``episode:move_prob`` pairs separated by commas."""
+    value = _env_text(name)
+    if value is None:
+        return tuple(default)
+
+    parsed: list[tuple[int, float]] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            episode_text, probability_text = item.split(":", maxsplit=1)
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} entries must use episode:move_prob, got {item!r}."
+            ) from exc
+        parsed.append((int(episode_text), float(probability_text)))
+
+    if not parsed:
+        raise ValueError(f"{name} must contain at least one entry.")
+    return tuple(parsed)
+
+
 @dataclass(frozen=True)
 class FastTrainConfig:
     """
@@ -53,10 +110,10 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 1) 실행 모드 / seed / device
     # ------------------------------------------------------------------
-    phase: str = "joint_dpp"
+    phase: str = "pretrain"
     mode: str = "train"  # train | eval
     seed: int = 2026
-    deterministic_torch: bool = False
+    deterministic_torch: bool = True
     device: str = "cuda"  # cuda | cuda:0 | cpu | auto
     fail_if_cuda_unavailable: bool = True
 
@@ -64,8 +121,8 @@ class FastTrainConfig:
     # 2) run directory / checkpoint
     # ------------------------------------------------------------------
     # 상대경로면 proposed/ 아래에 생성된다.
-    output_root: str = "joint"
-    run_name: Optional[str] = "joint_dpp_fastppo_formulation_noklstop_seed2026"
+    output_root: str = "fast"
+    run_name: Optional[str] = None
 
     # None이면 fast_train.py에서 자동 이름 생성
     # Joint DPP는 현재 기준 학습이 완료된 fast policy로 candidate expected cost 평가.
@@ -77,14 +134,18 @@ class FastTrainConfig:
     resume: bool = False
     legacy_transfer: bool = False
     load_optimizer_on_warm_start: bool = False
-    require_pretrained_fast_for_dpp: bool = True
+    require_pretrained_fast_for_dpp: bool = False
     segment_id: int = 1
     save_latest_every_episode: bool = True
+    allow_existing_run_dir: bool = False
 
     # ------------------------------------------------------------------
     # 3) episode / rollout
     # ------------------------------------------------------------------
-    num_episodes: int = 200
+    # num_episodes is the number executed by this Slurm segment. Four
+    # 50-episode segments form the default 200-episode continuous run.
+    num_episodes: int = 50
+    target_total_episodes: int = 200
     eval_episodes: int = 5
 
     rounds_per_episode: int = 10
@@ -160,7 +221,7 @@ class FastTrainConfig:
     # ------------------------------------------------------------------
     # 7) Fast-only 학습용 slow decision 생성 방식
     # ------------------------------------------------------------------
-    slow_decision_mode: str = "dpp" # random | dpp
+    slow_decision_mode: str = "random"  # random | dpp
 
     # for random
     random_rsu_user_prob: float = 0.50
@@ -202,6 +263,8 @@ class FastTrainConfig:
     # 9) Debug
     # ------------------------------------------------------------------
     fail_on_nan: bool = True
+    fail_on_outage: bool = True
+    battery_soc_tolerance: float = 0.05
     # True이면 매 round마다 전체 GPU parameter를 CPU로 복사해 SHA를 계산한다.
     # production 학습에서는 GPU synchronization을 유발하므로 False로 둔다.
     audit_runtime_invariants: bool = False
@@ -224,6 +287,7 @@ class FastTrainConfig:
 
         for name in (
             "num_episodes",
+            "target_total_episodes",
             "rounds_per_episode",
             "eval_episodes",
             "eval_rounds_per_episode",
@@ -242,12 +306,19 @@ class FastTrainConfig:
         if int(self.dpp_forecast_workers) < 0:
             raise ValueError("dpp_forecast_workers must be >= 0.")
 
+        if int(self.num_episodes) > int(self.target_total_episodes):
+            raise ValueError(
+                "num_episodes cannot exceed target_total_episodes."
+            )
+
         if self.rollout_slots < self.batch_size:
             raise ValueError("rollout_slots must be >= batch_size.")
         if self.rollout_slots % self.batch_size != 0:
             raise ValueError(
                 "rollout_slots must be divisible by batch_size."
             )
+        if not self.hidden_dims or any(int(value) <= 0 for value in self.hidden_dims):
+            raise ValueError("hidden_dims must contain positive integers.")
 
         if not (0.0 < self.gamma <= 1.0):
             raise ValueError("gamma must be in (0,1].")
@@ -265,6 +336,8 @@ class FastTrainConfig:
             raise ValueError("value_clip_coef must be positive.")
         if self.ppo_reward_scale <= 0.0:
             raise ValueError("ppo_reward_scale must be positive.")
+        if self.battery_soc_tolerance < 0.0:
+            raise ValueError("battery_soc_tolerance must be non-negative.")
         if self.dpp_improvement_tolerance < 0.0:
             raise ValueError(
                 "dpp_improvement_tolerance must be non-negative."
@@ -305,6 +378,15 @@ class FastTrainConfig:
             raise ValueError("Evaluation must not use resume=True.")
         if int(self.segment_id) <= 0:
             raise ValueError("segment_id must be positive.")
+
+        expected_slow_mode = (
+            "dpp" if self.phase in {"joint_dpp", "eval_joint"} else "random"
+        )
+        if self.slow_decision_mode != expected_slow_mode:
+            raise ValueError(
+                f"phase={self.phase!r} requires "
+                f"slow_decision_mode={expected_slow_mode!r}."
+            )
 
         checkpoint_required = (
             self.resume
@@ -372,7 +454,7 @@ class FastTrainConfig:
         run_name = (
             str(self.run_name)
             if self.run_name is not None
-            else "joint_dpp_fastppo"
+            else "fast_pretrain_h1"
         )
 
         run_dir = output_root_path / run_name
@@ -381,7 +463,7 @@ class FastTrainConfig:
 
 
 def get_fast_ppo_config() -> FastTrainConfig:
-    phase = (_env_text("FAST_PPO_PHASE", "joint_dpp") or "joint_dpp").lower()
+    phase = (_env_text("FAST_PPO_PHASE", "pretrain") or "pretrain").lower()
     if phase not in {
         "pretrain",
         "joint_dpp",
@@ -403,7 +485,7 @@ def get_fast_ppo_config() -> FastTrainConfig:
         checkpoint = resume_checkpoint
         resume = resume_checkpoint is not None
         output_root = "fast"
-        default_name = f"fast_pretrain_seed{seed}_seg{segment_id:02d}_noklstop"
+        default_name = f"fast_pretrain_h1_seed{seed}_noklstop"
         default_save_every = 5
     elif phase == "joint_dpp":
         resume_checkpoint = _env_text("JOINT_RESUME_CHECKPOINT")
@@ -416,14 +498,14 @@ def get_fast_ppo_config() -> FastTrainConfig:
         checkpoint = resume_checkpoint or warm_start_checkpoint
         resume = resume_checkpoint is not None
         output_root = "joint"
-        default_name = f"joint_dpp_fastppo_seed{seed}_seg{segment_id:02d}"
+        default_name = f"joint_dpp_fastppo_seed{seed}"
         default_save_every = 1
     else:
         checkpoint = _env_text("FAST_PPO_CHECKPOINT")
         resume = False
         output_root = "eval"
         kind = "joint" if is_dpp else "pretrain"
-        default_name = f"eval_{kind}_seed{seed}_seg{segment_id:02d}"
+        default_name = f"eval_{kind}_seed{seed}"
         default_save_every = 1
 
     explicit_resume = _env_text("FAST_PPO_RESUME")
@@ -442,6 +524,13 @@ def get_fast_ppo_config() -> FastTrainConfig:
         phase=phase,
         mode="eval" if is_eval else "train",
         seed=seed,
+        deterministic_torch=_env_bool(
+            "FAST_PPO_DETERMINISTIC_TORCH", True
+        ),
+        device=_env_text("FAST_PPO_DEVICE", "cuda") or "cuda",
+        fail_if_cuda_unavailable=_env_bool(
+            "FAST_PPO_FAIL_IF_CUDA_UNAVAILABLE", True
+        ),
         output_root=output_root,
         run_name=run_name,
         checkpoint=checkpoint,
@@ -450,11 +539,69 @@ def get_fast_ppo_config() -> FastTrainConfig:
         load_optimizer_on_warm_start=False,
         require_pretrained_fast_for_dpp=is_dpp,
         segment_id=segment_id,
-        num_episodes=_env_int("FAST_PPO_NUM_EPISODES", 200),
+        allow_existing_run_dir=_env_bool(
+            "ALLOW_EXISTING_RUN_DIR", False
+        ),
+        num_episodes=_env_int("FAST_PPO_NUM_EPISODES", 50),
+        target_total_episodes=_env_int(
+            "FAST_PPO_TARGET_TOTAL_EPISODES", 200
+        ),
         eval_episodes=_env_int("FAST_PPO_EVAL_EPISODES", 5),
         rounds_per_episode=_env_int("FAST_PPO_ROUNDS_PER_EPISODE", 10),
         eval_rounds_per_episode=_env_int(
             "FAST_PPO_EVAL_ROUNDS_PER_EPISODE", 5
+        ),
+        rollout_slots=_env_int("FAST_PPO_ROLLOUT_SLOTS", 3600),
+        batch_size=_env_int("FAST_PPO_BATCH_SIZE", 450),
+        update_epochs=_env_int("FAST_PPO_UPDATE_EPOCHS", 4),
+        gamma=_env_float("FAST_PPO_GAMMA", 0.99),
+        gae_lambda=_env_float("FAST_PPO_GAE_LAMBDA", 0.95),
+        actor_lr=_env_float("FAST_PPO_ACTOR_LR", 1.5e-5),
+        critic_lr=_env_float("FAST_PPO_CRITIC_LR", 3e-5),
+        max_grad_norm=_env_float("FAST_PPO_MAX_GRAD_NORM", 0.5),
+        clip_coef=_env_float("FAST_PPO_CLIP_COEF", 0.15),
+        target_kl=_env_optional_float("FAST_PPO_TARGET_KL", None),
+        value_coef=_env_float("FAST_PPO_VALUE_COEF", 0.5),
+        categorical_entropy_coef=_env_float(
+            "FAST_PPO_CAT_ENTROPY_COEF", 1e-4
+        ),
+        power_entropy_coef=_env_float(
+            "FAST_PPO_POWER_ENTROPY_COEF", 1e-4
+        ),
+        hidden_dims=_env_int_list("FAST_PPO_HIDDEN_DIMS", [256, 256]),
+        init_log_std=_env_float("FAST_PPO_INIT_LOG_STD", -1.0),
+        obs_norm=_env_bool("FAST_PPO_OBS_NORM", True),
+        adv_norm=_env_bool("FAST_PPO_ADV_NORM", True),
+        ppo_reward_scale=_env_float(
+            "FAST_PPO_REWARD_SCALE", 1e-4
+        ),
+        freeze_obs_norm_within_round=_env_bool(
+            "FAST_PPO_FREEZE_OBS_NORM_WITHIN_ROUND", True
+        ),
+        use_value_huber_loss=_env_bool(
+            "FAST_PPO_USE_VALUE_HUBER", True
+        ),
+        use_value_clip=_env_bool("FAST_PPO_USE_VALUE_CLIP", False),
+        value_clip_coef=_env_float("FAST_PPO_VALUE_CLIP_COEF", 0.5),
+        random_rsu_user_prob=_env_float(
+            "FAST_PPO_RANDOM_RSU_USER_PROB", 0.50
+        ),
+        random_uav_hire_prob=_env_float(
+            "FAST_PPO_RANDOM_UAV_HIRE_PROB", 0.70
+        ),
+        random_uav_user_prob=_env_float(
+            "FAST_PPO_RANDOM_UAV_USER_PROB", 0.80
+        ),
+        mobility_curriculum=_env_mobility_curriculum(
+            "FAST_PPO_MOBILITY_CURRICULUM", ((1, 1e-4),)
+        ),
+        fail_on_nan=_env_bool("FAST_PPO_FAIL_ON_NAN", True),
+        fail_on_outage=_env_bool("FAST_PPO_FAIL_ON_OUTAGE", True),
+        battery_soc_tolerance=_env_float(
+            "FAST_PPO_BATTERY_SOC_TOLERANCE", 0.05
+        ),
+        audit_runtime_invariants=_env_bool(
+            "FAST_PPO_AUDIT_RUNTIME_INVARIANTS", False
         ),
         save_every_episodes=_env_int(
             "FAST_PPO_SAVE_EVERY_EPISODES", default_save_every
@@ -472,23 +619,3 @@ def get_fast_ppo_config() -> FastTrainConfig:
             else 0
         ),
     )
-
-
-def _env_float(name: str, default: float) -> float:
-    value = _env_text(name)
-    return float(default if value is None else value)
-
-
-def _env_optional_float(
-    name: str,
-    default: Optional[float],
-) -> Optional[float]:
-    value = _env_text(name)
-    if value is None:
-        return default
-
-    normalized = value.lower()
-    if normalized in {"none", "null", "off"}:
-        return None
-
-    return float(value)
