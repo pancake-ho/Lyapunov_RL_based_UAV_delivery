@@ -48,7 +48,8 @@ class FastPPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
-    lr: float = 3e-5
+    actor_lr: float = 1.5e-5
+    critic_lr: float = 3e-5
     max_grad_norm: float = 0.5
 
     clip_coef: float = 0.15
@@ -64,7 +65,7 @@ class FastPPOConfig:
     init_log_std: float = -1.0
 
     use_value_huber_loss: bool = True
-    use_value_clip: bool = True
+    use_value_clip: bool = False
     value_clip_coef: float = 0.5
 
     fail_on_nan: bool = True
@@ -107,9 +108,61 @@ class FastPPOAgent:
             init_log_std=self.ppo_cfg.init_log_std,
         ).to(self.device)
 
+        self.critic_parameters = list(
+            self.model.critic_network.parameters()
+        )
+        critic_parameter_ids = {
+            id(parameter)
+            for parameter in self.critic_parameters
+        }
+
+        self.actor_parameters = [
+            parameter
+            for parameter in self.model.parameters()
+            if id(parameter) not in critic_parameter_ids
+        ]
+
+        if not self.actor_parameters:
+            raise RuntimeError("Actor parameter set is empty.")
+        if not self.critic_parameters:
+            raise RuntimeError("Critic parameter set is empty.")
+
+        actor_parameter_ids = {
+            id(parameter)
+            for parameter in self.actor_parameters
+        }
+
+        if actor_parameter_ids & critic_parameter_ids:
+            raise RuntimeError(
+                "Actor and critic parameter sets overlap."
+            )
+
+        all_parameter_ids = {
+            id(parameter)
+            for parameter in self.model.parameters()
+        }
+
+        if (
+            actor_parameter_ids | critic_parameter_ids
+            != all_parameter_ids
+        ):
+            raise RuntimeError(
+                "Actor/critic parameter partition is incomplete."
+            )
+
         self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=self.ppo_cfg.lr,
+            [
+                {
+                    "params": self.actor_parameters,
+                    "lr": float(self.ppo_cfg.actor_lr),
+                    "name": "actor",
+                },
+                {
+                    "params": self.critic_parameters,
+                    "lr": float(self.ppo_cfg.critic_lr),
+                    "name": "critic",
+                },
+            ],
             eps=1e-5,
         )
 

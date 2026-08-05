@@ -110,14 +110,16 @@ class FastTrainConfig:
     gae_lambda: float = 0.95
 
     # action_dim이 큰 continuous PPO라 actor lr는 낮게 유지
-    lr: float = 3e-5
+    actor_lr: float = 1.5e-5
+    critic_lr: float = 3e-5
+
     clip_coef: float = 0.15
     target_kl: Optional[float] = None
 
     # ppo_reward_scale 적용 후 critic loss가 actor를 압도하지 않도록
     # value_coef는 0.5로 유지한다
     value_coef: float = 0.5
-    categorical_entropy_coef: float = 5e-4
+    categorical_entropy_coef: float = 1e-4
     power_entropy_coef: float = 1e-4
 
     max_grad_norm: float = 0.5
@@ -251,8 +253,10 @@ class FastTrainConfig:
             raise ValueError("gamma must be in (0,1].")
         if not (0.0 < self.gae_lambda <= 1.0):
             raise ValueError("gae_lambda must be in (0,1].")
-        if self.lr <= 0.0:
-            raise ValueError("lr must be positive.")
+        if self.actor_lr <= 0.0:
+            raise ValueError("actor_lr must be positive.")
+        if self.critic_lr <= 0.0:
+            raise ValueError("critic_lr must be positive.")
         if self.clip_coef <= 0.0:
             raise ValueError("clip_coef must be positive.")
         if self.max_grad_norm <= 0.0:
@@ -468,3 +472,23 @@ def get_fast_ppo_config() -> FastTrainConfig:
             else 0
         ),
     )
+
+
+def _env_float(name: str, default: float) -> float:
+    value = _env_text(name)
+    return float(default if value is None else value)
+
+
+def _env_optional_float(
+    name: str,
+    default: Optional[float],
+) -> Optional[float]:
+    value = _env_text(name)
+    if value is None:
+        return default
+
+    normalized = value.lower()
+    if normalized in {"none", "null", "off"}:
+        return None
+
+    return float(value)
