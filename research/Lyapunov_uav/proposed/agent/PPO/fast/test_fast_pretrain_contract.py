@@ -49,7 +49,7 @@ class FastPretrainContractTest(unittest.TestCase):
         self.assertIsNone(ppo_cfg.target_kl)
 
     def test_one_round_update_and_checkpoint_roundtrip(self) -> None:
-        env_cfg = EnvConfig(slow_T=8, episode_slots=8, seed=2026)
+        env_cfg = EnvConfig(slow_T=8, seed=2026)
         env_cfg.battery.target_service_slots_per_round = env_cfg.slow_T
         env = Env(env_cfg)
         _, _ = split_env_reset(env.reset())
