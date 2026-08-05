@@ -1,2 +1,9 @@
 /fast/
-research/Lyapunov_uav/proposed/matplotlib-*/
+/joint/
+/eval/
+/logs/
+/.runtime-cache/
+/matplotlib-*/
+
+__pycache__/
+*.py[cod]
