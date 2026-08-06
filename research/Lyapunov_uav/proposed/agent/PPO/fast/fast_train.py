@@ -2130,6 +2130,9 @@ def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
         "charging_slots": (
             float(np.sum(charging)) if charging.size else 0.0
         ),
+        "queue_playback_term": float(
+            fast.get("queue_playback_term", 0.0)
+        ),
         "video_delivery_term": float(
             fast.get("video_delivery_term", 0.0)
         ),
@@ -2186,6 +2189,23 @@ def _finalize_round_metrics(
         if unscheduled_slots > 0.0
         else 0.0
     )
+    if "round_fast_cost" in totals:
+        fast_cost = float(totals["round_fast_cost"])
+    elif "reward" in totals:
+        fast_cost = -float(totals["reward"])
+    else:
+        fast_cost = -float(totals.get("formulation_reward", 0.0))
+    totals["fast_cost"] = fast_cost
+    totals["fast_cost_per_scheduled_user_slot"] = (
+        fast_cost / scheduled_slots
+        if scheduled_slots > 0.0
+        else float("inf")
+    )
+    totals["delivery_per_scheduled_user_slot"] = (
+        delivery / scheduled_slots
+        if scheduled_slots > 0.0
+        else 0.0
+    )
 
     active_layer_actions = int(np.sum(layer_counts))
     totals["active_layer_actions"] = float(active_layer_actions)
@@ -2213,29 +2233,319 @@ def _read_scalar_csv(path: Path) -> Dict[str, list[float]]:
 
 
 def save_training_plots(run_dir: Path, smooth_window: int = 5) -> None:
-    del smooth_window
-    data = _read_scalar_csv(run_dir / "logs" / "episodes.csv")
-    if "episode" not in data:
-        return
+    """
+    Save workload-aware Fast-PPO diagnostics.
 
-    x = np.asarray(data["episode"], dtype=np.float64)
-    for key in (
-        "episode_formulation_reward",
-        "episode_delivery",
-        "episode_stall",
-        "episode_prediction_gap_mean",
-    ):
-        if key not in data or len(data[key]) != len(x):
-            continue
-        plt.figure()
-        plt.plot(x, np.asarray(data[key], dtype=np.float64))
-        plt.xlabel("Episode")
-        plt.ylabel(key)
-        plt.title(key)
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(run_dir / "figures" / f"{key}.png", dpi=200)
-        plt.close()
+    Raw episode reward is retained only as a workload-confounded reference.
+    Policy selection must use deterministic checkpoint evaluation, not these
+    training plots.
+    """
+    episodes = _read_scalar_csv(run_dir / "logs" / "episodes.csv")
+    updates = _read_scalar_csv(run_dir / "logs" / "updates.csv")
+    figures_dir = run_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    window = max(int(smooth_window), 1)
+
+    def _series(
+        data: Dict[str, list[float]],
+        key: str,
+    ) -> Optional[np.ndarray]:
+        values = data.get(key)
+        if values is None:
+            return None
+        array = np.asarray(values, dtype=np.float64)
+        return array if array.size > 0 else None
+
+    def _rolling(values: np.ndarray) -> np.ndarray:
+        if values.size == 0 or window <= 1:
+            return values.copy()
+        result = np.full(values.shape, np.nan, dtype=np.float64)
+        kernel = np.ones(window, dtype=np.float64) / float(window)
+        result[window - 1 :] = np.convolve(
+            values,
+            kernel,
+            mode="valid",
+        )
+        return result
+
+    def _plot_with_rolling(
+        axis: Any,
+        x_values: np.ndarray,
+        values: np.ndarray,
+        label: str,
+        *,
+        color: Optional[str] = None,
+    ) -> None:
+        axis.plot(
+            x_values,
+            values,
+            alpha=0.22,
+            linewidth=0.8,
+            color=color,
+        )
+        axis.plot(
+            x_values,
+            _rolling(values),
+            linewidth=1.8,
+            label=f"{label} ({window}-episode mean)",
+            color=color,
+        )
+
+    episode_x = _series(episodes, "episode")
+    if episode_x is not None:
+        reward = _series(episodes, "episode_formulation_reward")
+        active_dims = _series(episodes, "episode_active_action_dims")
+        scheduled_stall_rate = _series(
+            episodes,
+            "episode_scheduled_stall_rate",
+        )
+        service_rate = _series(episodes, "episode_service_rate")
+        requested_chunks = _series(
+            episodes,
+            "episode_requested_chunks",
+        )
+        quality_per_chunk = _series(
+            episodes,
+            "episode_quality_per_chunk",
+        )
+        degradation_per_chunk = _series(
+            episodes,
+            "episode_quality_degradation_per_chunk",
+        )
+        normalized_cost = _series(
+            episodes,
+            "episode_fast_cost_per_scheduled_user_slot",
+        )
+
+        if reward is not None and active_dims is not None:
+            fast_cost = -reward
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+            _plot_with_rolling(
+                axes[0],
+                episode_x,
+                fast_cost,
+                "Fast cost",
+            )
+            axes[0].set_title(
+                "Raw Fast cost (confounded by Random Slow workload)"
+            )
+            axes[0].set_xlabel("Episode")
+            axes[0].set_ylabel("Fast cost")
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+
+            axes[1].scatter(
+                active_dims,
+                fast_cost,
+                s=12,
+                alpha=0.55,
+            )
+            if active_dims.size >= 2 and np.ptp(active_dims) > 0.0:
+                slope, intercept = np.polyfit(
+                    active_dims,
+                    fast_cost,
+                    deg=1,
+                )
+                order = np.argsort(active_dims)
+                axes[1].plot(
+                    active_dims[order],
+                    intercept + slope * active_dims[order],
+                    linewidth=1.5,
+                    color="tab:red",
+                    label="OLS trend",
+                )
+                axes[1].legend()
+            axes[1].set_title("Workload confounding check")
+            axes[1].set_xlabel("Mean active action dimensions")
+            axes[1].set_ylabel("Fast cost")
+            axes[1].grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(
+                figures_dir / "episode_workload_and_cost.png",
+                dpi=200,
+            )
+            plt.close(fig)
+
+        available_rate_series = [
+            (
+                normalized_cost,
+                "Fast cost / scheduled-user-slot",
+            ),
+            (scheduled_stall_rate, "Scheduled stall rate"),
+            (service_rate, "Service rate"),
+            (requested_chunks, "Requested chunks"),
+        ]
+        available_rate_series = [
+            item for item in available_rate_series if item[0] is not None
+        ]
+        if available_rate_series:
+            fig, axes = plt.subplots(
+                len(available_rate_series),
+                1,
+                figsize=(10, 2.8 * len(available_rate_series)),
+                sharex=True,
+            )
+            axes_array = np.atleast_1d(axes)
+            for axis, (values, label) in zip(
+                axes_array,
+                available_rate_series,
+            ):
+                assert values is not None
+                _plot_with_rolling(
+                    axis,
+                    episode_x,
+                    values,
+                    label,
+                )
+                axis.set_ylabel(label)
+                axis.legend()
+                axis.grid(True, alpha=0.3)
+            axes_array[-1].set_xlabel("Episode")
+            fig.suptitle("Workload-aware Fast metrics")
+            fig.tight_layout()
+            fig.savefig(
+                figures_dir / "episode_normalized_fast_metrics.png",
+                dpi=200,
+            )
+            plt.close(fig)
+
+        if (
+            quality_per_chunk is not None
+            and degradation_per_chunk is not None
+        ):
+            fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+            _plot_with_rolling(
+                axes[0],
+                episode_x,
+                quality_per_chunk,
+                "Quality / chunk",
+            )
+            _plot_with_rolling(
+                axes[1],
+                episode_x,
+                degradation_per_chunk,
+                "Quality degradation / chunk",
+                color="tab:red",
+            )
+            axes[0].set_ylabel("Quality / chunk")
+            axes[1].set_ylabel("Degradation / chunk")
+            axes[1].set_xlabel("Episode")
+            for axis in axes:
+                axis.legend()
+                axis.grid(True, alpha=0.3)
+            fig.suptitle("Application-level quality metrics")
+            fig.tight_layout()
+            fig.savefig(
+                figures_dir / "episode_quality_metrics.png",
+                dpi=200,
+            )
+            plt.close(fig)
+
+        layer_series = [
+            _series(episodes, f"episode_layer_{layer}_ratio")
+            for layer in range(1, 5)
+        ]
+        if all(values is not None for values in layer_series):
+            fig, axis = plt.subplots(figsize=(10, 4.8))
+            for layer, values in enumerate(layer_series, start=1):
+                assert values is not None
+                axis.plot(
+                    episode_x,
+                    _rolling(values),
+                    label=f"Layer {layer}",
+                )
+            axis.axhline(
+                0.25,
+                color="black",
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.6,
+                label="Uniform marginal share",
+            )
+            axis.set_xlabel("Episode")
+            axis.set_ylabel("Executed layer ratio")
+            axis.set_title(
+                "Marginal layer shares (not a conditional-policy test)"
+            )
+            axis.legend(ncol=3)
+            axis.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(
+                figures_dir / "episode_layer_ratios.png",
+                dpi=200,
+            )
+            plt.close(fig)
+
+    update_x = _series(updates, "update")
+    if update_x is not None:
+        kl_post = _series(updates, "approx_kl_post")
+        clip_post = _series(updates, "clipfrac_post")
+        explained_variance = _series(
+            updates,
+            "explained_variance",
+        )
+        value_rmse = _series(updates, "value_rmse")
+
+        if kl_post is not None and clip_post is not None:
+            fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+            axes[0].plot(update_x, kl_post, linewidth=0.8)
+            axes[0].axhline(
+                0.03,
+                color="tab:red",
+                linestyle="--",
+                label="screening level 0.03",
+            )
+            axes[0].set_ylabel("Post-update KL")
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+
+            axes[1].plot(update_x, clip_post, linewidth=0.8)
+            axes[1].axhline(
+                0.25,
+                color="tab:orange",
+                linestyle="--",
+                label="screening level 0.25",
+            )
+            axes[1].axhline(
+                0.50,
+                color="tab:red",
+                linestyle="--",
+                label="high level 0.50",
+            )
+            axes[1].set_xlabel("PPO update")
+            axes[1].set_ylabel("Post-update clip fraction")
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+            fig.suptitle("PPO trust-region diagnostics")
+            fig.tight_layout()
+            fig.savefig(
+                figures_dir / "ppo_trust_region.png",
+                dpi=200,
+            )
+            plt.close(fig)
+
+        if explained_variance is not None and value_rmse is not None:
+            fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+            axes[0].plot(
+                update_x,
+                explained_variance,
+                linewidth=0.8,
+            )
+            axes[0].axhline(0.0, color="black", linewidth=1.0)
+            axes[0].set_ylabel("Explained variance")
+            axes[0].grid(True, alpha=0.3)
+            axes[1].plot(update_x, value_rmse, linewidth=0.8)
+            axes[1].set_xlabel("PPO update")
+            axes[1].set_ylabel("Value RMSE")
+            axes[1].grid(True, alpha=0.3)
+            fig.suptitle("Critic diagnostics")
+            fig.tight_layout()
+            fig.savefig(
+                figures_dir / "critic_diagnostics.png",
+                dpi=200,
+            )
+            plt.close(fig)
 
 
 # ======================================================================
@@ -2557,6 +2867,11 @@ def _execute_real_round_train(
         "charged_soc": 0.0,
         "outage_slots": 0.0,
         "charging_slots": 0.0,
+        "queue_playback_term": 0.0,
+        "video_delivery_term": 0.0,
+        "battery_consume_term": 0.0,
+        "battery_charge_term": 0.0,
+        "quality_degradation_term": 0.0,
         "min_soc": float("inf"),
         "service_rate": 0.0,
         "requested_chunks": 0.0,
@@ -2629,6 +2944,11 @@ def _execute_real_round_train(
             "charged_soc",
             "outage_slots",
             "charging_slots",
+            "queue_playback_term",
+            "video_delivery_term",
+            "battery_consume_term",
+            "battery_charge_term",
+            "quality_degradation_term",
         ):
             totals[key] += metrics[key]
         totals["min_soc"] = min(totals["min_soc"], metrics["min_soc"])
@@ -2743,6 +3063,11 @@ def _execute_real_round_eval(
         "charged_soc": 0.0,
         "charging_slots": 0.0,
         "outage_slots": 0.0,
+        "queue_playback_term": 0.0,
+        "video_delivery_term": 0.0,
+        "battery_consume_term": 0.0,
+        "battery_charge_term": 0.0,
+        "quality_degradation_term": 0.0,
         "min_soc": float("inf"),
         "service_rate": 0.0,
         "requested_chunks": 0.0,
@@ -2792,6 +3117,11 @@ def _execute_real_round_eval(
             "charged_soc",
             "charging_slots",
             "outage_slots",
+            "queue_playback_term",
+            "video_delivery_term",
+            "battery_consume_term",
+            "battery_charge_term",
+            "quality_degradation_term",
         ):
             totals[key] += metrics[key]
         totals["min_soc"] = min(totals["min_soc"], metrics["min_soc"])
@@ -3006,6 +3336,11 @@ def train(train_cfg: FastTrainConfig) -> None:
                 "unscheduled_user_slots": 0.0,
                 "consumed_soc": 0.0,
                 "charged_soc": 0.0,
+                "queue_playback_term": 0.0,
+                "video_delivery_term": 0.0,
+                "battery_consume_term": 0.0,
+                "battery_charge_term": 0.0,
+                "quality_degradation_term": 0.0,
                 "outage_slots": 0.0,
                 "service_rate": 0.0,
                 "requested_chunks": 0.0,
@@ -3114,6 +3449,11 @@ def train(train_cfg: FastTrainConfig) -> None:
                     "unscheduled_user_slots",
                     "consumed_soc",
                     "charged_soc",
+                    "queue_playback_term",
+                    "video_delivery_term",
+                    "battery_consume_term",
+                    "battery_charge_term",
+                    "quality_degradation_term",
                     "service_rate",
                     "requested_chunks",
                     "active_action_dims",
@@ -3238,6 +3578,12 @@ def train(train_cfg: FastTrainConfig) -> None:
                     "episode_unscheduled_stall": episode_totals[
                         "unscheduled_stall"
                     ],
+                    "episode_scheduled_user_slots": episode_totals[
+                        "scheduled_user_slots"
+                    ],
+                    "episode_unscheduled_user_slots": episode_totals[
+                        "unscheduled_user_slots"
+                    ],
                     "episode_scheduled_stall_rate": episode_totals[
                         "scheduled_stall_rate"
                     ],
@@ -3249,6 +3595,43 @@ def train(train_cfg: FastTrainConfig) -> None:
                     ],
                     "episode_quality_degradation_per_chunk": episode_totals[
                         "quality_degradation_per_chunk"
+                    ],
+                    "episode_fast_cost_per_scheduled_user_slot": (
+                        -float(episode_totals["reward"])
+                        / max(
+                            float(
+                                episode_totals[
+                                    "scheduled_user_slots"
+                                ]
+                            ),
+                            1.0,
+                        )
+                    ),
+                    "episode_delivery_per_scheduled_user_slot": (
+                        float(episode_totals["delivery"])
+                        / max(
+                            float(
+                                episode_totals[
+                                    "scheduled_user_slots"
+                                ]
+                            ),
+                            1.0,
+                        )
+                    ),
+                    "episode_queue_playback_term": episode_totals[
+                        "queue_playback_term"
+                    ],
+                    "episode_video_delivery_term": episode_totals[
+                        "video_delivery_term"
+                    ],
+                    "episode_battery_consume_term": episode_totals[
+                        "battery_consume_term"
+                    ],
+                    "episode_battery_charge_term": episode_totals[
+                        "battery_charge_term"
+                    ],
+                    "episode_quality_degradation_term": episode_totals[
+                        "quality_degradation_term"
                     ],
                     "episode_consumed_soc": episode_totals[
                         "consumed_soc"
@@ -3475,6 +3858,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 "unscheduled_user_slots": 0.0,
                 "consumed_soc": 0.0,
                 "charged_soc": 0.0,
+                "queue_playback_term": 0.0,
+                "video_delivery_term": 0.0,
+                "battery_consume_term": 0.0,
+                "battery_charge_term": 0.0,
+                "quality_degradation_term": 0.0,
                 "outage_slots": 0.0,
                 "min_soc": float("inf"),
                 "service_rate": 0.0,
@@ -3522,6 +3910,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     "unscheduled_user_slots",
                     "consumed_soc",
                     "charged_soc",
+                    "queue_playback_term",
+                    "video_delivery_term",
+                    "battery_consume_term",
+                    "battery_charge_term",
+                    "quality_degradation_term",
                     "outage_slots",
                     "service_rate",
                     "requested_chunks",
