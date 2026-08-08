@@ -2,7 +2,7 @@
 
 #SBATCH -J fast-ppo
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --mem=29G
 #SBATCH -p batch_eebme_ugrad
@@ -86,19 +86,6 @@ REQUESTED_PHASE="${FAST_PPO_PHASE:-pretrain}"
 [[ "${REQUESTED_PHASE}" == "pretrain" ]] \
     || die "run/fast_train.sh only supports FAST_PPO_PHASE=pretrain."
 export FAST_PPO_PHASE=pretrain
-export FAST_PPO_MODE=train
-export FAST_PPO_SLOW_MODE=random
-export FAST_PPO_SEED="${FAST_PPO_SEED:-2026}"
-export FAST_PPO_DETERMINISTIC_TORCH="${FAST_PPO_DETERMINISTIC_TORCH:-1}"
-export FAST_PPO_SEGMENT_ID="${FAST_PPO_SEGMENT_ID:-1}"
-export FAST_PPO_NUM_EPISODES="${FAST_PPO_NUM_EPISODES:-50}"
-export FAST_PPO_TARGET_TOTAL_EPISODES="${FAST_PPO_TARGET_TOTAL_EPISODES:-200}"
-export FAST_PPO_RUN_NAME="${FAST_PPO_RUN_NAME:-fast_pretrain_h1_seed${FAST_PPO_SEED}_noklstop}"
-export FAST_PPO_ACTOR_LR="${FAST_PPO_ACTOR_LR:-1.5e-5}"
-export FAST_PPO_CRITIC_LR="${FAST_PPO_CRITIC_LR:-3e-5}"
-export FAST_PPO_CAT_ENTROPY_COEF="${FAST_PPO_CAT_ENTROPY_COEF:-1e-4}"
-export FAST_PPO_POWER_ENTROPY_COEF="${FAST_PPO_POWER_ENTROPY_COEF:-1e-4}"
-export FAST_PPO_TARGET_KL="${FAST_PPO_TARGET_KL:-none}"
 
 if [[ -n "${FAST_PRETRAIN_RESUME_CHECKPOINT:-}" ]]; then
     export FAST_PPO_RESUME=1
