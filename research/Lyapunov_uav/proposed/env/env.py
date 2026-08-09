@@ -11,7 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - script-style fallback
     from config import EnvConfig
 
 from .action_types import EnvAction, SlowAction, FastAction
-from .validators import parse_slow_action, parse_fast_action
+from .validators import parse_slow_action, parse_fast_action, validate_slow_action_strict
 from .channel import RSUChannelModel, UAVChannelModel
 from .delivery.rsu_delivery import compute_rsu_delivery
 from .delivery.uav_delivery import compute_uav_delivery
@@ -834,6 +834,14 @@ class Env:
             )
 
         slow_act = parse_slow_action(action, self.cfg)
+        validate_slow_action_strict(
+            slow_act,
+            self.cfg,
+            user_region=self.user_region,
+            requested_content=self.requested_content,
+            uav_cached_content=self.uav_cached_content,
+            forbid_empty_hiring=True,
+        )
 
         rsu_region_mask = self._region_mask_rsu()
         uav_region_mask = self._region_mask_uav()

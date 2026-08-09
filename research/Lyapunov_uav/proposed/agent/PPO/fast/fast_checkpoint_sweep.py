@@ -14,14 +14,15 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 DEFAULT_EPISODES: Tuple[int, ...] = (
-    25,
-    50,
-    75,
     100,
-    125,
     150,
-    175,
     200,
+    225,
+    250,
+    275,
+    300,
+    305,
+    307
 )
 DEFAULT_SEEDS: Tuple[int, ...] = (2026, 2027, 2028)
 

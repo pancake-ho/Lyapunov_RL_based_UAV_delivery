@@ -1,8 +1,8 @@
 #!/usr/bin/bash
 
-#SBATCH -J fast-h1-sweep
+#SBATCH -J fast-h2-sweep
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --mem=29G
 #SBATCH -p batch_eebme_ugrad
@@ -18,8 +18,10 @@ CONDA_ENV_PATH="${FAST_CONDA_ENV_PATH:-${CONDA_ROOT}/envs/lab}"
 PYTHON_BIN="${CONDA_ENV_PATH}/bin/python"
 EXPECTED_BRANCH="feat/no-hrl"
 
-H1_RUN_ROOT="${FAST_H1_RUN_ROOT:-}"
+FAST_RUN_ROOT="${FAST_RUN_ROOT:-${FAST_H1_RUN_ROOT:-}}"
 SWEEP_OUTPUT="${FAST_CHECKPOINT_SWEEP_OUTPUT:-}"
+
+CHECKPOINT_EPISODES_TEXT="${FAST_CHECKPOINT_SWEEP_CHECKPOINT_EPISODES:-100 150 200 225 250 275 300 305}"
 EVAL_SEEDS_TEXT="${FAST_CHECKPOINT_SWEEP_SEEDS:-2026 2027 2028}"
 EVAL_EPISODES="${FAST_CHECKPOINT_SWEEP_EPISODES:-5}"
 EVAL_ROUNDS="${FAST_CHECKPOINT_SWEEP_ROUNDS:-5}"
@@ -32,17 +34,19 @@ die() {
     exit 2
 }
 
-[[ -n "${H1_RUN_ROOT}" ]] \
-    || die "Set FAST_H1_RUN_ROOT to the completed H1 run directory."
-[[ -d "${PROJECT_ROOT}" ]] || die "Project root not found: ${PROJECT_ROOT}"
-[[ -d "${H1_RUN_ROOT}/checkpoints" ]] \
-    || die "Checkpoint directory not found: ${H1_RUN_ROOT}/checkpoints"
-[[ -x "${PYTHON_BIN}" ]] || die "Python not found: ${PYTHON_BIN}"
+[[ -n "${FAST_RUN_ROOT}" ]] \
+    || die "Set FAST_RUN_ROOT to the H2 Fast-pretraining run directory."
+[[ -d "${PROJECT_ROOT}" ]] \
+    || die "Project root not found: ${PROJECT_ROOT}"
+[[ -d "${FAST_RUN_ROOT}/checkpoints" ]] \
+    || die "Checkpoint directory not found: ${FAST_RUN_ROOT}/checkpoints"
+[[ -x "${PYTHON_BIN}" ]] \
+    || die "Python not found: ${PYTHON_BIN}"
 [[ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]] \
     || die "Conda initialization script not found."
 
 if [[ -z "${SWEEP_OUTPUT}" ]]; then
-    SWEEP_OUTPUT="${H1_RUN_ROOT}/checkpoint_sweep_v1"
+    SWEEP_OUTPUT="${FAST_RUN_ROOT}/checkpoint_sweep_h2_v1"
 fi
 
 cd "${PROJECT_ROOT}"
@@ -69,7 +73,6 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export FAST_PPO_DEVICE="${FAST_PPO_DEVICE:-cuda}"
 export FAST_PPO_DETERMINISTIC_TORCH=1
-export FAST_PPO_SLOW_MODE=random
 
 unset FAST_PRETRAIN_RESUME_CHECKPOINT
 unset JOINT_RESUME_CHECKPOINT
@@ -79,10 +82,15 @@ unset FAST_PPO_RESUME
 "${PYTHON_BIN}" -m py_compile \
     agent/PPO/fast/fast_train.py \
     agent/PPO/fast/fast_checkpoint_sweep.py
+
 "${PYTHON_BIN}" -m unittest -v \
     agent.PPO.fast.test_fast_checkpoint_sweep
 
+read -r -a CHECKPOINT_EPISODES <<< "${CHECKPOINT_EPISODES_TEXT}"
 read -r -a EVAL_SEEDS <<< "${EVAL_SEEDS_TEXT}"
+
+[[ "${#CHECKPOINT_EPISODES[@]}" -ge 1 ]] \
+    || die "No checkpoint episodes were supplied."
 [[ "${#EVAL_SEEDS[@]}" -ge 2 ]] \
     || die "Use at least two evaluation seeds for a confidence interval."
 
@@ -92,9 +100,11 @@ COMMAND=(
     -m
     agent.PPO.fast.fast_checkpoint_sweep
     --checkpoint-dir
-    "${H1_RUN_ROOT}/checkpoints"
+    "${FAST_RUN_ROOT}/checkpoints"
     --output-dir
     "${SWEEP_OUTPUT}"
+    --episodes
+    "${CHECKPOINT_EPISODES[@]}"
     --eval-episodes
     "${EVAL_EPISODES}"
     --eval-rounds-per-episode
@@ -111,6 +121,16 @@ if [[ "${REUSE_COMPLETED}" == "1" ]]; then
     COMMAND+=(--reuse-completed)
 fi
 
-echo "[SWEEP START] h1=${H1_RUN_ROOT} output=${SWEEP_OUTPUT}"
+echo "[SWEEP START]"
+echo "  fast_run_root       = ${FAST_RUN_ROOT}"
+echo "  output              = ${SWEEP_OUTPUT}"
+echo "  checkpoints         = ${CHECKPOINT_EPISODES[*]}"
+echo "  eval_seeds          = ${EVAL_SEEDS[*]}"
+echo "  eval_episodes       = ${EVAL_EPISODES}"
+echo "  eval_rounds         = ${EVAL_ROUNDS}"
+echo "  git_commit          = $(git rev-parse HEAD)"
+
 "${COMMAND[@]}"
-echo "[SWEEP DONE] decision=${SWEEP_OUTPUT}/selection.json"
+
+echo "[SWEEP DONE]"
+echo "  decision=${SWEEP_OUTPUT}/selection.json"

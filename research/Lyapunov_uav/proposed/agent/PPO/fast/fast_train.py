@@ -72,7 +72,7 @@ from agent.PPO.fast.fast_agent import (
     FastPPOConfig as AgentPPOConfig,
 )
 from agent.PPO.fast.fast_action import FastActionCodec
-
+from agent.PPO.slow.slow_matching import select_dpp_max_weight_matching
 
 # ======================================================================
 # Configuration / common utilities
@@ -1724,10 +1724,22 @@ def select_slow_action_dpp(
     train_cfg: FastTrainConfig,
     process_pool: _PersistentShadowProcessPool,
 ) -> SlowSelectionResult:
+    """
+    DPP-based sequential maximum-weight bipartite b-matching.
+
+    Pair edge weights are obtained from full-frame Fast-policy cumulative
+    DPP-cost forecasts. RSU matching is solved first. UAV matching is then
+    solved only on RSU-unmatched residual users, including cache compatibility
+    and one-time hiring cost.
+
+    Maximum-weight matching is exact for the constructed additive pair-weight
+    surrogate. Global optimality of the original coupled full-round DPP
+    objective is intentionally not claimed.
+    """
     if int(env.round_slot) != 0:
         raise RuntimeError(
-            "Slow-DPP must run at round boundary, "
-            f"got {env.round_slot}."
+            "Slow-DPP matching must run at a round boundary, "
+            f"got round_slot={env.round_slot}."
         )
 
     audit_runtime = bool(
@@ -1739,13 +1751,11 @@ def select_slow_action_dpp(
         if audit_runtime
         else None
     )
-
     model_digest_before = (
         _model_parameter_digest(agent)
         if audit_runtime
         else None
     )
-
     normalizer_state_before = (
         copy.deepcopy(
             agent.obs_normalizer.state_dict()
@@ -1758,7 +1768,6 @@ def select_slow_action_dpp(
     )
 
     wall_start = time.perf_counter()
-
     agent.model.eval()
 
     evaluator = SlowDPPEvaluator(
@@ -1769,217 +1778,34 @@ def select_slow_action_dpp(
     )
 
     try:
-        current_action = _zero_slow_action(env)
-        current_score = float("inf")
-
-        completed_sweeps = 0
-
-        for sweep_idx in range(
-            int(train_cfg.dpp_coordinate_sweeps)
-        ):
-            # 현재 complete action과 모든 one-region complete-action
-            # neighbor를 한 번의 evaluator 호출로 묶는다.
-            #
-            # 기존 코드:
-            #   region별 evaluator.evaluate()를 순차 호출
-            #
-            # 개선 코드:
-            #   한 sweep의 모든 region 후보를 모아 evaluator.evaluate()
-            #   한 번으로 처리
-            trial_actions: list[
-                Dict[str, np.ndarray]
-            ] = [current_action]
-
-            region_blocks: list[
-                Tuple[
-                    int,
-                    int,
-                    int,
-                    list[RegionSlowCandidate],
-                ]
-            ] = []
-
-            for region_idx in range(
-                int(env.num_rsu)
-            ):
-                local_candidates = (
-                    _region_candidates(
-                        env,
-                        region_idx,
-                        train_cfg,
-                    )
-                )
-
-                block_start = len(trial_actions)
-
-                trial_actions.extend(
-                    _replace_region_candidate(
-                        current_action,
-                        region_idx,
-                        local,
-                    )
-                    for local in local_candidates
-                )
-
-                block_end = len(trial_actions)
-
-                region_blocks.append(
-                    (
-                        region_idx,
-                        block_start,
-                        block_end,
-                        local_candidates,
-                    )
-                )
-
-            trial_scores = np.asarray(
-                evaluator.evaluate(
-                    trial_actions
+        matching = (
+            select_dpp_max_weight_matching(
+                env=env,
+                evaluate=evaluator.evaluate,
+                min_edge_weight=float(
+                    train_cfg
+                    .dpp_improvement_tolerance
                 ),
-                dtype=np.float64,
-            )
-
-            current_score = float(
-                trial_scores[0]
-            )
-
-            if not np.isfinite(current_score):
-                raise RuntimeError(
-                    "Current complete slow action "
-                    "produced nonfinite cost."
-                )
-
-            # 같은 current action을 기준으로 각 region의 최선 candidate를
-            # 구한다. 이 단계는 parallel/Jacobi proposal이다.
-            combined_action = {
-                key: np.asarray(value).copy()
-                for key, value
-                in current_action.items()
-            }
-
-            proposed_any = False
-
-            # combined action이 cross-region interaction 때문에 악화될
-            # 경우를 대비하여, 이미 full-round 평가된 one-region 후보 중
-            # 전체 최선 후보도 저장한다.
-            best_single_action = current_action
-            best_single_score = current_score
-
-            for (
-                region_idx,
-                block_start,
-                block_end,
-                local_candidates,
-            ) in region_blocks:
-                block_scores = trial_scores[
-                    block_start:block_end
-                ]
-
-                finite = np.flatnonzero(
-                    np.isfinite(block_scores)
-                )
-
-                if finite.size == 0:
-                    continue
-
-                local_idx = int(
-                    finite[
-                        np.argmin(
-                            block_scores[finite]
-                        )
-                    ]
-                )
-
-                score = float(
-                    block_scores[local_idx]
-                )
-
-                action_idx = (
-                    block_start + local_idx
-                )
-
-                if score < best_single_score:
-                    best_single_score = score
-                    best_single_action = (
-                        trial_actions[action_idx]
-                    )
-
-                if (
-                    score
-                    < current_score
-                    - float(
-                        train_cfg
-                        .dpp_improvement_tolerance
-                    )
-                ):
-                    combined_action = (
-                        _replace_region_candidate(
-                            combined_action,
-                            region_idx,
-                            local_candidates[
-                                local_idx
-                            ],
-                        )
-                    )
-                    proposed_any = True
-
-            if not proposed_any:
-                completed_sweeps = (
-                    sweep_idx + 1
-                )
-                break
-
-            # 여러 region의 변경을 합친 complete action은 반드시 다시
-            # full 3600-slot DPP 평가를 수행한다.
-            combined_score = float(
-                evaluator.evaluate(
-                    [combined_action]
-                )[0]
-            )
-
-            if (
-                np.isfinite(combined_score)
-                and combined_score
-                < current_score
-                - float(
+                forbid_empty_hiring=bool(
                     train_cfg
-                    .dpp_improvement_tolerance
-                )
-            ):
-                current_action = combined_action
-                current_score = combined_score
-
-            elif (
-                np.isfinite(best_single_score)
-                and best_single_score
-                < current_score
-                - float(
-                    train_cfg
-                    .dpp_improvement_tolerance
-                )
-            ):
-                # combined action은 악화됐지만 one-region neighbor가
-                # 개선된 경우, 이미 exact full-round 평가된 최선의
-                # one-region action을 채택한다.
-                current_action = (
-                    best_single_action
-                )
-                current_score = (
-                    best_single_score
-                )
-
-            else:
-                completed_sweeps = (
-                    sweep_idx + 1
-                )
-                break
-
-            completed_sweeps = (
-                sweep_idx + 1
+                    .dpp_forbid_empty_hiring
+                ),
             )
-
+        )
     finally:
         evaluator.close()
+
+    current_action = {
+        key: np.asarray(
+            value,
+            dtype=np.int32,
+        ).copy()
+        for key, value
+        in matching.action.items()
+    }
+    current_score = float(
+        matching.predicted_round_cost
+    )
 
     _validate_candidate(
         env,
@@ -1987,8 +1813,16 @@ def select_slow_action_dpp(
         train_cfg,
     )
 
+    if not np.isfinite(
+        current_score
+    ):
+        raise RuntimeError(
+            "Selected Slow MWM DPP cost is not finite."
+        )
+
     wall_seconds = (
-        time.perf_counter() - wall_start
+        time.perf_counter()
+        - wall_start
     )
 
     if (
@@ -1997,7 +1831,7 @@ def select_slow_action_dpp(
         != env_digest_before
     ):
         raise RuntimeError(
-            "Slow forecast mutated "
+            "Slow matching forecast mutated "
             "the real environment."
         )
 
@@ -2007,13 +1841,15 @@ def select_slow_action_dpp(
         != model_digest_before
     ):
         raise RuntimeError(
-            "Slow forecast mutated "
+            "Slow matching forecast mutated "
             "Fast policy parameters."
         )
 
     if normalizer_state_before is not None:
-        after = agent.obs_normalizer.state_dict()
-
+        after = (
+            agent.obs_normalizer
+            .state_dict()
+        )
         if (
             pickle.dumps(after)
             != pickle.dumps(
@@ -2021,8 +1857,8 @@ def select_slow_action_dpp(
             )
         ):
             raise RuntimeError(
-                "Slow forecast mutated "
-                "observation normalizer."
+                "Slow matching forecast mutated "
+                "the observation normalizer."
             )
 
     mean_batch = (
@@ -2035,27 +1871,53 @@ def select_slow_action_dpp(
         else 0.0
     )
 
+    estimator_mode = (
+        "single_scenario_mean_rsu_channel_proxy"
+        if (
+            int(
+                train_cfg
+                .dpp_forecast_scenarios
+            )
+            == 1
+            and bool(
+                train_cfg
+                .dpp_use_mean_rsu_channel
+            )
+        )
+        else "sample_average_rollout"
+    )
+
+    print(
+        "[SLOW MWM] "
+        f"stage={matching.chosen_stage} "
+        f"outside={matching.baseline_cost:.4f} "
+        f"rsu={matching.rsu_only_cost:.4f} "
+        f"final={matching.provisional_final_cost:.4f} "
+        f"selected={matching.predicted_round_cost:.4f} "
+        f"rsu_edges={matching.rsu_candidate_edges} "
+        f"rsu_matches={len(matching.rsu_matches)} "
+        f"uav_edges={matching.uav_candidate_edges} "
+        f"uav_matches={len(matching.uav_matches)} "
+        f"hired={len(matching.hired_uavs)} "
+        f"rsu_gain={matching.rsu_weight_sum:.4f} "
+        f"uav_service_gain={matching.uav_service_weight_sum:.4f} "
+        f"uav_net_gain={matching.uav_net_weight_sum:.4f}",
+        flush=True,
+    )
+
     return SlowSelectionResult(
         action=current_action,
         predicted_round_cost=float(
             current_score
         ),
         solver_mode=(
-            "parallel_jacobi_coordinate_descent_"
-            "full_action_rollout"
+            "sequential_dpp_max_weight_"
+            "b_matching_pair_rollout:"
+            f"{matching.chosen_stage}"
         ),
-        estimator_mode=(
-            "single_scenario_mean_rsu_channel_proxy"
-            if (
-                int(train_cfg.dpp_forecast_scenarios) == 1
-                and bool(train_cfg.dpp_use_mean_rsu_channel)
-            )
-            else "sample_average_rollout"
-        ),
+        estimator_mode=estimator_mode,
         global_optimum_guaranteed=False,
-        coordinate_sweeps=int(
-            completed_sweeps
-        ),
+        coordinate_sweeps=0,
         candidate_requests=int(
             evaluator.candidate_requests
         ),
@@ -2074,13 +1936,22 @@ def select_slow_action_dpp(
         env_seconds=float(
             evaluator.env_seconds
         ),
-        mean_gpu_batch=mean_batch,
+        mean_gpu_batch=float(
+            mean_batch
+        ),
         forecast_trial_steps=int(
             len(evaluator.cache)
-            * int(train_cfg.dpp_forecast_scenarios)
-            * int(train_cfg.dpp_forecast_horizon)
+            * int(
+                train_cfg
+                .dpp_forecast_scenarios
+            )
+            * int(
+                train_cfg
+                .dpp_forecast_horizon
+            )
         ),
     )
+
 
 # ======================================================================
 # Metrics / plots
@@ -3831,6 +3702,10 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
     )
 
     logger = ScalarLogger(run_dir / "logs" / "eval_episodes.csv")
+    round_logger = ScalarLogger(
+        run_dir / "logs" / "eval_rounds.csv"
+    )
+    global_eval_round = 0
     slow_rng = np.random.default_rng(int(train_cfg.seed) + 20_011)
     forecast_pool: Optional[_PersistentShadowProcessPool] = None
     if train_cfg.slow_decision_mode == "dpp":
@@ -3877,7 +3752,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             }
             layer_counts = np.zeros(int(env.cfg.layer), dtype=np.float64)
 
-            for _ in range(int(train_cfg.eval_rounds_per_episode)):
+            for _ in range(1, int(train_cfg.eval_rounds_per_episode) + 1):
                 obs, slow_info = _select_and_apply_slow_action(
                     env,
                     agent,
@@ -3889,11 +3764,34 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     env, agent, obs, train_cfg
                 )
                 predicted = float(slow_info["predicted_round_cost"])
+                round_gap = (
+                    float(realized["realized_round_cost"])
+                    - predicted
+                    if np.isfinite(predicted)
+                    else float("nan")
+                )
+
                 if np.isfinite(predicted):
-                    totals["prediction_gap_sum"] += (
-                        realized["realized_round_cost"] - predicted
-                    )
+                    totals["prediction_gap_sum"] += round_gap
                     totals["prediction_gap_count"] += 1
+                
+                global_eval_round += 1
+                round_logger.write(
+                    {
+                        "global_eval_round": int(
+                            global_eval_round
+                        ),
+                        "episode": int(episode_idx),
+                        "round_in_episode": int(
+                            round_in_episode
+                        ),
+                        **slow_info,
+                        **realized,
+                        "prediction_gap": float(
+                            round_gap
+                        ),
+                    }
+                )
                 totals["reward"] += realized["formulation_reward"]
                 totals["realized_round_cost"] += realized[
                     "realized_round_cost"
