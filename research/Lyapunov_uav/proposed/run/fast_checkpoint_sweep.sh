@@ -7,6 +7,7 @@
 #SBATCH --mem=29G
 #SBATCH -p batch_eebme_ugrad
 #SBATCH -t 1-0
+#SBATCH --exclude=moana-y5
 #SBATCH -o logs/slurm-fast-sweep-%A.out
 
 set -euo pipefail
