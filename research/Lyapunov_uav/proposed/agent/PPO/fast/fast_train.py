@@ -3752,7 +3752,7 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             }
             layer_counts = np.zeros(int(env.cfg.layer), dtype=np.float64)
 
-            for _ in range(1, int(train_cfg.eval_rounds_per_episode) + 1):
+            for round_in_episode in range(1, int(train_cfg.eval_rounds_per_episode) + 1):
                 obs, slow_info = _select_and_apply_slow_action(
                     env,
                     agent,
