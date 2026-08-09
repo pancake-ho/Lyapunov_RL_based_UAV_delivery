@@ -11,6 +11,31 @@
 
 set -euo pipefail
 umask 027
+
+# =====================================================================
+# Do NOT inherit old experiment-specific exports
+# =====================================================================
+#
+# This launcher is self-contained.
+# Old login-shell experiment variables must not affect this sweep.
+#
+# IMPORTANT:
+# CUDA_VISIBLE_DEVICES must NOT be unset because Slurm owns it.
+# =====================================================================
+
+while IFS='=' read -r name _; do
+    case "${name}" in
+        FAST_PPO_*|\
+        FAST_CHECKPOINT_SWEEP_*|\
+        FAST_PRETRAIN_*|\
+        JOINT_*|\
+        FAST_H1_RUN_ROOT)
+            unset "${name}"
+            ;;
+    esac
+done < <(env)
+
+
 # =====================================================================
 # Fixed experiment paths
 # =====================================================================
@@ -27,31 +52,6 @@ FAST_RUN_ROOT="${PROJECT_ROOT}/fast/fast_pretrain_h2_seed2026_ep400_v1"
 
 JOB_ID="${SLURM_JOB_ID:-manual}"
 ALLOCATED_CPUS="${SLURM_CPUS_PER_TASK:-16}"
-
-
-# =====================================================================
-# Do NOT inherit old Fast-PPO experiment exports
-# =====================================================================
-#
-# The checkpoint-sweep launcher is self-contained.
-# Any FAST_PPO_*, FAST_CHECKPOINT_SWEEP_*, resume, or joint variables
-# remaining in the login shell must not alter this experiment.
-#
-# CUDA_VISIBLE_DEVICES is intentionally NOT cleared because Slurm owns it.
-# =====================================================================
-
-while IFS='=' read -r name _; do
-    case "${name}" in
-        FAST_PPO_*|\
-        FAST_CHECKPOINT_SWEEP_*|\
-        FAST_PRETRAIN_*|\
-        JOINT_*|\
-        FAST_RUN_ROOT|\
-        FAST_H1_RUN_ROOT)
-            unset "${name}"
-            ;;
-    esac
-done < <(env)
 
 
 # =====================================================================
