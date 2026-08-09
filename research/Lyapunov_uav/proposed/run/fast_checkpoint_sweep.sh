@@ -71,43 +71,6 @@ echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-NOT_SET}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-NOT_SET}"
 echo "============================================================"
 
-nvidia-smi -L \
-    || die "nvidia-smi cannot access the allocated GPU."
-
-"${PYTHON_BIN}" - <<'PY'
-import os
-import socket
-import torch
-
-print("[PYTORCH CUDA PREFLIGHT]")
-print("hostname             =", socket.gethostname())
-print("torch                =", torch.__version__)
-print("torch.version.cuda   =", torch.version.cuda)
-print("CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
-print("cuda available       =", torch.cuda.is_available())
-print("cuda device count    =", torch.cuda.device_count())
-
-if torch.version.cuda is None:
-    raise SystemExit(
-        "[ERROR] PyTorch is a CPU-only build."
-    )
-
-if not torch.cuda.is_available():
-    raise SystemExit(
-        "[ERROR] CUDA is unavailable inside this Slurm allocation."
-    )
-
-if torch.cuda.device_count() < 1:
-    raise SystemExit(
-        "[ERROR] No CUDA device is visible."
-    )
-
-print(
-    "device 0             =",
-    torch.cuda.get_device_name(0),
-)
-PY
-
 export PYTHONUNBUFFERED=1
 export PYTHONHASHSEED=2026
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
