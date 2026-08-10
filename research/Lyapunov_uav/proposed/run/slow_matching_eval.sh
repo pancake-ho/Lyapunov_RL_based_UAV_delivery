@@ -26,7 +26,7 @@ PYTHON_BIN="${CONDA_ENV_PATH}/bin/python"
 
 EXPECTED_BRANCH="feat/no-hrl"
 
-FAST_PPO_CHECKPOINT="${PROJECT_ROOT}/fast/fast_pretrain_h2_seed2026_ep400_v1/checkpoints/fast_ppo_pretrain_ep300.pt"
+SELECTED_FAST_CHECKPOINT="${PROJECT_ROOT}/fast/fast_pretrain_h2_seed2026_ep400_v1/checkpoints/fast_ppo_pretrain_ep300.pt"
 
 JOB_ID="${SLURM_JOB_ID:-manual}"
 ALLOCATED_CPUS="${SLURM_CPUS_PER_TASK:-16}"
@@ -208,9 +208,9 @@ unset ALLOW_EXISTING_RUN_DIR || true
     || die \
     "Conda initialization script does not exist."
 
-[[ -f "${FAST_PPO_CHECKPOINT}" ]] \
+[[ -f "${SELECTED_FAST_CHECKPOINT}" ]] \
     || die \
-    "Fast checkpoint not found: ${FAST_PPO_CHECKPOINT}"
+    "Fast checkpoint not found: ${SELECTED_FAST_CHECKPOINT}"
 
 
 cd "${PROJECT_ROOT}"
@@ -308,7 +308,7 @@ export MALLOC_ARENA_MAX=2
 
 export FAST_PPO_PHASE="eval_joint"
 
-export FAST_PPO_CHECKPOINT="${FAST_PPO_CHECKPOINT}"
+export FAST_PPO_CHECKPOINT="${SELECTED_FAST_CHECKPOINT}"
 
 export FAST_PPO_DPP_FORECAST_WORKERS="${DPP_WORKERS}"
 
@@ -358,7 +358,7 @@ export ALLOW_EXISTING_RUN_DIR=0
 
     echo "mode=${MODE}"
 
-    echo "checkpoint=${FAST_PPO_CHECKPOINT}"
+    echo "checkpoint=${SELECTED_FAST_CHECKPOINT}"
 
     echo "eval_seeds=${EVAL_SEEDS[*]}"
 
@@ -533,7 +533,7 @@ fi
 
 echo "============================================================"
 echo "[SLOW MWM ${MODE^^} START]"
-echo "checkpoint=${FAST_PPO_CHECKPOINT}"
+echo "checkpoint=${SELECTED_FAST_CHECKPOINT}"
 echo "output_root=${OUTPUT_ROOT}"
 echo "============================================================"
 
