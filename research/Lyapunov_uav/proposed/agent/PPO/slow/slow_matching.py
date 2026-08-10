@@ -47,22 +47,37 @@ class MatchingSelection:
     action: SlowActionDict
     predicted_round_cost: float
 
+    # Exact full-round stage scores.
     baseline_cost: float
     rsu_only_cost: float
     provisional_final_cost: float
     chosen_stage: str
 
+    # RSU additive-surrogate diagnostics.
     rsu_candidate_edges: int
-    uav_candidate_edges: int
-
+    rsu_positive_candidate_edges: int
+    best_rsu_edge_weight: float
     rsu_matches: Tuple[PairEdge, ...]
-    uav_matches: Tuple[PairEdge, ...]
-
     rsu_weight_sum: float
+
+    # UAV candidate-edge diagnostics.
+    uav_candidate_edges: int
+    uav_positive_candidate_edges: int
+    best_uav_edge_weight: float
+
+    # UAV b-matching result before the fixed hiring-cost gate.
+    provisional_uav_match_count: int
+    provisional_uav_provider_count: int
+    provisional_uav_service_weight_sum: float
+    provisional_uav_hiring_cost_sum: float
+    provisional_uav_net_weight_sum: float
+    best_uav_provider_net_gain: float
+
+    # UAV matching retained after the fixed hiring-cost gate.
+    uav_matches: Tuple[PairEdge, ...]
     uav_service_weight_sum: float
     uav_net_weight_sum: float
     hired_uavs: Tuple[int, ...]
-
 
 def _copy_action(
     action: Mapping[str, np.ndarray],
@@ -640,6 +655,30 @@ def select_dpp_max_weight_matching(
                 ),
             )
         )
+    
+    rsu_finite_weights = [
+        float(edge.weight)
+        for edge in rsu_edges
+        if math.isfinite(
+            float(edge.weight)
+        )
+    ]
+
+    rsu_positive_candidate_edges = int(
+        sum(
+            1
+            for weight in rsu_finite_weights
+            if weight > threshold
+        )
+    )
+
+    best_rsu_edge_weight = (
+        float(
+            max(rsu_finite_weights)
+        )
+        if rsu_finite_weights
+        else float("nan")
+    )    
 
     rsu_matches = (
         solve_max_weight_b_matching(
@@ -777,6 +816,29 @@ def select_dpp_max_weight_matching(
             )
         )
 
+    uav_finite_weights = [
+        float(edge.weight)
+        for edge in uav_edges
+        if math.isfinite(
+            float(edge.weight)
+        )
+    ]
+
+    uav_positive_candidate_edges = int(
+        sum(
+            1
+            for weight in uav_finite_weights
+            if weight > threshold
+        )
+    )
+
+    best_uav_edge_weight = (
+        float(
+            max(uav_finite_weights)
+        )
+        if uav_finite_weights
+        else float("nan")
+    )
     provisional_uav_matches = (
         solve_max_weight_b_matching(
             edges=uav_edges,
@@ -788,6 +850,44 @@ def select_dpp_max_weight_matching(
             ],
             min_weight=threshold,
         )
+    )
+    provisional_uav_providers = tuple(
+        sorted(
+            {
+                int(edge.provider)
+                for edge
+                in provisional_uav_matches
+            }
+        )
+    )
+
+    provisional_uav_service_weight_sum = float(
+        sum(
+            float(edge.weight)
+            for edge
+            in provisional_uav_matches
+        )
+    )
+
+    provisional_uav_hiring_cost_sum = float(
+        sum(
+            float(
+                hiring_costs[
+                    provider
+                ]
+            )
+            for provider
+            in provisional_uav_providers
+        )
+    )
+
+    provisional_uav_net_weight_sum = float(
+        provisional_uav_service_weight_sum
+        - provisional_uav_hiring_cost_sum
+    )
+
+    best_uav_provider_net_gain = float(
+        "nan"
     )
 
     by_uav: Dict[
@@ -809,16 +909,19 @@ def select_dpp_max_weight_matching(
         provider_edges = by_uav[
             provider
         ]
+
         if not provider_edges:
             continue
 
         service_gain = float(
             sum(
                 float(edge.weight)
-                for edge in provider_edges
+                for edge
+                in provider_edges
             )
         )
-        net_gain = (
+
+        net_gain = float(
             service_gain
             - float(
                 hiring_costs[
@@ -827,13 +930,25 @@ def select_dpp_max_weight_matching(
             )
         )
 
+        if (
+            not math.isfinite(
+                best_uav_provider_net_gain
+            )
+            or net_gain
+            > best_uav_provider_net_gain
+        ):
+            best_uav_provider_net_gain = (
+                net_gain
+            )
+
         if net_gain > threshold:
             hired_uavs.append(
                 int(provider)
             )
+
             kept_uav_matches.extend(
                 provider_edges
-            )
+            )   
 
     kept_uav_matches.sort(
         key=lambda edge: (
@@ -934,6 +1049,7 @@ def select_dpp_max_weight_matching(
         predicted_round_cost=float(
             chosen_cost
         ),
+
         baseline_cost=float(
             baseline_cost
         ),
@@ -946,20 +1062,58 @@ def select_dpp_max_weight_matching(
         chosen_stage=str(
             chosen_stage
         ),
+
         rsu_candidate_edges=int(
             len(rsu_edges)
         ),
-        uav_candidate_edges=int(
-            len(uav_edges)
+        rsu_positive_candidate_edges=int(
+            rsu_positive_candidate_edges
+        ),
+        best_rsu_edge_weight=float(
+            best_rsu_edge_weight
         ),
         rsu_matches=tuple(
             rsu_matches
         ),
-        uav_matches=tuple(
-            uav_matches
-        ),
         rsu_weight_sum=float(
             rsu_weight_sum
+        ),
+
+        uav_candidate_edges=int(
+            len(uav_edges)
+        ),
+        uav_positive_candidate_edges=int(
+            uav_positive_candidate_edges
+        ),
+        best_uav_edge_weight=float(
+            best_uav_edge_weight
+        ),
+
+        provisional_uav_match_count=int(
+            len(
+                provisional_uav_matches
+            )
+        ),
+        provisional_uav_provider_count=int(
+            len(
+                provisional_uav_providers
+            )
+        ),
+        provisional_uav_service_weight_sum=float(
+            provisional_uav_service_weight_sum
+        ),
+        provisional_uav_hiring_cost_sum=float(
+            provisional_uav_hiring_cost_sum
+        ),
+        provisional_uav_net_weight_sum=float(
+            provisional_uav_net_weight_sum
+        ),
+        best_uav_provider_net_gain=float(
+            best_uav_provider_net_gain
+        ),
+
+        uav_matches=tuple(
+            uav_matches
         ),
         uav_service_weight_sum=float(
             uav_service_weight_sum
@@ -969,6 +1123,7 @@ def select_dpp_max_weight_matching(
         ),
         hired_uavs=tuple(
             int(value)
-            for value in hired_uavs
+            for value
+            in hired_uavs
         ),
     )

@@ -572,20 +572,51 @@ class RegionSlowCandidate:
 @dataclass
 class SlowSelectionResult:
     action: Dict[str, np.ndarray]
+
     predicted_round_cost: float
     solver_mode: str
     estimator_mode: str
     global_optimum_guaranteed: bool
+
+    chosen_stage: str
+
+    baseline_cost: float
+    rsu_only_cost: float
+    provisional_final_cost: float
+
+    rsu_candidate_edges: int
+    rsu_positive_candidate_edges: int
+    best_rsu_edge_weight: float
+    rsu_match_count: int
+    rsu_weight_sum: float
+
+    uav_candidate_edges: int
+    uav_positive_candidate_edges: int
+    best_uav_edge_weight: float
+
+    provisional_uav_match_count: int
+    provisional_uav_provider_count: int
+    provisional_uav_service_weight_sum: float
+    provisional_uav_hiring_cost_sum: float
+    provisional_uav_net_weight_sum: float
+    best_uav_provider_net_gain: float
+
+    uav_post_hiring_gate_match_count: int
+    uav_post_hiring_gate_uav_count: int
+    uav_service_weight_sum: float
+    uav_net_weight_sum: float
+
     coordinate_sweeps: int
+
     candidate_requests: int
     unique_candidates: int
     finite_candidates: int
+
     forecast_seconds: float
     policy_seconds: float
     env_seconds: float
     mean_gpu_batch: float
     forecast_trial_steps: int
-
 
 def _region_candidates(
     env: Env,
@@ -1892,55 +1923,192 @@ def select_slow_action_dpp(
         f"stage={matching.chosen_stage} "
         f"outside={matching.baseline_cost:.4f} "
         f"rsu={matching.rsu_only_cost:.4f} "
-        f"final={matching.provisional_final_cost:.4f} "
+        f"rsu_uav={matching.provisional_final_cost:.4f} "
         f"selected={matching.predicted_round_cost:.4f} "
+
         f"rsu_edges={matching.rsu_candidate_edges} "
+        f"rsu_positive_edges="
+        f"{matching.rsu_positive_candidate_edges} "
         f"rsu_matches={len(matching.rsu_matches)} "
-        f"uav_edges={matching.uav_candidate_edges} "
-        f"uav_matches={len(matching.uav_matches)} "
-        f"hired={len(matching.hired_uavs)} "
         f"rsu_gain={matching.rsu_weight_sum:.4f} "
-        f"uav_service_gain={matching.uav_service_weight_sum:.4f} "
-        f"uav_net_gain={matching.uav_net_weight_sum:.4f}",
+
+        f"uav_edges={matching.uav_candidate_edges} "
+        f"uav_positive_edges="
+        f"{matching.uav_positive_candidate_edges} "
+        f"uav_best_edge="
+        f"{matching.best_uav_edge_weight:.4f} "
+
+        f"uav_provisional_matches="
+        f"{matching.provisional_uav_match_count} "
+        f"uav_provisional_providers="
+        f"{matching.provisional_uav_provider_count} "
+        f"uav_provisional_service_gain="
+        f"{matching.provisional_uav_service_weight_sum:.4f} "
+        f"uav_provisional_hiring_cost="
+        f"{matching.provisional_uav_hiring_cost_sum:.4f} "
+        f"uav_provisional_net_gain="
+        f"{matching.provisional_uav_net_weight_sum:.4f} "
+        f"uav_best_provider_net_gain="
+        f"{matching.best_uav_provider_net_gain:.4f} "
+
+        f"uav_gate_matches="
+        f"{len(matching.uav_matches)} "
+        f"uav_gate_hired="
+        f"{len(matching.hired_uavs)} "
+        f"uav_kept_service_gain="
+        f"{matching.uav_service_weight_sum:.4f} "
+        f"uav_kept_net_gain="
+        f"{matching.uav_net_weight_sum:.4f}",
         flush=True,
     )
 
     return SlowSelectionResult(
         action=current_action,
+
         predicted_round_cost=float(
             current_score
         ),
+
         solver_mode=(
             "sequential_dpp_max_weight_"
             "b_matching_pair_rollout:"
             f"{matching.chosen_stage}"
         ),
+
         estimator_mode=estimator_mode,
+
         global_optimum_guaranteed=False,
+
+        chosen_stage=str(
+            matching.chosen_stage
+        ),
+
+        baseline_cost=float(
+            matching.baseline_cost
+        ),
+
+        rsu_only_cost=float(
+            matching.rsu_only_cost
+        ),
+
+        provisional_final_cost=float(
+            matching.provisional_final_cost
+        ),
+
+        rsu_candidate_edges=int(
+            matching.rsu_candidate_edges
+        ),
+
+        rsu_positive_candidate_edges=int(
+            matching.rsu_positive_candidate_edges
+        ),
+
+        best_rsu_edge_weight=float(
+            matching.best_rsu_edge_weight
+        ),
+
+        rsu_match_count=int(
+            len(
+                matching.rsu_matches
+            )
+        ),
+
+        rsu_weight_sum=float(
+            matching.rsu_weight_sum
+        ),
+
+        uav_candidate_edges=int(
+            matching.uav_candidate_edges
+        ),
+
+        uav_positive_candidate_edges=int(
+            matching.uav_positive_candidate_edges
+        ),
+
+        best_uav_edge_weight=float(
+            matching.best_uav_edge_weight
+        ),
+
+        provisional_uav_match_count=int(
+            matching.provisional_uav_match_count
+        ),
+
+        provisional_uav_provider_count=int(
+            matching.provisional_uav_provider_count
+        ),
+
+        provisional_uav_service_weight_sum=float(
+            matching.provisional_uav_service_weight_sum
+        ),
+
+        provisional_uav_hiring_cost_sum=float(
+            matching.provisional_uav_hiring_cost_sum
+        ),
+
+        provisional_uav_net_weight_sum=float(
+            matching.provisional_uav_net_weight_sum
+        ),
+
+        best_uav_provider_net_gain=float(
+            matching.best_uav_provider_net_gain
+        ),
+
+        uav_post_hiring_gate_match_count=int(
+            len(
+                matching.uav_matches
+            )
+        ),
+
+        uav_post_hiring_gate_uav_count=int(
+            len(
+                matching.hired_uavs
+            )
+        ),
+
+        uav_service_weight_sum=float(
+            matching.uav_service_weight_sum
+        ),
+
+        uav_net_weight_sum=float(
+            matching.uav_net_weight_sum
+        ),
+
         coordinate_sweeps=0,
+
         candidate_requests=int(
             evaluator.candidate_requests
         ),
+
         unique_candidates=int(
-            len(evaluator.cache)
+            len(
+                evaluator.cache
+            )
         ),
+
         finite_candidates=int(
             evaluator.finite_candidates
         ),
+
         forecast_seconds=float(
             wall_seconds
         ),
+
         policy_seconds=float(
             evaluator.policy_seconds
         ),
+
         env_seconds=float(
             evaluator.env_seconds
         ),
+
         mean_gpu_batch=float(
             mean_batch
         ),
+
         forecast_trial_steps=int(
-            len(evaluator.cache)
+            len(
+                evaluator.cache
+            )
             * int(
                 train_cfg
                 .dpp_forecast_scenarios
@@ -2619,35 +2787,155 @@ def _select_and_apply_slow_action(
         env.apply_slow_action(selected.action)
 
         return env.get_fast_obs(), {
-            "predicted_round_cost":
-                selected.predicted_round_cost,
-            "solver_mode": selected.solver_mode,
-            "estimator_mode": selected.estimator_mode,
+            "predicted_round_cost": float(
+                selected.predicted_round_cost
+            ),
+
+            "solver_mode":
+                selected.solver_mode,
+
+            "estimator_mode":
+                selected.estimator_mode,
+
             "global_optimum_guaranteed": float(
                 selected.global_optimum_guaranteed
             ),
-            "candidate_requests":
-                float(selected.candidate_requests),
-            "unique_candidates":
-                float(selected.unique_candidates),
-            "finite_candidates":
-                float(selected.finite_candidates),
-            "coordinate_sweeps":
-                float(selected.coordinate_sweeps),
-            "forecast_seconds":
-                selected.forecast_seconds,
-            "forecast_policy_seconds":
-                selected.policy_seconds,
-            "forecast_env_seconds":
-                selected.env_seconds,
-            "forecast_mean_gpu_batch":
-                selected.mean_gpu_batch,
+
+            "chosen_stage":
+                selected.chosen_stage,
+
+            "baseline_cost": float(
+                selected.baseline_cost
+            ),
+
+            "rsu_only_cost": float(
+                selected.rsu_only_cost
+            ),
+
+            "provisional_final_cost": float(
+                selected.provisional_final_cost
+            ),
+
+            "rsu_candidate_edges": float(
+                selected.rsu_candidate_edges
+            ),
+
+            "rsu_positive_candidate_edges": float(
+                selected.rsu_positive_candidate_edges
+            ),
+
+            "best_rsu_edge_weight": float(
+                selected.best_rsu_edge_weight
+            ),
+
+            "rsu_match_count": float(
+                selected.rsu_match_count
+            ),
+
+            "rsu_weight_sum": float(
+                selected.rsu_weight_sum
+            ),
+
+            "uav_candidate_edges": float(
+                selected.uav_candidate_edges
+            ),
+
+            "uav_positive_candidate_edges": float(
+                selected.uav_positive_candidate_edges
+            ),
+
+            "best_uav_edge_weight": float(
+                selected.best_uav_edge_weight
+            ),
+
+            "provisional_uav_match_count": float(
+                selected.provisional_uav_match_count
+            ),
+
+            "provisional_uav_provider_count": float(
+                selected.provisional_uav_provider_count
+            ),
+
+            "provisional_uav_service_weight_sum": float(
+                selected.provisional_uav_service_weight_sum
+            ),
+
+            "provisional_uav_hiring_cost_sum": float(
+                selected.provisional_uav_hiring_cost_sum
+            ),
+
+            "provisional_uav_net_weight_sum": float(
+                selected.provisional_uav_net_weight_sum
+            ),
+
+            "best_uav_provider_net_gain": float(
+                selected.best_uav_provider_net_gain
+            ),
+
+            "uav_post_hiring_gate_match_count": float(
+                selected.uav_post_hiring_gate_match_count
+            ),
+
+            "uav_post_hiring_gate_uav_count": float(
+                selected.uav_post_hiring_gate_uav_count
+            ),
+
+            "uav_service_weight_sum": float(
+                selected.uav_service_weight_sum
+            ),
+
+            "uav_net_weight_sum": float(
+                selected.uav_net_weight_sum
+            ),
+
+            "candidate_requests": float(
+                selected.candidate_requests
+            ),
+
+            "unique_candidates": float(
+                selected.unique_candidates
+            ),
+
+            "finite_candidates": float(
+                selected.finite_candidates
+            ),
+
+            "coordinate_sweeps": float(
+                selected.coordinate_sweeps
+            ),
+
+            "forecast_seconds": float(
+                selected.forecast_seconds
+            ),
+
+            "forecast_policy_seconds": float(
+                selected.policy_seconds
+            ),
+
+            "forecast_env_seconds": float(
+                selected.env_seconds
+            ),
+
+            "forecast_mean_gpu_batch": float(
+                selected.mean_gpu_batch
+            ),
+
             "forecast_trial_steps": float(
                 selected.forecast_trial_steps
             ),
-            "forecast_trial_steps_per_second": float(
-                selected.forecast_trial_steps
-            ) / max(float(selected.forecast_seconds), 1e-12),
+
+            "forecast_trial_steps_per_second": (
+                float(
+                    selected.forecast_trial_steps
+                )
+                / max(
+                    float(
+                        selected.forecast_seconds
+                    ),
+                    1e-12,
+                )
+            ),
+
             "num_rsu_links": float(
                 np.sum(
                     selected.action[
@@ -2655,6 +2943,7 @@ def _select_and_apply_slow_action(
                     ]
                 )
             ),
+
             "num_hired_uav": float(
                 np.sum(
                     selected.action[
@@ -2662,6 +2951,7 @@ def _select_and_apply_slow_action(
                     ]
                 )
             ),
+
             "num_uav_links": float(
                 np.sum(
                     selected.action[
@@ -3747,6 +4037,8 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 "action_saturation_ratio": 0.0,
                 "prediction_gap_sum": 0.0,
                 "prediction_gap_count": 0,
+                "prediction_relative_gap_sum": 0.0,
+                "prediction_abs_relative_error_sum": 0.0,
                 "forecast_seconds": 0.0,
                 "forecast_trial_steps": 0.0,
             }
@@ -3763,17 +4055,72 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 obs, realized = _execute_real_round_eval(
                     env, agent, obs, train_cfg
                 )
-                predicted = float(slow_info["predicted_round_cost"])
-                round_gap = (
-                    float(realized["realized_round_cost"])
-                    - predicted
-                    if np.isfinite(predicted)
-                    else float("nan")
+                predicted = float(
+                    slow_info[
+                        "predicted_round_cost"
+                    ]
                 )
 
-                if np.isfinite(predicted):
-                    totals["prediction_gap_sum"] += round_gap
-                    totals["prediction_gap_count"] += 1
+                realized_cost = float(
+                    realized[
+                        "realized_round_cost"
+                    ]
+                )
+
+                if (
+                    np.isfinite(predicted)
+                    and np.isfinite(
+                        realized_cost
+                    )
+                ):
+                    round_gap = (
+                        realized_cost
+                        - predicted
+                    )
+
+                    prediction_denominator = max(
+                        abs(
+                            realized_cost
+                        ),
+                        1e-12,
+                    )
+
+                    round_relative_gap = (
+                        round_gap
+                        / prediction_denominator
+                    )
+
+                    round_abs_relative_error = (
+                        abs(
+                            round_gap
+                        )
+                        / prediction_denominator
+                    )
+
+                    totals[
+                        "prediction_gap_sum"
+                    ] += round_gap
+
+                    totals[
+                        "prediction_relative_gap_sum"
+                    ] += round_relative_gap
+
+                    totals[
+                        "prediction_abs_relative_error_sum"
+                    ] += round_abs_relative_error
+
+                    totals[
+                        "prediction_gap_count"
+                    ] += 1
+
+                else:
+                    round_gap = float("nan")
+                    round_relative_gap = float(
+                        "nan"
+                    )
+                    round_abs_relative_error = float(
+                        "nan"
+                    )
                 
                 global_eval_round += 1
                 round_logger.write(
@@ -3789,6 +4136,13 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                         **realized,
                         "prediction_gap": float(
                             round_gap
+                        ),
+                        "prediction_relative_gap": float(
+                            round_relative_gap
+                        ),
+
+                        "prediction_abs_relative_error": float(
+                            round_abs_relative_error
                         ),
                     }
                 )
@@ -3840,6 +4194,31 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                 if totals["prediction_gap_count"] > 0
                 else float("nan")
             )
+            relative_gap_mean = (
+                totals[
+                    "prediction_relative_gap_sum"
+                ]
+                / totals[
+                    "prediction_gap_count"
+                ]
+                if totals[
+                    "prediction_gap_count"
+                ] > 0
+                else float("nan")
+            )
+
+            prediction_mape = (
+                totals[
+                    "prediction_abs_relative_error_sum"
+                ]
+                / totals[
+                    "prediction_gap_count"
+                ]
+                if totals[
+                    "prediction_gap_count"
+                ] > 0
+                else float("nan")
+            )
             if not np.isfinite(totals["min_soc"]):
                 totals["min_soc"] = 0.0
             _finalize_round_metrics(totals, layer_counts)
@@ -3867,20 +4246,29 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                         if key not in {
                             "prediction_gap_sum",
                             "prediction_gap_count",
+                            "prediction_relative_gap_sum",
+                            "prediction_abs_relative_error_sum",
                         }
                     },
                     "prediction_gap_mean": gap_mean,
+                    "prediction_relative_gap_mean":
+                        relative_gap_mean,
+
+                    "prediction_abs_relative_error_mean":
+                        prediction_mape,
                 }
             )
             print(
-                "[EVAL] "
+                " [EVAL] "
                 f"ep={episode_idx}/{train_cfg.eval_episodes} "
                 f"reward={totals['reward']:.4f} "
                 f"delivery={totals['delivery']:.1f} "
                 f"quality/chunk={totals['quality_per_chunk']:.4f} "
                 f"stall={totals['stall']:.1f} "
-                f"gap={gap_mean:.4f}",
-                flush=True,
+                f"gap={gap_mean:.4f} "
+                f"forecast_mape="
+                f"{100.0 * prediction_mape:.3f}%",
+                flush=True
             )
     finally:
         if forecast_pool is not None:

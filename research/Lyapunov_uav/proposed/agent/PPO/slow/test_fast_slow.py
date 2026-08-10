@@ -242,6 +242,126 @@ class SlowMaximumWeightMatchingTest(
             selected.chosen_stage,
             "rsu_uav_matching",
         )
+        self.assertAlmostEqual(
+            selected.baseline_cost,
+            100.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_only_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_final_cost,
+            78.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.rsu_candidate_edges,
+            4,
+        )
+
+        self.assertEqual(
+            selected.rsu_positive_candidate_edges,
+            4,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_rsu_edge_weight,
+            10.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.rsu_matches
+            ),
+            2,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_weight_sum,
+            18.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.uav_candidate_edges,
+            1,
+        )
+
+        self.assertEqual(
+            selected.uav_positive_candidate_edges,
+            1,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_uav_edge_weight,
+            9.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_match_count,
+            1,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_provider_count,
+            1,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_service_weight_sum,
+            9.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_hiring_cost_sum,
+            5.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_net_weight_sum,
+            4.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_uav_provider_net_gain,
+            4.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.uav_matches
+            ),
+            1,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_service_weight_sum,
+            9.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_net_weight_sum,
+            4.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.hired_uavs,
+            (0,),
+        )
 
         applied = env.apply_slow_action(
             action
