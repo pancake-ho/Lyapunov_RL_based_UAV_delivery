@@ -56,7 +56,6 @@ case "${MODE}" in
         EVAL_EPISODES=1
         EVAL_ROUNDS_PER_EPISODE=1
 
-        # Strong mutation checks are cheap enough for the one-round smoke.
         AUDIT_RUNTIME_INVARIANTS=1
         ;;
 
@@ -73,11 +72,29 @@ case "${MODE}" in
         AUDIT_RUNTIME_INVARIANTS=0
         ;;
 
+    overnight)
+        EVAL_SEEDS=(
+            2026
+            2027
+            2028
+        )
+
+        EVAL_EPISODES=5
+        EVAL_ROUNDS_PER_EPISODE=10
+
+        # Long evaluation:
+        # expensive digest-based mutation auditing is disabled.
+        # Algorithmic validation remains covered by unit tests
+        # and the normal runtime feasibility checks.
+        AUDIT_RUNTIME_INVARIANTS=0
+        ;;
+
     *)
         echo "[ERROR] Unknown mode: ${MODE}" >&2
         echo "Usage:" >&2
         echo "  sbatch run/slow_matching_eval.sh smoke" >&2
         echo "  sbatch run/slow_matching_eval.sh pilot" >&2
+        echo "  sbatch run/slow_matching_eval.sh overnight" >&2
         exit 2
         ;;
 esac
