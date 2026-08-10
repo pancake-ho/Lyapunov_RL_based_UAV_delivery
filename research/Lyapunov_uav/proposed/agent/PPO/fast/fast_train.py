@@ -325,12 +325,12 @@ def save_configs(
         slow_solver = "random feasible baseline"
     else:
         algorithm = (
-            "round-wise Slow-DPP forecast using the current frozen "
-            "Fast-PPO policy -> one real Fast round -> one PPO update"
+            "round-wise Slow-DPP maximum-weight matching using "
+            "Fast-PPO full-round cumulative DPP-cost forecasts"
         )
         slow_solver = (
-            "parallel Jacobi complete-action region-coordinate "
-            "minimization with exact full-round acceptance"
+            "sequential DPP maximum-weight b-matching with "
+            "Fast-policy pair-rollout weights and UAV hiring cost"
         )
 
     run_info = {

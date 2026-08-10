@@ -30,6 +30,7 @@ class RSUDeliveryResult:
         동일 user에 대해 복수 RSU가 동시에 선택된 경우,
         최종적으로 실제 delivery를 수행할 link만 남긴 mask
     """
+
     requested_mask: np.ndarray
     capped_mask: np.ndarray
     active_mask: np.ndarray
@@ -45,29 +46,36 @@ class RSUDeliveryResult:
     quality_per_user: np.ndarray
 
 
-def _quality_weight(cfg: EnvConfig, layer_idx: int) -> float:
+def _quality_weight(
+    cfg: EnvConfig,
+    layer_idx: int,
+) -> float:
     """
-    layer index에 따른 quality weight를 반환하는 함수
+    layer index에 따른 quality weight를 반환한다.
     """
     layer = int(layer_idx)
+
     if layer <= 0:
         return 0.0
+
     if layer <= len(cfg.quality_weights):
         return float(cfg.quality_weights[layer - 1])
+
     return float(layer)
 
 
-def _chunk_size_bits(cfg: EnvConfig, layer_idx: int) -> float:
+def _chunk_size_bits(
+    cfg: EnvConfig,
+    layer_idx: int,
+) -> float:
     """
     layer 수에 따른 chunk size [bits]를 반환한다.
 
     현재 연구 기준:
         S(k) = config.chunk_size_bits[k - 1]
-
-    IoTJ2025 설정:
-        [2.621, 5.073, 10.658, 26.496] Kbits
     """
     layer = int(layer_idx)
+
     if layer <= 0:
         return 0.0
 
@@ -89,11 +97,34 @@ def _clip_int_matrix(
     name: str,
 ) -> np.ndarray:
     """
-    action matrix를 지정 shape/dtype으로 맞춘 뒤 [low, high] 범위로 clipping한다.
+    action matrix를 지정 shape/dtype으로 맞춘 뒤
+    [low, high] 범위로 clipping한다.
     """
-    arr = _ensure_shape(value, shape, dtype, fill_value=0, strict=False)
-    arr = np.nan_to_num(arr, nan=0.0, posinf=high, neginf=low)
-    return np.clip(arr, low, high).astype(dtype, copy=False)
+    del name
+
+    arr = _ensure_shape(
+        value,
+        shape,
+        dtype,
+        fill_value=0,
+        strict=False,
+    )
+
+    arr = np.nan_to_num(
+        arr,
+        nan=0.0,
+        posinf=high,
+        neginf=low,
+    )
+
+    return np.clip(
+        arr,
+        low,
+        high,
+    ).astype(
+        dtype,
+        copy=False,
+    )
 
 
 def _clip_float_matrix(
@@ -106,22 +137,175 @@ def _clip_float_matrix(
     """
     float matrix를 지정 shape으로 맞춘 뒤 clipping한다.
     """
-    arr = _ensure_shape(value, shape, np.float32, fill_value=0.0, strict=False)
-    arr = np.nan_to_num(arr, nan=0.0, posinf=high if high is not None else 0.0, neginf=low)
-    if high is None:
-        return np.maximum(arr, low).astype(np.float32, copy=False)
-    return np.clip(arr, low, high).astype(np.float32, copy=False)
+    del name
 
-def _priority_score(cfg: EnvConfig, feasible_chunks: int, layer: int, cap_bps: float, user_virtual_queue: float=0.0) -> float:
+    arr = _ensure_shape(
+        value,
+        shape,
+        np.float32,
+        fill_value=0.0,
+        strict=False,
+    )
+
+    arr = np.nan_to_num(
+        arr,
+        nan=0.0,
+        posinf=(
+            high
+            if high is not None
+            else 0.0
+        ),
+        neginf=low,
+    )
+
+    if high is None:
+        return np.maximum(
+            arr,
+            low,
+        ).astype(
+            np.float32,
+            copy=False,
+        )
+
+    return np.clip(
+        arr,
+        low,
+        high,
+    ).astype(
+        np.float32,
+        copy=False,
+    )
+
+
+def _priority_score(
+    cfg: EnvConfig,
+    feasible_chunks: int,
+    layer: int,
+    cap_bps: float,
+    user_virtual_queue: float = 0.0,
+) -> float:
     """
-    RSU capacity 초과 또는 동일 user conflict가 발생했을 때 사용하는 score 계산 함수로,
-    invalid action에 대한 안전장치 목적으로 구현.
+    RSU capacity 초과 또는 동일 user conflict 발생 시 사용하는
+    deterministic priority score.
+
+    정상적인 slow action에서는 validator가 제약을 보장하므로
+    주로 안전장치로 사용한다.
     """
-    quality_gain = float(feasible_chunks) * _quality_weight(cfg, layer)
+    quality_gain = (
+        float(feasible_chunks)
+        * _quality_weight(
+            cfg,
+            layer,
+        )
+    )
+
     return (
         2.0 * float(user_virtual_queue)
         + 1.0 * float(quality_gain)
         + 1e-9 * float(cap_bps)
+    )
+
+
+def _sample_policy_independent_channel_gains(
+    *,
+    rsu_channel: RSUChannelModel,
+    rsu_user_distance: np.ndarray,
+    rng: Optional[np.random.Generator],
+) -> np.ndarray:
+    """
+    모든 RSU-user link의 channel realization을 policy와 무관하게
+    고정된 shape/order로 미리 생성한다.
+
+    목적:
+        deterministic checkpoint evaluation에서 Fast policy가 선택한
+        active-link 개수 때문에 env RNG 소비량이 달라지는 것을 방지한다.
+
+    기존 RSU channel:
+
+        h = sqrt(pathloss * shadowing) * Rayleigh
+
+        |h|^2
+        = pathloss
+          * shadowing_linear
+          * (real^2 + imag^2) / 2
+
+    의 marginal distribution은 그대로 유지한다.
+
+    매 호출마다 정확히 shape + (3,) 크기의 standard normal을 생성하므로,
+    requested_mask와 무관하게 RNG 소비량이 동일하다.
+    """
+    distance = np.asarray(
+        rsu_user_distance,
+        dtype=np.float64,
+    )
+
+    if distance.ndim != 2:
+        raise ValueError(
+            "rsu_user_distance must be a matrix: "
+            f"shape={distance.shape}"
+        )
+
+    generator = (
+        rng
+        if rng is not None
+        else rsu_channel.rng
+    )
+
+    # 마지막 dimension:
+    #   0: shadowing standard normal
+    #   1: Rayleigh real
+    #   2: Rayleigh imag
+    standard = generator.normal(
+        loc=0.0,
+        scale=1.0,
+        size=distance.shape + (3,),
+    )
+
+    shadowing_db = (
+        float(rsu_channel.shadowing_mu_db)
+        + float(rsu_channel.shadowing_sigma_db)
+        * standard[..., 0]
+    )
+
+    shadowing_linear = np.power(
+        10.0,
+        shadowing_db / 10.0,
+    )
+
+    rayleigh_power = (
+        np.square(standard[..., 1])
+        + np.square(standard[..., 2])
+    ) / 2.0
+
+    effective_distance = np.maximum(
+        distance,
+        float(rsu_channel.min_distance),
+    )
+
+    pathloss = np.power(
+        effective_distance,
+        -float(rsu_channel.beta),
+    )
+
+    gains = (
+        pathloss
+        * shadowing_linear
+        * rayleigh_power
+    )
+
+    if not np.all(np.isfinite(gains)):
+        raise RuntimeError(
+            "Non-finite RSU channel gain was generated."
+        )
+
+    if np.any(gains < 0.0):
+        raise RuntimeError(
+            "Negative RSU channel gain was generated."
+        )
+
+    return gains.astype(
+        np.float32,
+        copy=False,
     )
 
 
@@ -133,37 +317,65 @@ def compute_rsu_delivery(
     rng: Optional[np.random.Generator] = None,
 ) -> RSUDeliveryResult:
     """
-    RSU-User 간 delivery 계산 함수로,
+    RSU-User 간 delivery 계산.
 
+    순서:
         1) requested_mask 생성
-        2) 각 candidate link의 instantaneous channel 및 feasible chunks 계산
-        3) RSU capacity를 적용하여 capped_mask 생성
-        4) 동일 user에 대한 복수 RSU conflict 제거 (active_mask 생성)
-        5) 최종 delivery
-
-    을 담당.
+        2) 모든 RSU-user pair의 channel realization을 policy-independent
+           common-random-number 방식으로 생성
+        3) requested link의 feasible chunks 계산
+        4) RSU capacity 적용
+        5) 동일 user의 multiple-RSU conflict 제거
+        6) 최종 delivery 계산
     """
     num_rsu = int(cfg.num_rsu)
     num_user = int(cfg.num_user)
-    slot_duration = float(cfg.battery.slot_duration)
-    rsu_capacity = max(0, int(cfg.rsu_capacity))
+
+    slot_duration = float(
+        cfg.battery.slot_duration
+    )
+
+    rsu_capacity = max(
+        0,
+        int(cfg.rsu_capacity),
+    )
 
     if slot_duration <= 0.0:
-        raise ValueError(f"slot_duration은 양수여야 합니다. 현재 값: {slot_duration}")
+        raise ValueError(
+            "slot_duration은 양수여야 합니다. "
+            f"현재 값: {slot_duration}"
+        )
 
-    # slow-timescale scheduling term
+    # ------------------------------------------------------------------
+    # Slow-timescale scheduling
+    # ------------------------------------------------------------------
+
     rsu_scheduling = _ensure_shape(
-        _safe_get_attr(slow_act, ["rsu_scheduling"], None),
+        _safe_get_attr(
+            slow_act,
+            ["rsu_scheduling"],
+            None,
+        ),
         (num_rsu, num_user),
         np.int32,
         fill_value=0,
         strict=False,
     )
-    rsu_scheduling = (rsu_scheduling > 0)
 
-    # fast-timescale delivery term
+    rsu_scheduling = (
+        rsu_scheduling > 0
+    )
+
+    # ------------------------------------------------------------------
+    # Fast-timescale actions
+    # ------------------------------------------------------------------
+
     rsu_chunks = _clip_int_matrix(
-        _safe_get_attr(fast_act, ["rsu_chunks"], None),
+        _safe_get_attr(
+            fast_act,
+            ["rsu_chunks"],
+            None,
+        ),
         (num_rsu, num_user),
         np.int32,
         low=0,
@@ -172,7 +384,11 @@ def compute_rsu_delivery(
     )
 
     rsu_layers = _clip_int_matrix(
-        _safe_get_attr(fast_act, ["rsu_layers"], None),
+        _safe_get_attr(
+            fast_act,
+            ["rsu_layers"],
+            None,
+        ),
         (num_rsu, num_user),
         np.int32,
         low=0,
@@ -181,66 +397,115 @@ def compute_rsu_delivery(
     )
 
     rsu_user_distance = _clip_float_matrix(
-        _safe_get_attr(fast_act, ["rsu_user_distance"], None),
+        _safe_get_attr(
+            fast_act,
+            ["rsu_user_distance"],
+            None,
+        ),
         (num_rsu, num_user),
-        low=float(cfg.rsu_channel.min_distance),
+        low=float(
+            cfg.rsu_channel.min_distance
+        ),
         high=None,
         name="fast_act.rsu_user_distance",
     )
 
     user_virtual_queue = _ensure_shape(
-        _safe_get_attr(fast_act, ["user_virtual_queue"], None),
+        _safe_get_attr(
+            fast_act,
+            ["user_virtual_queue"],
+            None,
+        ),
         (num_user,),
         np.float32,
         fill_value=0.0,
         strict=False,
     )
 
-    # 1차 delivery 후보
+    # ------------------------------------------------------------------
+    # Requested links
+    # ------------------------------------------------------------------
+
     requested_mask = (
         (rsu_scheduling == 1)
         & (rsu_chunks > 0)
         & (rsu_layers > 0)
     )
 
-    raw_channel_gain = np.zeros((num_rsu, num_user), dtype=np.float32)
-    link_capacity_bps = np.zeros((num_rsu, num_user), dtype=np.float32)
+    raw_channel_gain = np.zeros(
+        (num_rsu, num_user),
+        dtype=np.float32,
+    )
 
-    potential_chunks = np.zeros((num_rsu, num_user), dtype=np.int32)
+    link_capacity_bps = np.zeros(
+        (num_rsu, num_user),
+        dtype=np.float32,
+    )
 
-    # 각 candidate link의 slot-t channel realization은 정확히 한 번만
-    # 샘플링한다. 과거 구현의 불필요한 ``for m in range(num_rsu)``
-    # 바깥 루프는 동일 link를 num_rsu번 다시 계산하고 RNG도 그만큼
-    # 소비하여 물리 모델과 실행시간을 모두 왜곡했다.
-    candidate_links = np.argwhere(requested_mask)
+    potential_chunks = np.zeros(
+        (num_rsu, num_user),
+        dtype=np.int32,
+    )
+
+    # ------------------------------------------------------------------
+    # Common Random Numbers
+    # ------------------------------------------------------------------
+    #
+    # IMPORTANT:
+    # 모든 link의 channel random variables를 먼저 뽑는다.
+    # 따라서 Fast policy가 request한 link 수와 관계없이
+    # env RNG state가 동일하게 전진한다.
+    #
+    # 이는 checkpoint 간 mobility/content/Slow-workload trajectory가
+    # Fast action 때문에 달라지는 문제를 차단한다.
+    # ------------------------------------------------------------------
+
+    sampled_channel_gain = (
+        _sample_policy_independent_channel_gains(
+            rsu_channel=rsu_channel,
+            rsu_user_distance=rsu_user_distance,
+            rng=rng,
+        )
+    )
+
+    candidate_links = np.argwhere(
+        requested_mask
+    )
 
     for m, n in candidate_links:
         m = int(m)
         n = int(n)
 
-        distance = max(
-            float(rsu_user_distance[m, n]),
-            float(cfg.rsu_channel.min_distance),
+        layer = int(
+            rsu_layers[m, n]
         )
-        layer = int(rsu_layers[m, n])
-        requested_chunks = int(rsu_chunks[m, n])
+
+        requested_chunks = int(
+            rsu_chunks[m, n]
+        )
 
         raw_gain = float(
-            rsu_channel.compute_gain(
-                distance=distance,
-                rng=rng,
-            )
+            sampled_channel_gain[m, n]
         )
+
         cap_bps = float(
-            rsu_channel.capacity_from_gain(raw_gain)
+            rsu_channel.capacity_from_gain(
+                raw_gain
+            )
         )
 
         raw_channel_gain[m, n] = raw_gain
         link_capacity_bps[m, n] = cap_bps
 
-        chunk_bits = _chunk_size_bits(cfg, layer)
+        chunk_bits = _chunk_size_bits(
+            cfg,
+            layer,
+        )
 
-        if chunk_bits <= 0.0 or cap_bps <= 0.0:
+        if (
+            chunk_bits <= 0.0
+            or cap_bps <= 0.0
+        ):
             feasible_chunks = 0
         else:
             feasible_chunks = int(
@@ -253,11 +518,20 @@ def compute_rsu_delivery(
 
         potential_chunks[m, n] = max(
             0,
-            min(requested_chunks, feasible_chunks),
+            min(
+                requested_chunks,
+                feasible_chunks,
+            ),
         )
-    
-    # RSU별 동시 서비스 가능 user 수 제한 반영
-    capped_mask = np.zeros((num_rsu, num_user), dtype=bool)
+
+    # ------------------------------------------------------------------
+    # RSU capacity
+    # ------------------------------------------------------------------
+
+    capped_mask = np.zeros(
+        (num_rsu, num_user),
+        dtype=bool,
+    )
 
     for m in range(num_rsu):
         candidate_users = np.flatnonzero(
@@ -272,7 +546,6 @@ def compute_rsu_delivery(
 
         if candidate_users.size <= rsu_capacity:
             selected_users = candidate_users
-
         else:
             scores = np.asarray(
                 [
@@ -299,9 +572,12 @@ def compute_rsu_delivery(
             order = np.argsort(
                 -scores
             )
-            selected_users = candidate_users[
-                order[:rsu_capacity]
-            ]
+
+            selected_users = (
+                candidate_users[
+                    order[:rsu_capacity]
+                ]
+            )
 
         positive = (
             potential_chunks[
@@ -315,58 +591,155 @@ def compute_rsu_delivery(
             m,
             selected_users[positive],
         ] = True
-    
-    # 동일 user를 여러 RSU가 동시에 서비스하는 경우 방지 (안전장치)
-    active_mask = np.zeros((num_rsu, num_user), dtype=bool)
+
+    # ------------------------------------------------------------------
+    # Multiple-RSU conflict guard
+    # ------------------------------------------------------------------
+
+    active_mask = np.zeros(
+        (num_rsu, num_user),
+        dtype=bool,
+    )
 
     for n in range(num_user):
-        providers = np.flatnonzero(capped_mask[:, n])
+        providers = np.flatnonzero(
+            capped_mask[:, n]
+        )
+
         if providers.size == 0:
             continue
 
         if providers.size == 1:
-            only_rsu = int(providers[0])
-            if potential_chunks[only_rsu, n] > 0:
-                active_mask[only_rsu, n] = True
+            only_rsu = int(
+                providers[0]
+            )
+
+            if (
+                potential_chunks[
+                    only_rsu,
+                    n,
+                ]
+                > 0
+            ):
+                active_mask[
+                    only_rsu,
+                    n,
+                ] = True
+
             continue
 
-        scores = np.array(
+        scores = np.asarray(
             [
                 _priority_score(
                     cfg=cfg,
-                    feasible_chunks=int(potential_chunks[m, n]),
-                    layer=int(rsu_layers[m, n]),
-                    cap_bps=float(link_capacity_bps[m, n]),
-                    user_virtual_queue=float(user_virtual_queue[n]),
+                    feasible_chunks=int(
+                        potential_chunks[m, n]
+                    ),
+                    layer=int(
+                        rsu_layers[m, n]
+                    ),
+                    cap_bps=float(
+                        link_capacity_bps[m, n]
+                    ),
+                    user_virtual_queue=float(
+                        user_virtual_queue[n]
+                    ),
                 )
                 for m in providers
             ],
             dtype=np.float64,
         )
 
-        best_rsu = int(providers[int(np.argmax(scores))])
-        if potential_chunks[best_rsu, n] > 0:
-            active_mask[best_rsu, n] = True
+        best_rsu = int(
+            providers[
+                int(
+                    np.argmax(scores)
+                )
+            ]
+        )
 
-    # 최종 delivery 산출
-    delivered_chunks = np.zeros((num_rsu, num_user), dtype=np.int32)
-    delivered_bits = np.zeros((num_rsu, num_user), dtype=np.float32)
-    delivered_quality = np.zeros((num_rsu, num_user), dtype=np.float32)
+        if (
+            potential_chunks[
+                best_rsu,
+                n,
+            ]
+            > 0
+        ):
+            active_mask[
+                best_rsu,
+                n,
+            ] = True
 
-    active_links = np.argwhere(active_mask)
+    # ------------------------------------------------------------------
+    # Delivery
+    # ------------------------------------------------------------------
+
+    delivered_chunks = np.zeros(
+        (num_rsu, num_user),
+        dtype=np.int32,
+    )
+
+    delivered_bits = np.zeros(
+        (num_rsu, num_user),
+        dtype=np.float32,
+    )
+
+    delivered_quality = np.zeros(
+        (num_rsu, num_user),
+        dtype=np.float32,
+    )
+
+    active_links = np.argwhere(
+        active_mask
+    )
+
     for m, n in active_links:
-        layer = int(rsu_layers[m, n])
-        chunks = int(potential_chunks[m, n])
+        m = int(m)
+        n = int(n)
 
-        chunk_bits = _chunk_size_bits(cfg, layer)
-        quality_weight = _quality_weight(cfg, layer)
+        layer = int(
+            rsu_layers[m, n]
+        )
 
-        delivered_chunks[m, n] = chunks
-        delivered_bits[m, n] = float(chunks) * float(chunk_bits)
-        delivered_quality[m, n] = float(chunks) * float(quality_weight)
-    
-    delivered_per_user = delivered_chunks.sum(axis=0).astype(np.float32)
-    quality_per_user = delivered_quality.sum(axis=0).astype(np.float32)
+        chunks = int(
+            potential_chunks[m, n]
+        )
+
+        chunk_bits = _chunk_size_bits(
+            cfg,
+            layer,
+        )
+
+        quality_weight = _quality_weight(
+            cfg,
+            layer,
+        )
+
+        delivered_chunks[m, n] = (
+            chunks
+        )
+
+        delivered_bits[m, n] = (
+            float(chunks)
+            * float(chunk_bits)
+        )
+
+        delivered_quality[m, n] = (
+            float(chunks)
+            * float(quality_weight)
+        )
+
+    delivered_per_user = (
+        delivered_chunks
+        .sum(axis=0)
+        .astype(np.float32)
+    )
+
+    quality_per_user = (
+        delivered_quality
+        .sum(axis=0)
+        .astype(np.float32)
+    )
 
     return RSUDeliveryResult(
         requested_mask=requested_mask,

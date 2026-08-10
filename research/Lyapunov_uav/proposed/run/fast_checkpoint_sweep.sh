@@ -13,15 +13,9 @@
 set -euo pipefail
 umask 027
 
+
 # =====================================================================
 # Do NOT inherit old experiment-specific exports
-# =====================================================================
-#
-# This launcher is self-contained.
-# Old login-shell experiment variables must not affect this sweep.
-#
-# IMPORTANT:
-# CUDA_VISIBLE_DEVICES must NOT be unset because Slurm owns it.
 # =====================================================================
 
 while IFS='=' read -r name _; do
@@ -57,17 +51,6 @@ ALLOCATED_CPUS="${SLURM_CPUS_PER_TASK:-16}"
 
 # =====================================================================
 # Sweep mode
-# =====================================================================
-#
-# Usage:
-#
-#   sbatch run/fast_checkpoint_sweep.sh smoke
-#
-# or
-#
-#   sbatch run/fast_checkpoint_sweep.sh full
-#
-# No manual export is required.
 # =====================================================================
 
 MODE="${1:-smoke}"
@@ -122,12 +105,12 @@ esac
 # Fixed evaluation criteria
 # =====================================================================
 
-WORKLOAD_TOLERANCE="0.02"
+# CRN 수정 이후 같은 seed/episode의 Slow workload는 정확히 일치해야 함.
+WORKLOAD_TOLERANCE="0.0"
+
 MINIMUM_ALLOWED_SOC="19.95"
 
-# Every sbatch job gets an independent directory.
-# This prevents a failed previous evaluation from contaminating a rerun.
-SWEEP_OUTPUT="${FAST_RUN_ROOT}/checkpoint_sweep_h2_${MODE}_job${JOB_ID}"
+SWEEP_OUTPUT="${FAST_RUN_ROOT}/checkpoint_sweep_h2_crn_${MODE}_job${JOB_ID}"
 
 
 # =====================================================================
@@ -210,11 +193,9 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export MALLOC_ARENA_MAX=2
 
-# Only the runtime properties required by Fast evaluation are set here.
-# checkpoint / seed / run name / phase are supplied by
-# fast_checkpoint_sweep.py independently for each evaluation subprocess.
 export FAST_PPO_DEVICE="cuda"
 export FAST_PPO_DETERMINISTIC_TORCH=1
+export FAST_PPO_FAIL_IF_CUDA_UNAVAILABLE=1
 
 
 # =====================================================================
@@ -234,13 +215,6 @@ echo "============================================================"
 # =====================================================================
 # CUDA preflight
 # =====================================================================
-#
-# Do not use nvidia-smi as the acceptance criterion.
-# The actual experiment uses PyTorch, so PyTorch CUDA visibility is the
-# authoritative preflight.
-#
-# Run the check inside a Slurm job step, matching the real sweep execution.
-# =====================================================================
 
 echo "[CUDA PREFLIGHT]"
 
@@ -253,18 +227,30 @@ srun \
 
 import os
 import socket
-import sys
 
 import torch
 
 
-print("hostname             =", socket.gethostname())
-print("torch                =", torch.__version__)
-print("torch.version.cuda   =", torch.version.cuda)
+print(
+    "hostname             =",
+    socket.gethostname(),
+)
+
+print(
+    "torch                =",
+    torch.__version__,
+)
+
+print(
+    "torch.version.cuda   =",
+    torch.version.cuda,
+)
 
 print(
     "CUDA_VISIBLE_DEVICES =",
-    os.environ.get("CUDA_VISIBLE_DEVICES"),
+    os.environ.get(
+        "CUDA_VISIBLE_DEVICES"
+    ),
 )
 
 print(
@@ -301,7 +287,9 @@ print(
     torch.cuda.get_device_name(0),
 )
 
-print("[CUDA PREFLIGHT] PASS")
+print(
+    "[CUDA PREFLIGHT] PASS"
+)
 
 PY
 
@@ -311,11 +299,15 @@ PY
 # =====================================================================
 
 "${PYTHON_BIN}" -m py_compile \
+    env/delivery/rsu_delivery.py \
+    env/delivery/test_rsu_delivery_crn.py \
     agent/PPO/fast/fast_train.py \
-    agent/PPO/fast/fast_checkpoint_sweep.py
+    agent/PPO/fast/fast_checkpoint_sweep.py \
+    agent/PPO/fast/test_fast_checkpoint_sweep.py
 
 
 "${PYTHON_BIN}" -m unittest -v \
+    env.delivery.test_rsu_delivery_crn \
     agent.PPO.fast.test_fast_checkpoint_sweep \
     agent.PPO.fast.test_fast_pretrain_contract
 
@@ -385,6 +377,7 @@ echo "checkpoints         = ${CHECKPOINT_EPISODES[*]}"
 echo "eval_seeds          = ${EVAL_SEEDS[*]}"
 echo "eval_episodes       = ${EVAL_EPISODES}"
 echo "eval_rounds         = ${EVAL_ROUNDS}"
+echo "workload_tolerance  = ${WORKLOAD_TOLERANCE}"
 echo "git_branch          = ${CURRENT_BRANCH}"
 echo "git_commit          = $(git rev-parse HEAD)"
 echo "CUDA_VISIBLE_DEVICES= ${CUDA_VISIBLE_DEVICES:-NOT_SET}"
@@ -393,10 +386,6 @@ echo "============================================================"
 
 # =====================================================================
 # Actual checkpoint sweep
-# =====================================================================
-#
-# Match the execution style already proven by run/fast_train.sh:
-# batch allocation -> srun job step -> Python.
 # =====================================================================
 
 srun \
