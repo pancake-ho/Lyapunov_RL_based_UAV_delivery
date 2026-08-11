@@ -407,6 +407,321 @@ class SlowMaximumWeightMatchingTest(
             env.apply_slow_action(
                 action
             )
+    
+    def test_rsu_only_ablation_never_generates_uav_action(
+        self,
+    ) -> None:
+        env = self._small_env()
+
+        rsu_gain = {
+            (0, 0): 10.0,
+            (0, 1): 7.0,
+            (1, 2): 8.0,
+            (1, 3): 3.0,
+        }
+
+        def evaluate(
+            actions: Sequence[
+                Dict[str, np.ndarray]
+            ],
+        ) -> list[float]:
+            scores = []
+
+            for action in actions:
+                y = np.asarray(
+                    action[
+                        "rsu_scheduling"
+                    ],
+                    dtype=np.int32,
+                )
+
+                mu = np.asarray(
+                    action[
+                        "uav_hiring"
+                    ],
+                    dtype=np.int32,
+                )
+
+                phi = np.asarray(
+                    action[
+                        "uav_scheduling"
+                    ],
+                    dtype=np.int32,
+                )
+
+                # RSU-only ablation의 핵심 contract:
+                # evaluator로 전달되는 candidate 자체에
+                # UAV action이 포함되면 안 된다.
+                if np.any(mu):
+                    self.fail(
+                        "RSU-only ablation generated "
+                        "a UAV hiring candidate."
+                    )
+
+                if np.any(phi):
+                    self.fail(
+                        "RSU-only ablation generated "
+                        "a UAV scheduling candidate."
+                    )
+
+                cost = 100.0
+
+                for provider, user in zip(
+                    *np.nonzero(y)
+                ):
+                    cost -= rsu_gain.get(
+                        (
+                            int(provider),
+                            int(user),
+                        ),
+                        0.0,
+                    )
+
+                scores.append(
+                    float(cost)
+                )
+
+            return scores
+
+        selected = (
+            select_dpp_max_weight_matching(
+                env=env,
+                evaluate=evaluate,
+                min_edge_weight=0.0,
+                forbid_empty_hiring=True,
+                enable_uav=False,
+            )
+        )
+
+        action = selected.action
+
+        y = np.asarray(
+            action[
+                "rsu_scheduling"
+            ],
+            dtype=np.int32,
+        )
+
+        mu = np.asarray(
+            action[
+                "uav_hiring"
+            ],
+            dtype=np.int32,
+        )
+
+        phi = np.asarray(
+            action[
+                "uav_scheduling"
+            ],
+            dtype=np.int32,
+        )
+
+        # ------------------------------------------------------
+        # Expected RSU maximum-weight matching
+        #
+        # region 0:
+        #   user 0 gain = 10
+        #   user 1 gain = 7
+        #   capacity = 1
+        #   -> user 0
+        #
+        # region 1:
+        #   user 2 gain = 8
+        #   user 3 gain = 3
+        #   capacity = 1
+        #   -> user 2
+        #
+        # total predicted cost
+        # = 100 - 10 - 8
+        # = 82
+        # ------------------------------------------------------
+
+        expected_y = np.zeros(
+            (2, 4),
+            dtype=np.int32,
+        )
+
+        expected_y[0, 0] = 1
+        expected_y[1, 2] = 1
+
+        np.testing.assert_array_equal(
+            y,
+            expected_y,
+        )
+
+        np.testing.assert_array_equal(
+            mu,
+            np.zeros(
+                2,
+                dtype=np.int32,
+            ),
+        )
+
+        np.testing.assert_array_equal(
+            phi,
+            np.zeros(
+                (2, 4),
+                dtype=np.int32,
+            ),
+        )
+
+        # ------------------------------------------------------
+        # Cost / stage contract
+        # ------------------------------------------------------
+
+        self.assertAlmostEqual(
+            selected.baseline_cost,
+            100.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_only_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.predicted_round_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_final_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.chosen_stage,
+            "rsu_matching",
+        )
+
+        # ------------------------------------------------------
+        # RSU diagnostics
+        # ------------------------------------------------------
+
+        self.assertEqual(
+            selected.rsu_candidate_edges,
+            4,
+        )
+
+        self.assertEqual(
+            selected.rsu_positive_candidate_edges,
+            4,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_rsu_edge_weight,
+            10.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.rsu_matches
+            ),
+            2,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_weight_sum,
+            18.0,
+            places=6,
+        )
+
+        # ------------------------------------------------------
+        # UAV ablation contract
+        # ------------------------------------------------------
+
+        self.assertEqual(
+            selected.uav_candidate_edges,
+            0,
+        )
+
+        self.assertEqual(
+            selected.uav_positive_candidate_edges,
+            0,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_match_count,
+            0,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_provider_count,
+            0,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_service_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_hiring_cost_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_net_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.uav_matches
+            ),
+            0,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_service_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_net_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.hired_uavs,
+            tuple(),
+        )
+
+        # 최종 action도 실제 Env validation을 통과해야 한다.
+        applied = env.apply_slow_action(
+            action
+        )
+
+        np.testing.assert_array_equal(
+            applied.rsu_scheduling,
+            expected_y,
+        )
+
+        np.testing.assert_array_equal(
+            applied.uav_hiring,
+            np.zeros(
+                2,
+                dtype=np.int32,
+            ),
+        )
+
+        np.testing.assert_array_equal(
+            applied.uav_scheduling,
+            np.zeros(
+                (2, 4),
+                dtype=np.int32,
+            ),
+        )
 
 
 if __name__ == "__main__":

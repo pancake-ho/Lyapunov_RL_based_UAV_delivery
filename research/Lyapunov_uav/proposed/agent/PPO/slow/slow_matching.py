@@ -495,6 +495,7 @@ def select_dpp_max_weight_matching(
     evaluate: ScoreActionsFn,
     min_edge_weight: float,
     forbid_empty_hiring: bool = True,
+    enable_uav: bool = True,
 ) -> MatchingSelection:
     """
     Select the round-fixed Slow action using DPP-based maximum-weight
@@ -722,6 +723,132 @@ def select_dpp_max_weight_matching(
             baseline_cost
         )
         rsu_matches = tuple()
+    
+    # --------------------------------------------------------------
+    # RSU matching surrogate gain
+    # --------------------------------------------------------------
+    rsu_weight_sum = float(
+        sum(
+            float(edge.weight)
+            for edge in rsu_matches
+        )
+    )
+
+    # ==============================================================
+    # RSU-only DPP ablation
+    # ==============================================================
+    #
+    # When UAV support is disabled, stop here BEFORE creating,
+    # validating, or evaluating any UAV candidate.
+    #
+    # The RSU-only ablation compares only:
+    #   1) outside option
+    #   2) RSU-only MWM complete action
+    #
+    # This keeps the RSU decision logic identical to the proposed
+    # method while removing only the UAV employment component.
+    # ==============================================================
+
+    if not bool(enable_uav):
+        (
+            chosen_stage,
+            chosen_action,
+            chosen_cost,
+        ) = _choose_exact_stage(
+            candidates=(
+                (
+                    "outside",
+                    baseline_action,
+                    baseline_cost,
+                ),
+                (
+                    "rsu_matching",
+                    rsu_action,
+                    rsu_only_cost,
+                ),
+            ),
+            tolerance=threshold,
+        )
+
+        _validate(
+            env,
+            chosen_action,
+            forbid_empty_hiring=forbid_empty_hiring,
+        )
+
+        return MatchingSelection(
+            action=_copy_action(
+                chosen_action
+            ),
+            predicted_round_cost=float(
+                chosen_cost
+            ),
+
+            # Exact full-round stage scores.
+            baseline_cost=float(
+                baseline_cost
+            ),
+            rsu_only_cost=float(
+                rsu_only_cost
+            ),
+
+            # No RSU+UAV stage exists in this ablation.
+            # Keep this field equal to the final constructed
+            # service candidate for logging compatibility.
+            provisional_final_cost=float(
+                rsu_only_cost
+            ),
+
+            chosen_stage=str(
+                chosen_stage
+            ),
+
+            # RSU diagnostics.
+            rsu_candidate_edges=int(
+                len(rsu_edges)
+            ),
+            rsu_positive_candidate_edges=int(
+                rsu_positive_candidate_edges
+            ),
+            best_rsu_edge_weight=float(
+                best_rsu_edge_weight
+            ),
+            rsu_matches=tuple(
+                rsu_matches
+            ),
+            rsu_weight_sum=float(
+                rsu_weight_sum
+            ),
+
+            # UAV path is intentionally disabled.
+            uav_candidate_edges=0,
+            uav_positive_candidate_edges=0,
+            best_uav_edge_weight=float(
+                "nan"
+            ),
+
+            provisional_uav_match_count=0,
+            provisional_uav_provider_count=0,
+            provisional_uav_service_weight_sum=0.0,
+            provisional_uav_hiring_cost_sum=0.0,
+            provisional_uav_net_weight_sum=0.0,
+            best_uav_provider_net_gain=float(
+                "nan"
+            ),
+
+            uav_matches=tuple(),
+            uav_service_weight_sum=0.0,
+            uav_net_weight_sum=0.0,
+            hired_uavs=tuple(),
+        )
+
+    # ==============================================================
+    # Proposed RSU + residual-UAV DPP path
+    # ==============================================================
+    # Only enable_uav=True reaches this point.
+    # ==============================================================
+
+    # 3) Residual UAV-user pair costs -> UAV MWM + fixed hiring gate.
 
     # 3) Residual UAV-user pair costs -> UAV MWM + fixed hiring gate.
     rsu_scheduled = np.asarray(
@@ -1017,12 +1144,6 @@ def select_dpp_max_weight_matching(
         forbid_empty_hiring=forbid_empty_hiring,
     )
 
-    rsu_weight_sum = float(
-        sum(
-            float(edge.weight)
-            for edge in rsu_matches
-        )
-    )
     uav_service_weight_sum = float(
         sum(
             float(edge.weight)

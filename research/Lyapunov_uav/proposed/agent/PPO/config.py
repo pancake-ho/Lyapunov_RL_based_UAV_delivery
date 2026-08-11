@@ -264,6 +264,13 @@ class FastTrainConfig:
     # Scenario 7.1: schedule user가 없는 UAV hiring candidate는 생성하지 않음.
     dpp_forbid_empty_hiring: bool = True
 
+    # Ablation:
+    # True  -> RSU-first + residual UAV DPP-MWM
+    # False -> RSU-only DPP-MWM
+    #
+    # Evaluation ablation용이며 기본 proposed algorithm은 True.
+    dpp_enable_uav: bool = True
+
     # ------------------------------------------------------------------
     # 8) Mobility curriculum
     # ------------------------------------------------------------------
@@ -966,5 +973,9 @@ def get_fast_ppo_config() -> FastTrainConfig:
             )
             if is_dpp
             else 0
+        ),
+        dpp_enable_uav=_env_bool(
+            "FAST_PPO_DPP_ENABLE_UAV",
+            True,
         ),
     )

@@ -1821,6 +1821,7 @@ def select_slow_action_dpp(
                     train_cfg
                     .dpp_forbid_empty_hiring
                 ),
+                enable_uav=bool(train_cfg.dpp_enable_uav),
             )
         )
     finally:
@@ -2995,6 +2996,37 @@ def _select_and_apply_slow_action(
     }
 
 
+def _exogenous_state_digest(
+    env: Env,
+) -> str:
+    digest = hashlib.sha256()
+
+    for name in (
+        "user_region",
+        "requested_content",
+        "uav_cached_content",
+    ):
+        value = np.asarray(
+            getattr(
+                env,
+                name,
+            ),
+            dtype=np.int32,
+        )
+
+        digest.update(
+            name.encode(
+                "utf-8"
+            )
+        )
+
+        digest.update(
+            value.tobytes()
+        )
+
+    return digest.hexdigest()
+
+
 def _execute_real_round_train(
     env: Env,
     agent: FastPPOAgent,
@@ -4045,6 +4077,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
             layer_counts = np.zeros(int(env.cfg.layer), dtype=np.float64)
 
             for round_in_episode in range(1, int(train_cfg.eval_rounds_per_episode) + 1):
+                exogenous_start_digest = (
+                    _exogenous_state_digest(
+                        env
+                    )
+                )
                 obs, slow_info = _select_and_apply_slow_action(
                     env,
                     agent,
@@ -4144,6 +4181,12 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                         "prediction_abs_relative_error": float(
                             round_abs_relative_error
                         ),
+
+                        "exogenous_start_digest":
+                            exogenous_start_digest,
+
+                        "exogenous_end_digest":
+                            exogenous_end_digest,
                     }
                 )
                 totals["reward"] += realized["formulation_reward"]
@@ -4187,6 +4230,11 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     layer_counts[layer - 1] += (
                         active_layers * realized[f"layer_{layer}_ratio"]
                     )
+                exogenous_end_digest = (
+                    _exogenous_state_digest(
+                        env
+                    )
+                )
 
             gap_mean = (
                 totals["prediction_gap_sum"]
