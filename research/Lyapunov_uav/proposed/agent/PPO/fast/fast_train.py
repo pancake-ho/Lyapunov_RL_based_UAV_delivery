@@ -4089,9 +4089,27 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     slow_rng,
                     process_pool=forecast_pool,
                 )
+
                 obs, realized = _execute_real_round_eval(
-                    env, agent, obs, train_cfg
+                    env,
+                    agent,
+                    obs,
+                    train_cfg,
                 )
+
+                # --------------------------------------------------------------
+                # Exogenous state after the complete real round.
+                #
+                # This digest is paired with exogenous_start_digest and is used
+                # only for experimental-control verification across Slow methods.
+                # It must be computed AFTER the real 3600-slot round finishes.
+                # --------------------------------------------------------------
+                exogenous_end_digest = (
+                    _exogenous_state_digest(
+                        env
+                    )
+                )
+
                 predicted = float(
                     slow_info[
                         "predicted_round_cost"
