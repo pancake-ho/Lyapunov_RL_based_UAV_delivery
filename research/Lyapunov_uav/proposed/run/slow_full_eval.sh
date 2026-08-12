@@ -560,25 +560,37 @@ echo "commit=$(git rev-parse HEAD)"
 echo "checkpoint=${SELECTED_FAST_CHECKPOINT}"
 echo "============================================================"
 
+EXPECTED_ROUND_ROWS=$((EVAL_EPISODES * EVAL_ROUNDS_PER_EPISODE))
 
-EXPECTED_ROUND_ROWS=$(
-    EVAL_EPISODES
-    * EVAL_ROUNDS_PER_EPISODE
-)
+EXPECTED_SLOT_ROWS_PER_ROUND=$(((SLOW_T + SLOT_LOG_STRIDE - 1) / SLOT_LOG_STRIDE))
 
-EXPECTED_SLOT_ROWS_PER_ROUND=$(
-    (
-        SLOW_T
-        + SLOT_LOG_STRIDE
-        - 1
-    )
-    / SLOT_LOG_STRIDE
-)
+EXPECTED_SLOT_ROWS=$((EXPECTED_ROUND_ROWS * EXPECTED_SLOT_ROWS_PER_ROUND))
 
-EXPECTED_SLOT_ROWS=$(
-    EXPECTED_ROUND_ROWS
-    * EXPECTED_SLOT_ROWS_PER_ROUND
-)
+echo "============================================================"
+echo "[ROW-COUNT PREFLIGHT]"
+echo "eval_episodes=${EVAL_EPISODES}"
+echo "eval_rounds_per_episode=${EVAL_ROUNDS_PER_EPISODE}"
+echo "slow_T=${SLOW_T}"
+echo "slot_log_stride=${SLOT_LOG_STRIDE}"
+echo "expected_round_rows=${EXPECTED_ROUND_ROWS}"
+echo "expected_slot_rows_per_round=${EXPECTED_SLOT_ROWS_PER_ROUND}"
+echo "expected_slot_rows=${EXPECTED_SLOT_ROWS}"
+echo "============================================================"
+
+
+[[ "${EXPECTED_ROUND_ROWS}" -gt 0 ]] \
+    || die \
+    "EXPECTED_ROUND_ROWS must be positive."
+
+
+[[ "${EXPECTED_SLOT_ROWS_PER_ROUND}" -gt 0 ]] \
+    || die \
+    "EXPECTED_SLOT_ROWS_PER_ROUND must be positive."
+
+
+[[ "${EXPECTED_SLOT_ROWS}" -gt 0 ]] \
+    || die \
+    "EXPECTED_SLOT_ROWS must be positive."
 
 
 for SEED in "${EVAL_SEEDS[@]}"; do
