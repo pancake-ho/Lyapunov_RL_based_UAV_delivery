@@ -44,6 +44,44 @@ DPP_WORKERS=$((ALLOCATED_CPUS - 1))
 # =====================================================================
 
 METHOD="${1:-}"
+TRACE_MODE="${2:-round}"
+SNR_OFFSET_DB="${3:-0}"
+
+case "${TRACE_MODE}" in
+    round)
+        SLOT_LOGGING=0
+        ;;
+    slot)
+        SLOT_LOGGING=1
+        ;;
+    *)
+        echo "[ERROR] Unknown trace mode: ${TRACE_MODE}" >&2
+        echo "Use round or slot." >&2
+        exit 2
+        ;;
+esac
+SNR_TAG="$(
+    "${PYTHON_BIN}" - "${SNR_OFFSET_DB}" <<'PY'
+import sys
+
+value = float(sys.argv[1])
+
+sign = (
+    "p"
+    if value >= 0.0
+    else "m"
+)
+
+text = (
+    f"{abs(value):g}"
+    .replace(".", "p")
+)
+
+print(
+    f"{sign}{text}"
+)
+PY
+)"
 
 case "${METHOD}" in
 

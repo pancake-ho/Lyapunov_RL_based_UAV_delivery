@@ -81,16 +81,56 @@ def build_env_config(
     train_cfg: Optional[FastTrainConfig] = None,
 ) -> EnvConfig:
     """
-    System/environment parameter source remains proposed/config.py.
+    Build the physical-system configuration.
 
-    Battery round-feasibility horizon was 5 while slow_T was 3600 in the
-    original branch. The joint trainer aligns them without introducing a
-    separate configuration file.
+    channel_snr_offset_db is evaluation-only and applies the same
+    multiplicative SNR shift to both RSU and UAV links while preserving
+    their original geometry/path-loss/channel-model differences.
     """
     cfg = EnvConfig()
+
     if train_cfg is not None:
-        cfg.seed = int(train_cfg.seed)
-    cfg.battery.target_service_slots_per_round = int(cfg.slow_T)
+        cfg.seed = int(
+            train_cfg.seed
+        )
+
+        snr_offset_db = float(
+            train_cfg.channel_snr_offset_db
+        )
+
+        if abs(snr_offset_db) > 1e-12:
+            snr_scale = float(
+                10.0
+                ** (
+                    snr_offset_db
+                    / 10.0
+                )
+            )
+
+            # RSU:
+            # SNR ∝ gamma_linear.
+            cfg.rsu_channel.gamma_db = (
+                float(
+                    cfg.rsu_channel.gamma_db
+                )
+                + snr_offset_db
+            )
+
+            # UAV:
+            # SNR = p * beta_zero / (...)
+            # Multiplying beta_zero by snr_scale
+            # gives the same SNR dB shift.
+            cfg.uav_channel.beta_zero = (
+                float(
+                    cfg.uav_channel.beta_zero
+                )
+                * snr_scale
+            )
+
+    cfg.battery.target_service_slots_per_round = int(
+        cfg.slow_T
+    )
+
     return cfg
 
 
@@ -2121,6 +2161,957 @@ def select_slow_action_dpp(
         ),
     )
 
+def _append_csv_rows(
+    path: Path,
+    rows: Sequence[
+        Dict[str, Any]
+    ],
+) -> None:
+    """
+    Append one round of slot diagnostics with one file open/fsync.
+
+    ScalarLogger is intentionally not used here because slot-level
+    logging can contain hundreds of thousands of rows per evaluation.
+    """
+    if not rows:
+        return
+
+    ensure_dir(
+        path.parent
+    )
+
+    fieldnames = list(
+        rows[0].keys()
+    )
+
+    for idx, row in enumerate(
+        rows
+    ):
+        if list(
+            row.keys()
+        ) != fieldnames:
+            raise RuntimeError(
+                "Slot CSV schema mismatch "
+                f"inside buffered rows: idx={idx}"
+            )
+
+    file_exists = (
+        path.exists()
+        and path.stat().st_size > 0
+    )
+
+    if file_exists:
+        with path.open(
+            "r",
+            newline="",
+            encoding="utf-8",
+        ) as handle:
+            existing_header = next(
+                csv.reader(handle),
+                None,
+            )
+
+        if existing_header != fieldnames:
+            raise RuntimeError(
+                "Slot CSV schema mismatch while "
+                f"appending to {path}: "
+                f"expected={existing_header}, "
+                f"got={fieldnames}."
+            )
+
+    with path.open(
+        "a",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fieldnames,
+        )
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerows(
+            rows
+        )
+
+        handle.flush()
+        os.fsync(
+            handle.fileno()
+        )
+
+
+def _positive_mean_db(
+    linear_values: np.ndarray,
+    mask: np.ndarray,
+) -> float:
+    values = np.asarray(
+        linear_values,
+        dtype=np.float64,
+    )
+
+    mask_arr = np.asarray(
+        mask,
+        dtype=bool,
+    )
+
+    valid = (
+        mask_arr
+        & np.isfinite(values)
+        & (values > 0.0)
+    )
+
+    if not np.any(valid):
+        return float("nan")
+
+    values_db = (
+        10.0
+        * np.log10(
+            values[valid]
+        )
+    )
+
+    return float(
+        np.mean(
+            values_db
+        )
+    )
+
+
+def _build_eval_slot_row(
+    *,
+    env: Env,
+    info: Dict[str, Any],
+    selected: Dict[str, Any],
+    reward: float,
+    cost: float,
+    episode_idx: int,
+    round_in_episode: int,
+    global_eval_round: int,
+    slot_idx: int,
+) -> Dict[str, Any]:
+    """
+    Convert one REAL evaluation slot into scalar diagnostics.
+
+    Important:
+      - This function is never called from the Slow-DPP shadow rollout.
+      - All Tx-power/rate/energy values correspond to the actual env.step()
+        result after Slow masks, charging rule, battery feasibility, and
+        Fast-action processing.
+    """
+    reward_components = info.get(
+        "reward_components",
+        {},
+    )
+
+    fast = reward_components.get(
+        "fast_reward_components",
+        {},
+    )
+
+    prev_q = np.asarray(
+        info.get(
+            "prev_Q",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    next_q = np.asarray(
+        info.get(
+            "next_Q",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    prev_z = np.asarray(
+        info.get(
+            "prev_Z",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    next_z = np.asarray(
+        info.get(
+            "next_Z",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    prev_e = np.asarray(
+        info.get(
+            "prev_E",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    next_e = np.asarray(
+        info.get(
+            "next_E",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    rsu_result = info.get(
+        "rsu_result",
+        {},
+    )
+
+    uav_result = info.get(
+        "uav_result",
+        {},
+    )
+
+    rsu_active = np.asarray(
+        rsu_result.get(
+            "active_mask",
+            [],
+        ),
+        dtype=bool,
+    )
+
+    uav_requested = np.asarray(
+        uav_result.get(
+            "requested_mask",
+            [],
+        ),
+        dtype=bool,
+    )
+
+    uav_active = np.asarray(
+        uav_result.get(
+            "active_mask",
+            [],
+        ),
+        dtype=bool,
+    )
+
+    rsu_capacity = np.asarray(
+        rsu_result.get(
+            "link_capacity_bps",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    uav_capacity = np.asarray(
+        uav_result.get(
+            "link_capacity_bps",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    rsu_gain = np.asarray(
+        rsu_result.get(
+            "raw_channel_gain",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    uav_gain = np.asarray(
+        uav_result.get(
+            "raw_channel_gain",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    uav_tx_power = np.asarray(
+        uav_result.get(
+            "tx_power",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    rsu_delivered_bits = np.asarray(
+        rsu_result.get(
+            "delivered_bits",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    uav_delivered_bits = np.asarray(
+        uav_result.get(
+            "delivered_bits",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    slot_duration = float(
+        env.cfg.battery.slot_duration
+    )
+
+    if slot_duration <= 0.0:
+        raise RuntimeError(
+            "slot_duration must be positive."
+        )
+
+    # --------------------------------------------------------------
+    # Actual UAV Tx-power accounting
+    #
+    # requested_mask is the correct "transmission attempt" mask for
+    # communication-energy accounting in uav_delivery.py.
+    # --------------------------------------------------------------
+
+    if (
+        uav_tx_power.shape
+        == uav_requested.shape
+    ):
+        tx_power_attempt = np.where(
+            uav_requested,
+            uav_tx_power,
+            0.0,
+        )
+    else:
+        tx_power_attempt = np.zeros(
+            uav_requested.shape,
+            dtype=np.float64,
+        )
+
+    if (
+        uav_tx_power.shape
+        == uav_active.shape
+    ):
+        tx_power_active = np.where(
+            uav_active,
+            uav_tx_power,
+            0.0,
+        )
+    else:
+        tx_power_active = np.zeros(
+            uav_active.shape,
+            dtype=np.float64,
+        )
+
+    attempt_count = int(
+        np.sum(
+            uav_requested
+        )
+    )
+
+    active_uav_count = int(
+        np.sum(
+            uav_active
+        )
+    )
+
+    rsu_active_count = int(
+        np.sum(
+            rsu_active
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Physical SNR from the exact channel realization of this slot.
+    # --------------------------------------------------------------
+
+    rsu_snr = np.zeros_like(
+        rsu_gain,
+        dtype=np.float64,
+    )
+
+    if rsu_gain.size:
+        rsu_snr = (
+            float(
+                env.rsu_channel.gamma_linear
+            )
+            * np.maximum(
+                rsu_gain,
+                0.0,
+            )
+            / max(
+                1e-12,
+                1.0
+                + float(
+                    env.rsu_channel.inr_linear
+                ),
+            )
+        )
+
+    uav_snr = np.zeros_like(
+        uav_gain,
+        dtype=np.float64,
+    )
+
+    if (
+        uav_gain.shape
+        == uav_tx_power.shape
+    ):
+        uav_snr = (
+            np.maximum(
+                uav_tx_power,
+                0.0,
+            )
+            * np.maximum(
+                uav_gain,
+                0.0,
+            )
+            / max(
+                1e-30,
+                float(
+                    env.uav_channel.receiver_noise_power
+                )
+                * float(
+                    env.uav_channel.capacity_gap
+                ),
+            )
+        )
+
+    # --------------------------------------------------------------
+    # Energy.
+    # --------------------------------------------------------------
+
+    battery_step_info = list(
+        info.get(
+            "battery_step_info",
+            [],
+        )
+    )
+
+    hover_energy_j = float(
+        sum(
+            float(
+                item.get(
+                    "hover_energy",
+                    0.0,
+                )
+            )
+            for item
+            in battery_step_info
+        )
+    )
+
+    comm_energy_j = float(
+        sum(
+            float(
+                item.get(
+                    "comm_energy",
+                    0.0,
+                )
+            )
+            for item
+            in battery_step_info
+        )
+    )
+
+    consumed_energy_j = float(
+        sum(
+            float(
+                item.get(
+                    "total_consumed",
+                    0.0,
+                )
+            )
+            for item
+            in battery_step_info
+        )
+    )
+
+    charged_energy_j = float(
+        sum(
+            float(
+                item.get(
+                    "charged_energy",
+                    0.0,
+                )
+            )
+            for item
+            in battery_step_info
+        )
+    )
+
+    metrics = extract_info_metrics(
+        info
+    )
+
+    delivery = float(
+        metrics[
+            "delivery"
+        ]
+    )
+
+    quality = float(
+        metrics[
+            "quality"
+        ]
+    )
+
+    quality_degradation = float(
+        metrics[
+            "quality_degradation"
+        ]
+    )
+
+    # 1-based global real evaluation step within one seed run.
+    global_step = (
+        (
+            int(
+                global_eval_round
+            )
+            - 1
+        )
+        * int(
+            env.slow_T
+        )
+        + int(
+            slot_idx
+        )
+        + 1
+    )
+
+    return {
+        # Time
+        "global_step":
+            int(
+                global_step
+            ),
+        "global_eval_round":
+            int(
+                global_eval_round
+            ),
+        "episode":
+            int(
+                episode_idx
+            ),
+        "round_in_episode":
+            int(
+                round_in_episode
+            ),
+        "slot_in_round":
+            int(
+                slot_idx
+                + 1
+            ),
+
+        # Reward / DPP
+        "formulation_reward":
+            float(
+                reward
+            ),
+        "one_slot_dpp_cost":
+            float(
+                cost
+            ),
+
+        "queue_playback_term":
+            float(
+                fast.get(
+                    "queue_playback_term",
+                    0.0,
+                )
+            ),
+        "video_delivery_term":
+            float(
+                fast.get(
+                    "video_delivery_term",
+                    0.0,
+                )
+            ),
+        "battery_consume_term":
+            float(
+                fast.get(
+                    "battery_consume_term",
+                    0.0,
+                )
+            ),
+        "battery_charge_term":
+            float(
+                fast.get(
+                    "battery_charge_term",
+                    0.0,
+                )
+            ),
+        "quality_degradation_term":
+            float(
+                fast.get(
+                    "quality_degradation_term",
+                    0.0,
+                )
+            ),
+
+        # Queue state
+        "queue_prev_mean":
+            float(
+                np.mean(
+                    prev_q
+                )
+            )
+            if prev_q.size
+            else 0.0,
+        "queue_prev_max":
+            float(
+                np.max(
+                    prev_q
+                )
+            )
+            if prev_q.size
+            else 0.0,
+        "queue_next_mean":
+            float(
+                np.mean(
+                    next_q
+                )
+            )
+            if next_q.size
+            else 0.0,
+        "queue_next_max":
+            float(
+                np.max(
+                    next_q
+                )
+            )
+            if next_q.size
+            else 0.0,
+
+        "virtual_queue_prev_mean":
+            float(
+                np.mean(
+                    prev_z
+                )
+            )
+            if prev_z.size
+            else 0.0,
+        "virtual_queue_prev_max":
+            float(
+                np.max(
+                    prev_z
+                )
+            )
+            if prev_z.size
+            else 0.0,
+        "virtual_queue_next_mean":
+            float(
+                np.mean(
+                    next_z
+                )
+            )
+            if next_z.size
+            else 0.0,
+        "virtual_queue_next_max":
+            float(
+                np.max(
+                    next_z
+                )
+            )
+            if next_z.size
+            else 0.0,
+
+        # UAV Tx power
+        "uav_tx_power_attempt_sum_w":
+            float(
+                np.sum(
+                    tx_power_attempt
+                )
+            ),
+        "uav_tx_power_attempt_mean_w":
+            (
+                float(
+                    np.sum(
+                        tx_power_attempt
+                    )
+                )
+                / float(
+                    attempt_count
+                )
+                if attempt_count > 0
+                else 0.0
+            ),
+        "uav_tx_power_active_sum_w":
+            float(
+                np.sum(
+                    tx_power_active
+                )
+            ),
+        "uav_tx_power_active_mean_w":
+            (
+                float(
+                    np.sum(
+                        tx_power_active
+                    )
+                )
+                / float(
+                    active_uav_count
+                )
+                if active_uav_count > 0
+                else 0.0
+            ),
+
+        # Physical channel capacity
+        "rsu_active_capacity_bps":
+            float(
+                np.sum(
+                    np.where(
+                        rsu_active,
+                        rsu_capacity,
+                        0.0,
+                    )
+                )
+            )
+            if (
+                rsu_capacity.shape
+                == rsu_active.shape
+            )
+            else 0.0,
+
+        "uav_attempt_capacity_bps":
+            float(
+                np.sum(
+                    np.where(
+                        uav_requested,
+                        uav_capacity,
+                        0.0,
+                    )
+                )
+            )
+            if (
+                uav_capacity.shape
+                == uav_requested.shape
+            )
+            else 0.0,
+
+        "uav_active_capacity_bps":
+            float(
+                np.sum(
+                    np.where(
+                        uav_active,
+                        uav_capacity,
+                        0.0,
+                    )
+                )
+            )
+            if (
+                uav_capacity.shape
+                == uav_active.shape
+            )
+            else 0.0,
+
+        # Actual delivered PHY throughput
+        "rsu_throughput_bps":
+            float(
+                np.sum(
+                    rsu_delivered_bits
+                )
+                / slot_duration
+            ),
+        "uav_throughput_bps":
+            float(
+                np.sum(
+                    uav_delivered_bits
+                )
+                / slot_duration
+            ),
+        "total_throughput_bps":
+            float(
+                (
+                    np.sum(
+                        rsu_delivered_bits
+                    )
+                    + np.sum(
+                        uav_delivered_bits
+                    )
+                )
+                / slot_duration
+            ),
+
+        # Realized SNR
+        "rsu_active_snr_mean_db":
+            _positive_mean_db(
+                rsu_snr,
+                rsu_active,
+            ),
+
+        "uav_attempt_snr_mean_db":
+            _positive_mean_db(
+                uav_snr,
+                uav_requested,
+            ),
+
+        "uav_active_snr_mean_db":
+            _positive_mean_db(
+                uav_snr,
+                uav_active,
+            ),
+
+        # Energy
+        "uav_hover_energy_j":
+            hover_energy_j,
+
+        "uav_comm_energy_j":
+            comm_energy_j,
+
+        "uav_consumed_energy_j":
+            consumed_energy_j,
+
+        "uav_charged_energy_j":
+            charged_energy_j,
+
+        "uav_operating_power_w":
+            float(
+                consumed_energy_j
+                / slot_duration
+            ),
+
+        # Battery state
+        "soc_prev_mean":
+            float(
+                np.mean(
+                    prev_e
+                )
+            )
+            if prev_e.size
+            else 0.0,
+
+        "soc_next_mean":
+            float(
+                np.mean(
+                    next_e
+                )
+            )
+            if next_e.size
+            else 0.0,
+
+        "soc_next_min":
+            float(
+                np.min(
+                    next_e
+                )
+            )
+            if next_e.size
+            else 0.0,
+
+        # QoS
+        "delivery":
+            delivery,
+
+        "quality":
+            quality,
+
+        "quality_degradation":
+            quality_degradation,
+
+        "quality_per_chunk":
+            (
+                quality
+                / delivery
+                if delivery > 0.0
+                else 0.0
+            ),
+
+        "quality_degradation_per_chunk":
+            (
+                quality_degradation
+                / delivery
+                if delivery > 0.0
+                else 0.0
+            ),
+
+        "stall":
+            float(
+                metrics[
+                    "stall"
+                ]
+            ),
+
+        "scheduled_stall":
+            float(
+                metrics[
+                    "scheduled_stall"
+                ]
+            ),
+
+        "unscheduled_stall":
+            float(
+                metrics[
+                    "unscheduled_stall"
+                ]
+            ),
+
+        # Link / UAV activity
+        "num_rsu_active_links":
+            int(
+                rsu_active_count
+            ),
+
+        "num_uav_attempt_links":
+            int(
+                attempt_count
+            ),
+
+        "num_uav_active_links":
+            int(
+                active_uav_count
+            ),
+
+        "num_hired_uav":
+            int(
+                np.sum(
+                    np.asarray(
+                        info.get(
+                            "uav_hiring",
+                            [],
+                        ),
+                        dtype=np.int32,
+                    )
+                )
+            ),
+
+        "num_charging_uav":
+            int(
+                np.sum(
+                    np.asarray(
+                        info.get(
+                            "charging_state",
+                            [],
+                        ),
+                        dtype=np.int32,
+                    )
+                )
+            ),
+
+        # PPO action diagnostics
+        "service_rate":
+            float(
+                selected.get(
+                    "service_rate",
+                    0.0,
+                )
+            ),
+
+        "requested_chunks":
+            float(
+                selected.get(
+                    "mean_requested_chunks",
+                    0.0,
+                )
+            ),
+
+        "active_action_dims":
+            float(
+                selected.get(
+                    "active_action_dims",
+                    0.0,
+                )
+            ),
+
+        "action_saturation_ratio":
+            float(
+                selected.get(
+                    "action_saturation_ratio",
+                    0.0,
+                )
+            ),
+    }
 
 # ======================================================================
 # Metrics / plots
@@ -3240,7 +4231,15 @@ def _execute_real_round_eval(
     agent: FastPPOAgent,
     obs: Dict[str, Any],
     train_cfg: FastTrainConfig,
-) -> Tuple[Dict[str, Any], Dict[str, float]]:
+    *,
+    slot_log_path: Optional[Path] = None,
+    episode_idx: int = 0,
+    round_in_episode: int = 0,
+    global_eval_round: int = 0,
+) -> Tuple[
+    Dict[str, Any],
+    Dict[str, float],
+    ]:
     totals = {
         "formulation_reward": 0.0,
         "round_fast_cost": 0.0,
@@ -3270,6 +4269,9 @@ def _execute_real_round_eval(
     }
     agent.model.eval()
     layer_counts = np.zeros(int(env.cfg.layer), dtype=np.int64)
+    slot_rows: list[
+        Dict[str, Any]
+    ] = []
 
     for slot_idx in range(int(env.slow_T)):
         selected = agent.select_action(
@@ -3292,6 +4294,45 @@ def _execute_real_round_eval(
             env_cfg=env.cfg,
         )
         metrics = extract_info_metrics(info)
+        if (
+            bool(
+                train_cfg.eval_slot_logging
+            )
+            and slot_log_path
+            is not None
+            and (
+                int(slot_idx)
+                % int(
+                    train_cfg.eval_slot_log_stride
+                )
+                == 0
+            )
+        ):
+            slot_rows.append(
+                _build_eval_slot_row(
+                    env=env,
+                    info=info,
+                    selected=selected,
+                    reward=float(
+                        reward
+                    ),
+                    cost=float(
+                        cost
+                    ),
+                    episode_idx=int(
+                        episode_idx
+                    ),
+                    round_in_episode=int(
+                        round_in_episode
+                    ),
+                    global_eval_round=int(
+                        global_eval_round
+                    ),
+                    slot_idx=int(
+                        slot_idx
+                    ),
+                )
+            )
         layer_counts += _count_executed_layers(
             selected["env_action"], int(env.cfg.layer)
         )
@@ -3370,6 +4411,14 @@ def _execute_real_round_eval(
             "Evaluation battery SoC violated tolerance: "
             f"min_soc={totals['min_soc']:.6f}, "
             f"allowed={minimum_allowed_soc:.6f}."
+        )
+    if (
+        slot_log_path is not None
+        and slot_rows
+    ):
+        _append_csv_rows(
+            slot_log_path,
+            slot_rows,
         )
     return obs, totals
 
@@ -4090,11 +5139,36 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     process_pool=forecast_pool,
                 )
 
+                upcoming_global_round = int(
+                    global_eval_round
+                    + 1
+                )
+
+                slot_log_path = (
+                    run_dir
+                    / "logs"
+                    / "eval_slots.csv"
+                    if bool(
+                        train_cfg.eval_slot_logging
+                    )
+                    else None
+                )
+
                 obs, realized = _execute_real_round_eval(
                     env,
                     agent,
                     obs,
                     train_cfg,
+                    slot_log_path=slot_log_path,
+                    episode_idx=int(
+                        episode_idx
+                    ),
+                    round_in_episode=int(
+                        round_in_episode
+                    ),
+                    global_eval_round=int(
+                        upcoming_global_round
+                    ),
                 )
 
                 # --------------------------------------------------------------
@@ -4248,11 +5322,6 @@ def evaluate(train_cfg: FastTrainConfig) -> None:
                     layer_counts[layer - 1] += (
                         active_layers * realized[f"layer_{layer}_ratio"]
                     )
-                exogenous_end_digest = (
-                    _exogenous_state_digest(
-                        env
-                    )
-                )
 
             gap_mean = (
                 totals["prediction_gap_sum"]

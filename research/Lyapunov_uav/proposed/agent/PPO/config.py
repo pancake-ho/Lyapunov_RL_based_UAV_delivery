@@ -272,6 +272,34 @@ class FastTrainConfig:
     dpp_enable_uav: bool = True
 
     # ------------------------------------------------------------------
+    # Evaluation diagnostics
+    # ------------------------------------------------------------------
+
+    # True이면 evaluation의 실제 real slot에 대해서만
+    # logs/eval_slots.csv를 기록한다.
+    #
+    # Slow-DPP forecast shadow rollout은 기록하지 않는다.
+    eval_slot_logging: bool = False
+
+    # 1이면 모든 real slot 기록.
+    # 10이면 10-slot마다 하나의 sample만 기록.
+    #
+    # 교수님 피드백의 "매 slot power" 분석을 할 때는 1 사용.
+    eval_slot_log_stride: int = 1
+
+    # Evaluation-only common SNR shift [dB].
+    #
+    # RSU:
+    #   gamma_db <- gamma_db + offset
+    #
+    # UAV:
+    #   beta_zero <- beta_zero * 10^(offset/10)
+    #
+    # 따라서 geometry/path-loss 차이는 유지하면서
+    # 양쪽 링크 SNR을 동일한 dB offset만큼 이동시킨다.
+    channel_snr_offset_db: float = 0.0
+
+    # ------------------------------------------------------------------
     # 8) Mobility curriculum
     # ------------------------------------------------------------------
     mobility_curriculum: Tuple[Tuple[int, float], ...] = ((1, 1e-4),)
@@ -579,6 +607,37 @@ class FastTrainConfig:
                 "dpp_candidate_batch_size must "
                 "be at least dpp_forecast_workers."
             )
+
+        if int(
+            self.eval_slot_log_stride
+        ) <= 0:
+            raise ValueError(
+                "eval_slot_log_stride must be positive."
+            )
+
+        if (
+            bool(self.eval_slot_logging)
+            and self.mode != "eval"
+        ):
+            raise ValueError(
+                "eval_slot_logging is evaluation-only."
+            )
+
+        if (
+            abs(
+                float(
+                    self.channel_snr_offset_db
+                )
+            )
+            > 1e-12
+            and self.mode != "eval"
+        ):
+            raise ValueError(
+                "channel_snr_offset_db must remain 0 "
+                "during training. Use it only for "
+                "frozen-policy evaluation."
+            )
+
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
@@ -978,4 +1037,19 @@ def get_fast_ppo_config() -> FastTrainConfig:
             "FAST_PPO_DPP_ENABLE_UAV",
             True,
         ),
+        eval_slot_logging=_env_bool(
+            "FAST_PPO_EVAL_SLOT_LOGGING",
+            False,
+        ),
+
+        eval_slot_log_stride=_env_int(
+            "FAST_PPO_EVAL_SLOT_LOG_STRIDE",
+            1,
+        ),
+
+        channel_snr_offset_db=_env_float(
+            "FAST_PPO_CHANNEL_SNR_OFFSET_DB",
+            0.0,
+        ),
+        
     )
