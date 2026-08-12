@@ -191,34 +191,77 @@ def mean_ci(
     np.ndarray,
     np.ndarray,
 ]:
-    mean = np.nanmean(
+    values = np.asarray(
         values,
-        axis=0,
+        dtype=np.float64,
     )
 
-    n = values.shape[0]
-
-    if n < 2:
-        return (
-            mean,
-            np.zeros_like(
-                mean
-            ),
+    if values.ndim != 2:
+        raise ValueError(
+            "mean_ci expects [seed, point] array."
         )
 
-    std = np.nanstd(
-        values,
-        axis=0,
-        ddof=1,
+    num_points = int(
+        values.shape[1]
     )
 
-    half = (
-        t95(n)
-        * std
-        / math.sqrt(
-            n
-        )
+    mean = np.full(
+        num_points,
+        np.nan,
+        dtype=np.float64,
     )
+
+    half = np.full(
+        num_points,
+        np.nan,
+        dtype=np.float64,
+    )
+
+    for idx in range(
+        num_points
+    ):
+        column = values[
+            :,
+            idx,
+        ]
+
+        finite = column[
+            np.isfinite(
+                column
+            )
+        ]
+
+        n = int(
+            finite.size
+        )
+
+        if n == 0:
+            continue
+
+        mean[idx] = float(
+            np.mean(
+                finite
+            )
+        )
+
+        if n == 1:
+            half[idx] = 0.0
+            continue
+
+        std = float(
+            np.std(
+                finite,
+                ddof=1,
+            )
+        )
+
+        half[idx] = (
+            t95(n)
+            * std
+            / math.sqrt(
+                n
+            )
+        )
 
     return mean, half
 
@@ -330,21 +373,38 @@ def verify_matching_grid(
                     "exogenous_start_digest",
                     "exogenous_end_digest",
                 ):
+                    lhs_value = lhs.get(
+                        key
+                    )
+
+                    rhs_value = rhs.get(
+                        key
+                    )
+
                     if (
-                        lhs.get(
-                            key
+                        lhs_value is None
+                        or rhs_value is None
+                        or lhs_value == ""
+                        or rhs_value == ""
+                    ):
+                        raise RuntimeError(
+                            "Missing exogenous digest: "
+                            f"seed={seed}, "
+                            f"row={idx}, "
+                            f"key={key}"
                         )
-                        != rhs.get(
-                            key
-                        )
+
+                    if (
+                        lhs_value
+                        != rhs_value
                     ):
                         raise RuntimeError(
                             "Exogenous trace mismatch: "
-                            f"seed={seed}, row={idx}, "
+                            f"seed={seed}, "
+                            f"row={idx}, "
                             f"key={key}, "
                             f"{reference_name} vs {name}"
                         )
-
 
 def metric_array(
     method_data: Dict[
@@ -521,7 +581,7 @@ def main() -> None:
 
     fig.suptitle(
         "Weighted Reward-Term Magnitude "
-        "(5-seed mean ± 95% CI)"
+        f"({len(seeds)}-seed mean ± 95% CI)"
     )
 
     fig.tight_layout()

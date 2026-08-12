@@ -552,6 +552,77 @@ def main() -> None:
         output_dir,
     )
 
+    # --------------------------------------------------------------
+    # SNR
+    # --------------------------------------------------------------
+
+    required_snr_keys = (
+        "rsu_active_snr_mean_db",
+        "uav_attempt_snr_mean_db",
+        "uav_active_snr_mean_db",
+    )
+
+    if all(
+        key in data
+        for key in required_snr_keys
+    ):
+        fig, axis = plt.subplots(
+            figsize=(
+                11,
+                5,
+            )
+        )
+
+        for key, label in (
+            (
+                "rsu_active_snr_mean_db",
+                "RSU Active-Link SNR",
+            ),
+            (
+                "uav_attempt_snr_mean_db",
+                "UAV Attempt-Link SNR",
+            ),
+            (
+                "uav_active_snr_mean_db",
+                "UAV Active-Link SNR",
+            ),
+        ):
+            axis.plot(
+                x,
+                rolling(
+                    data[key],
+                    window,
+                ),
+                label=label,
+            )
+
+        axis.set_xlabel(
+            "Global Step"
+        )
+
+        axis.set_ylabel(
+            "Mean SNR [dB]"
+        )
+
+        axis.legend()
+
+        axis.grid(
+            True,
+            alpha=0.3,
+        )
+
+        fig.tight_layout()
+
+        fig.savefig(
+            output_dir
+            / "slot_snr.png",
+            dpi=220,
+        )
+
+        plt.close(
+            fig
+        )
+
 
 if __name__ == "__main__":
     main()

@@ -3116,65 +3116,312 @@ def _build_eval_slot_row(
 # ======================================================================
 # Metrics / plots
 # ======================================================================
-def extract_info_metrics(info: Dict[str, Any]) -> Dict[str, float]:
-    reward_components = info.get("reward_components", {})
-    fast = reward_components.get("fast_reward_components", {})
-
-    stall = np.asarray(info.get("stall", []), dtype=np.float64)
-    next_e = np.asarray(info.get("next_E", []), dtype=np.float64)
-    outage = np.asarray(info.get("outage", []), dtype=np.float64)
-    charging = np.asarray(info.get("charging_state", []), dtype=np.float64)
-
-    scheduled = np.zeros(stall.shape, dtype=bool)
-    rsu_scheduling = np.asarray(
-        info.get("rsu_scheduling", []), dtype=np.int32
+def extract_info_metrics(
+    info: Dict[str, Any],
+) -> Dict[str, float]:
+    reward_components = info.get(
+        "reward_components",
+        {},
     )
-    uav_scheduling = np.asarray(
-        info.get("uav_scheduling", []), dtype=np.int32
+
+    fast = reward_components.get(
+        "fast_reward_components",
+        {},
     )
+
+    stall = np.asarray(
+        info.get(
+            "stall",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    next_e = np.asarray(
+        info.get(
+            "next_E",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    outage = np.asarray(
+        info.get(
+            "outage",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    charging = np.asarray(
+        info.get(
+            "charging_state",
+            [],
+        ),
+        dtype=np.float64,
+    )
+
+    scheduled = np.zeros(
+        stall.shape,
+        dtype=bool,
+    )
+
+    # ==============================================================
+    # IMPORTANT:
+    #
+    # stall은 현재 slot의 transmission / playback에 대한 결과다.
+    # 따라서 raw round-level slow scheduling matrix가 아니라,
+    # 해당 slot 전송 직전에 실제 유효했던 connection을 사용해야 한다.
+    #
+    # 차량이 road를 이탈하면 raw y/phi는 round 동안 고정되지만
+    # round_user_association_valid가 0이 되어 effective connection은
+    # 제거된다.
+    # ==============================================================
+
+    prev_connection_state = info.get(
+        "prev_connection_state",
+        {},
+    )
+
+    rsu_connection = np.asarray(
+        prev_connection_state.get(
+            "rsu_connection",
+            [],
+        ),
+        dtype=np.int32,
+    )
+
+    uav_connection = np.asarray(
+        prev_connection_state.get(
+            "uav_connection",
+            [],
+        ),
+        dtype=np.int32,
+    )
+
+    used_effective_connection = False
+
     if stall.ndim == 1:
-        if rsu_scheduling.ndim == 2 and rsu_scheduling.shape[1] == stall.size:
-            scheduled |= np.any(rsu_scheduling > 0, axis=0)
-        if uav_scheduling.ndim == 2 and uav_scheduling.shape[1] == stall.size:
-            scheduled |= np.any(uav_scheduling > 0, axis=0)
+        if (
+            rsu_connection.ndim == 2
+            and rsu_connection.shape[1]
+            == stall.size
+        ):
+            scheduled |= np.any(
+                rsu_connection > 0,
+                axis=0,
+            )
+            used_effective_connection = True
+
+        if (
+            uav_connection.ndim == 2
+            and uav_connection.shape[1]
+            == stall.size
+        ):
+            scheduled |= np.any(
+                uav_connection > 0,
+                axis=0,
+            )
+            used_effective_connection = True
+
+    # Backward-compatible fallback only.
+    #
+    # 신규 full evaluation에서는 prev_connection_state가 반드시
+    # 존재해야 하지만, 오래된 unit test / synthetic info와의
+    # 호환성을 위해 raw slow scheduling fallback은 유지한다.
+    if not used_effective_connection:
+        rsu_scheduling = np.asarray(
+            info.get(
+                "rsu_scheduling",
+                [],
+            ),
+            dtype=np.int32,
+        )
+
+        uav_scheduling = np.asarray(
+            info.get(
+                "uav_scheduling",
+                [],
+            ),
+            dtype=np.int32,
+        )
+
+        if stall.ndim == 1:
+            if (
+                rsu_scheduling.ndim == 2
+                and rsu_scheduling.shape[1]
+                == stall.size
+            ):
+                scheduled |= np.any(
+                    rsu_scheduling > 0,
+                    axis=0,
+                )
+
+            if (
+                uav_scheduling.ndim == 2
+                and uav_scheduling.shape[1]
+                == stall.size
+            ):
+                scheduled |= np.any(
+                    uav_scheduling > 0,
+                    axis=0,
+                )
+
     unscheduled = ~scheduled
 
     return {
-        "delivery": float(fast.get("sum_delivery", 0.0)),
-        "quality": float(fast.get("sum_quality", 0.0)),
+        "delivery": float(
+            fast.get(
+                "sum_delivery",
+                0.0,
+            )
+        ),
+
+        "quality": float(
+            fast.get(
+                "sum_quality",
+                0.0,
+            )
+        ),
+
         "quality_degradation": float(
-            fast.get("sum_quality_degradation", 0.0)
+            fast.get(
+                "sum_quality_degradation",
+                0.0,
+            )
         ),
-        "consumed_soc": float(fast.get("sum_consumed_soc", 0.0)),
-        "charged_soc": float(fast.get("sum_charged_soc", 0.0)),
-        "stall": float(np.sum(stall)) if stall.size else 0.0,
+
+        "consumed_soc": float(
+            fast.get(
+                "sum_consumed_soc",
+                0.0,
+            )
+        ),
+
+        "charged_soc": float(
+            fast.get(
+                "sum_charged_soc",
+                0.0,
+            )
+        ),
+
+        "stall": (
+            float(
+                np.sum(
+                    stall
+                )
+            )
+            if stall.size
+            else 0.0
+        ),
+
         "scheduled_stall": (
-            float(np.sum(stall[scheduled])) if stall.size else 0.0
+            float(
+                np.sum(
+                    stall[
+                        scheduled
+                    ]
+                )
+            )
+            if stall.size
+            else 0.0
         ),
+
         "unscheduled_stall": (
-            float(np.sum(stall[unscheduled])) if stall.size else 0.0
+            float(
+                np.sum(
+                    stall[
+                        unscheduled
+                    ]
+                )
+            )
+            if stall.size
+            else 0.0
         ),
-        "scheduled_user_slots": float(np.sum(scheduled)),
-        "unscheduled_user_slots": float(np.sum(unscheduled)),
-        "min_soc": float(np.min(next_e)) if next_e.size else 0.0,
-        "outage_slots": float(np.sum(outage)) if outage.size else 0.0,
+
+        "scheduled_user_slots": (
+            float(
+                np.sum(
+                    scheduled
+                )
+            )
+            if stall.size
+            else 0.0
+        ),
+
+        "unscheduled_user_slots": (
+            float(
+                np.sum(
+                    unscheduled
+                )
+            )
+            if stall.size
+            else 0.0
+        ),
+
+        "min_soc": (
+            float(
+                np.min(
+                    next_e
+                )
+            )
+            if next_e.size
+            else 0.0
+        ),
+
+        "outage_slots": (
+            float(
+                np.sum(
+                    outage
+                )
+            )
+            if outage.size
+            else 0.0
+        ),
+
         "charging_slots": (
-            float(np.sum(charging)) if charging.size else 0.0
+            float(
+                np.sum(
+                    charging
+                )
+            )
+            if charging.size
+            else 0.0
         ),
+
         "queue_playback_term": float(
-            fast.get("queue_playback_term", 0.0)
+            fast.get(
+                "queue_playback_term",
+                0.0,
+            )
         ),
+
         "video_delivery_term": float(
-            fast.get("video_delivery_term", 0.0)
+            fast.get(
+                "video_delivery_term",
+                0.0,
+            )
         ),
+
         "battery_consume_term": float(
-            fast.get("battery_consume_term", 0.0)
+            fast.get(
+                "battery_consume_term",
+                0.0,
+            )
         ),
+
         "battery_charge_term": float(
-            fast.get("battery_charge_term", 0.0)
+            fast.get(
+                "battery_charge_term",
+                0.0,
+            )
         ),
+
         "quality_degradation_term": float(
-            fast.get("quality_degradation_term", 0.0)
+            fast.get(
+                "quality_degradation_term",
+                0.0,
+            )
         ),
     }
 
@@ -3990,13 +4237,29 @@ def _select_and_apply_slow_action(
 def _exogenous_state_digest(
     env: Env,
 ) -> str:
+    """
+    Experimental-control digest.
+
+    Slow policy에 의해 결정되는 association/action은 포함하지 않고,
+    외생 mobility/content state와 environment RNG state만 기록한다.
+
+    동일 seed에서 Random / RSU-only / Full-DPP 간 이 digest가
+    일치해야 common-random-number trace가 유지됐다고 판단한다.
+    """
     digest = hashlib.sha256()
 
-    for name in (
+    int_arrays = (
         "user_region",
         "requested_content",
         "uav_cached_content",
-    ):
+    )
+
+    float_arrays = (
+        "user_position_m",
+        "user_speed_mps",
+    )
+
+    for name in int_arrays:
         value = np.asarray(
             getattr(
                 env,
@@ -4014,6 +4277,40 @@ def _exogenous_state_digest(
         digest.update(
             value.tobytes()
         )
+
+    for name in float_arrays:
+        value = np.asarray(
+            getattr(
+                env,
+                name,
+            ),
+            dtype=np.float32,
+        )
+
+        digest.update(
+            name.encode(
+                "utf-8"
+            )
+        )
+
+        digest.update(
+            value.tobytes()
+        )
+
+    rng_state = copy.deepcopy(
+        env.rng.bit_generator.state
+    )
+
+    digest.update(
+        b"env_rng_state"
+    )
+
+    digest.update(
+        pickle.dumps(
+            rng_state,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+    )
 
     return digest.hexdigest()
 

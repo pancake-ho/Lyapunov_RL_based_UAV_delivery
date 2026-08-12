@@ -31,60 +31,47 @@ SELECTED_FAST_CHECKPOINT="${PROJECT_ROOT}/fast/fast_pretrain_h2_seed2026_ep400_v
 JOB_ID="${SLURM_JOB_ID:-manual}"
 ALLOCATED_CPUS="${SLURM_CPUS_PER_TASK:-16}"
 
-if (( ALLOCATED_CPUS < 2 )); then
-    echo "[ERROR] At least 2 CPUs are required." >&2
+SLOW_T=3600
+SLOT_LOG_STRIDE=1
+
+
+die() {
+    echo "[ERROR] $*" >&2
     exit 2
+}
+
+
+if (( ALLOCATED_CPUS < 2 )); then
+    die "At least 2 CPUs are required."
 fi
 
 DPP_WORKERS=$((ALLOCATED_CPUS - 1))
 
 
 # =====================================================================
-# Method
+# Arguments
+#
+# $1 METHOD:
+#       random | rsu_only | full_dpp
+#
+# $2 TRACE_MODE:
+#       round | slot
+#
+# $3 SNR_OFFSET_DB:
+#       e.g. -10, -5, 0, 5, 10
+#
+# $4 PROFILE:
+#       full   -> 5 seeds
+#       single -> seed 2026 only
 # =====================================================================
 
 METHOD="${1:-}"
 TRACE_MODE="${2:-round}"
 SNR_OFFSET_DB="${3:-0}"
+PROFILE="${4:-full}"
 
-case "${TRACE_MODE}" in
-    round)
-        SLOT_LOGGING=0
-        ;;
-    slot)
-        SLOT_LOGGING=1
-        ;;
-    *)
-        echo "[ERROR] Unknown trace mode: ${TRACE_MODE}" >&2
-        echo "Use round or slot." >&2
-        exit 2
-        ;;
-esac
-SNR_TAG="$(
-    "${PYTHON_BIN}" - "${SNR_OFFSET_DB}" <<'PY'
-import sys
-
-value = float(sys.argv[1])
-
-sign = (
-    "p"
-    if value >= 0.0
-    else "m"
-)
-
-text = (
-    f"{abs(value):g}"
-    .replace(".", "p")
-)
-
-print(
-    f"{sign}{text}"
-)
-PY
-)"
 
 case "${METHOD}" in
-
     random)
         FAST_PHASE="eval_pretrain"
         DPP_ENABLE_UAV="1"
@@ -101,32 +88,78 @@ case "${METHOD}" in
         ;;
 
     *)
-        echo "[ERROR] Unknown method: ${METHOD}" >&2
         echo "Usage:" >&2
-        echo "  sbatch run/slow_full_eval.sh random" >&2
-        echo "  sbatch run/slow_full_eval.sh rsu_only" >&2
-        echo "  sbatch run/slow_full_eval.sh full_dpp" >&2
+        echo "  sbatch run/slow_full_eval.sh METHOD [round|slot] [SNR_OFFSET_DB] [full|single]" >&2
+        echo >&2
+        echo "Examples:" >&2
+        echo "  sbatch run/slow_full_eval.sh full_dpp round 0 full" >&2
+        echo "  sbatch run/slow_full_eval.sh full_dpp slot 0 single" >&2
+        echo "  sbatch run/slow_full_eval.sh full_dpp round -10 single" >&2
         exit 2
         ;;
 esac
 
 
-# =====================================================================
-# Final frozen-Fast evaluation contract
-# =====================================================================
+case "${TRACE_MODE}" in
+    round)
+        SLOT_LOGGING=0
+        ;;
 
-EVAL_SEEDS=(
-    2026
-    2027
-    2028
-    2029
-    2030
-)
+    slot)
+        SLOT_LOGGING=1
+        ;;
+
+    *)
+        die "TRACE_MODE must be round or slot."
+        ;;
+esac
+
+
+case "${PROFILE}" in
+    full)
+        EVAL_SEEDS=(
+            2026
+            2027
+            2028
+            2029
+            2030
+        )
+        ;;
+
+    single)
+        EVAL_SEEDS=(
+            2026
+        )
+        ;;
+
+    *)
+        die "PROFILE must be full or single."
+        ;;
+esac
+
 
 EVAL_EPISODES=5
 EVAL_ROUNDS_PER_EPISODE=10
 
-OUTPUT_ROOT="${PROJECT_ROOT}/eval/full_ep300_${METHOD}_job${JOB_ID}"
+
+# =====================================================================
+# SNR tag
+# =====================================================================
+
+if [[ "${SNR_OFFSET_DB}" == -* ]]; then
+    SNR_TAG="m${SNR_OFFSET_DB#-}"
+else
+    SNR_TAG="p${SNR_OFFSET_DB#+}"
+fi
+
+SNR_TAG="${SNR_TAG//./p}"
+
+
+# =====================================================================
+# Paths
+# =====================================================================
+
+OUTPUT_ROOT="${PROJECT_ROOT}/eval/full_ep300_${METHOD}_${PROFILE}_${TRACE_MODE}_snr${SNR_TAG}db_job${JOB_ID}"
 
 RUNTIME_CACHE_ROOT="${PROJECT_ROOT}/.runtime-cache"
 MPL_CACHE_ROOT="${RUNTIME_CACHE_ROOT}/matplotlib"
@@ -138,12 +171,6 @@ GPU_RESOURCE_LOG="${JOB_LOG_ROOT}/gpu-resources.csv"
 
 RUNTIME_TMPDIR=""
 GPU_MONITOR_PID=""
-
-
-die() {
-    echo "[ERROR] $*" >&2
-    exit 2
-}
 
 
 cleanup() {
@@ -181,7 +208,7 @@ trap 'exit 129' HUP
 
 
 # =====================================================================
-# Clear stale experiment exports
+# Clear stale experiment variables
 # =====================================================================
 
 while IFS='=' read -r name _; do
@@ -205,7 +232,7 @@ unset ALLOW_EXISTING_RUN_DIR || true
     || die "Project root not found."
 
 [[ -x "${PYTHON_BIN}" ]] \
-    || die "Python not found."
+    || die "Python not found: ${PYTHON_BIN}"
 
 [[ -f "${SELECTED_FAST_CHECKPOINT}" ]] \
     || die \
@@ -227,7 +254,7 @@ CURRENT_BRANCH="$(git branch --show-current)"
 
 
 # =====================================================================
-# Conda / runtime dirs
+# Conda
 # =====================================================================
 
 mkdir -p \
@@ -248,12 +275,36 @@ hash -r
     "Unexpected Python: $(command -v python)"
 
 
+# Validate SNR argument numerically.
+
+"${PYTHON_BIN}" - "${SNR_OFFSET_DB}" <<'PY'
+import math
+import sys
+
+value = float(sys.argv[1])
+
+if not math.isfinite(value):
+    raise SystemExit(
+        "[ERROR] SNR offset must be finite."
+    )
+
+print(
+    f"[CONFIG] common SNR offset = {value:g} dB"
+)
+PY
+
+
+# =====================================================================
+# Runtime dirs
+# =====================================================================
+
 if [[ -n "${SLURM_TMPDIR:-}" \
     && -d "${SLURM_TMPDIR}" ]]; then
 
     RUNTIME_TMPDIR="${SLURM_TMPDIR}/slow-full-${METHOD}-${JOB_ID}"
 
-    mkdir -p "${RUNTIME_TMPDIR}"
+    mkdir -p \
+        "${RUNTIME_TMPDIR}"
 
 else
 
@@ -283,7 +334,7 @@ export MALLOC_ARENA_MAX=2
 
 
 # =====================================================================
-# Evaluation environment
+# Evaluation contract
 # =====================================================================
 
 export FAST_PPO_PHASE="${FAST_PHASE}"
@@ -298,6 +349,16 @@ export FAST_PPO_DETERMINISTIC_TORCH=1
 export FAST_PPO_DEVICE="cuda"
 export FAST_PPO_FAIL_IF_CUDA_UNAVAILABLE=1
 export FAST_PPO_AUDIT_RUNTIME_INVARIANTS=0
+
+# -------------------------------------------------------------
+# Plot / diagnostic options
+# -------------------------------------------------------------
+
+export FAST_PPO_EVAL_SLOT_LOGGING="${SLOT_LOGGING}"
+
+export FAST_PPO_EVAL_SLOT_LOG_STRIDE="${SLOT_LOG_STRIDE}"
+
+export FAST_PPO_CHANNEL_SNR_OFFSET_DB="${SNR_OFFSET_DB}"
 
 export ALLOW_EXISTING_RUN_DIR=0
 
@@ -318,15 +379,24 @@ export ALLOW_EXISTING_RUN_DIR=0
     echo "git_describe=$(git describe --always --dirty --tags 2>/dev/null || true)"
 
     echo "method=${METHOD}"
-    echo "fast_phase=${FAST_PHASE}"
+    echo "profile=${PROFILE}"
 
+    echo "fast_phase=${FAST_PHASE}"
     echo "dpp_enable_uav=${DPP_ENABLE_UAV}"
+
+    echo "trace_mode=${TRACE_MODE}"
+    echo "slot_logging=${SLOT_LOGGING}"
+    echo "slot_log_stride=${SLOT_LOG_STRIDE}"
+
+    echo "snr_offset_db=${SNR_OFFSET_DB}"
 
     echo "checkpoint=${SELECTED_FAST_CHECKPOINT}"
 
     echo "eval_seeds=${EVAL_SEEDS[*]}"
     echo "eval_episodes=${EVAL_EPISODES}"
     echo "eval_rounds_per_episode=${EVAL_ROUNDS_PER_EPISODE}"
+
+    echo "slow_T=${SLOW_T}"
 
     echo "dpp_workers=${DPP_WORKERS}"
 
@@ -342,16 +412,49 @@ export ALLOW_EXISTING_RUN_DIR=0
 "${PYTHON_BIN}" -m py_compile \
     env/env.py \
     env/delivery/rsu_delivery.py \
+    env/delivery/uav_delivery.py \
     agent/PPO/config.py \
     agent/PPO/slow/slow_matching.py \
     agent/PPO/slow/test_fast_slow.py \
-    agent/PPO/fast/fast_train.py
+    agent/PPO/fast/fast_train.py \
+    agent/PPO/fast/plot_eval_diagnostics.py \
+    agent/PPO/fast/plot_slot_diagnostics.py
 
 
 "${PYTHON_BIN}" -m unittest -v \
     env.delivery.test_rsu_delivery_crn \
     agent.PPO.slow.test_fast_slow \
     agent.PPO.fast.test_fast_pretrain_contract
+
+
+# =====================================================================
+# Config preflight
+# =====================================================================
+
+"${PYTHON_BIN}" - <<'PY'
+from agent.PPO.config import get_fast_ppo_config
+from agent.PPO.fast.fast_train import build_env_config
+
+cfg = get_fast_ppo_config()
+env_cfg = build_env_config(cfg)
+
+print("[EVAL CONFIG]")
+print("phase =", cfg.phase)
+print("mode =", cfg.mode)
+print("slot logging =", cfg.eval_slot_logging)
+print("slot stride =", cfg.eval_slot_log_stride)
+print("snr offset dB =", cfg.channel_snr_offset_db)
+
+print(
+    "RSU gamma_db =",
+    env_cfg.rsu_channel.gamma_db,
+)
+
+print(
+    "UAV beta_zero =",
+    env_cfg.uav_channel.beta_zero,
+)
+PY
 
 
 # =====================================================================
@@ -372,27 +475,52 @@ import torch
 print("hostname =", socket.gethostname())
 print("torch =", torch.__version__)
 print("torch.version.cuda =", torch.version.cuda)
-print("CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
-print("cuda available =", torch.cuda.is_available())
-print("cuda device count =", torch.cuda.device_count())
+print(
+    "CUDA_VISIBLE_DEVICES =",
+    os.environ.get(
+        "CUDA_VISIBLE_DEVICES"
+    ),
+)
+
+print(
+    "cuda available =",
+    torch.cuda.is_available(),
+)
+
+print(
+    "cuda device count =",
+    torch.cuda.device_count(),
+)
 
 if torch.version.cuda is None:
-    raise SystemExit("[ERROR] PyTorch is CPU-only.")
+    raise SystemExit(
+        "[ERROR] PyTorch is CPU-only."
+    )
 
 if not torch.cuda.is_available():
-    raise SystemExit("[ERROR] CUDA unavailable.")
+    raise SystemExit(
+        "[ERROR] CUDA unavailable."
+    )
 
 if torch.cuda.device_count() < 1:
-    raise SystemExit("[ERROR] No CUDA device.")
+    raise SystemExit(
+        "[ERROR] No CUDA device."
+    )
 
-print("device 0 =", torch.cuda.get_device_name(0))
-print("[CUDA PREFLIGHT] PASS")
+print(
+    "device 0 =",
+    torch.cuda.get_device_name(0),
+)
+
+print(
+    "[CUDA PREFLIGHT] PASS"
+)
 
 PY
 
 
 # =====================================================================
-# Best-effort GPU monitoring
+# GPU monitoring
 # =====================================================================
 
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -418,15 +546,38 @@ fi
 
 
 # =====================================================================
-# 5-seed full evaluation
+# Evaluation
 # =====================================================================
 
 echo "============================================================"
-echo "[FULL SLOW EVALUATION START]"
+echo "[SLOW EVALUATION START]"
 echo "method=${METHOD}"
+echo "profile=${PROFILE}"
+echo "trace=${TRACE_MODE}"
+echo "snr_offset_db=${SNR_OFFSET_DB}"
 echo "commit=$(git rev-parse HEAD)"
 echo "checkpoint=${SELECTED_FAST_CHECKPOINT}"
 echo "============================================================"
+
+
+EXPECTED_ROUND_ROWS=$(
+    EVAL_EPISODES
+    * EVAL_ROUNDS_PER_EPISODE
+)
+
+EXPECTED_SLOT_ROWS_PER_ROUND=$(
+    (
+        SLOW_T
+        + SLOT_LOG_STRIDE
+        - 1
+    )
+    / SLOT_LOG_STRIDE
+)
+
+EXPECTED_SLOT_ROWS=$(
+    EXPECTED_ROUND_ROWS
+    * EXPECTED_SLOT_ROWS_PER_ROUND
+)
 
 
 for SEED in "${EVAL_SEEDS[@]}"; do
@@ -461,9 +612,11 @@ for SEED in "${EVAL_SEEDS[@]}"; do
         2>&1 \
         | tee "${SEED_LOG}"
 
+
     ROUND_CSV="${OUTPUT_ROOT}/seed${SEED}/logs/eval_rounds.csv"
 
     EPISODE_CSV="${OUTPUT_ROOT}/seed${SEED}/logs/eval_episodes.csv"
+
 
     [[ -f "${ROUND_CSV}" ]] \
         || die \
@@ -473,13 +626,39 @@ for SEED in "${EVAL_SEEDS[@]}"; do
         || die \
         "Missing episode CSV for seed=${SEED}"
 
-    ROW_COUNT="$(
-        tail -n +2 "${ROUND_CSV}" | wc -l
+
+    ROUND_ROW_COUNT="$(
+        tail -n +2 \
+        "${ROUND_CSV}" \
+        | wc -l
     )"
 
-    [[ "${ROW_COUNT}" -eq 50 ]] \
+
+    [[ "${ROUND_ROW_COUNT}" -eq "${EXPECTED_ROUND_ROWS}" ]] \
         || die \
-        "Expected 50 rounds for seed=${SEED}, got=${ROW_COUNT}"
+        "Expected ${EXPECTED_ROUND_ROWS} rounds for seed=${SEED}, got=${ROUND_ROW_COUNT}"
+
+
+    if [[ "${SLOT_LOGGING}" -eq 1 ]]; then
+
+        SLOT_CSV="${OUTPUT_ROOT}/seed${SEED}/logs/eval_slots.csv"
+
+        [[ -f "${SLOT_CSV}" ]] \
+            || die \
+            "Missing slot CSV for seed=${SEED}"
+
+        SLOT_ROW_COUNT="$(
+            tail -n +2 \
+            "${SLOT_CSV}" \
+            | wc -l
+        )"
+
+        [[ "${SLOT_ROW_COUNT}" -eq "${EXPECTED_SLOT_ROWS}" ]] \
+            || die \
+            "Expected ${EXPECTED_SLOT_ROWS} slot rows for seed=${SEED}, got=${SLOT_ROW_COUNT}"
+
+    fi
+
 
     echo "[SEED DONE] ${SEED}"
 
@@ -487,8 +666,11 @@ done
 
 
 echo "============================================================"
-echo "[FULL SLOW EVALUATION DONE]"
+echo "[SLOW EVALUATION DONE]"
 echo "method=${METHOD}"
+echo "profile=${PROFILE}"
+echo "trace=${TRACE_MODE}"
+echo "snr_offset_db=${SNR_OFFSET_DB}"
 echo "time=$(date --iso-8601=seconds)"
 echo "output=${OUTPUT_ROOT}"
 echo "============================================================"
