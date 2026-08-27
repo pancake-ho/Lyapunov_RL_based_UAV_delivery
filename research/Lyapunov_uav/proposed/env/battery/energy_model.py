@@ -37,26 +37,27 @@ def compute_comm_energy(
     """
     UAV communication energy.
 
-    현재 시나리오 기준에서는 p_un(t)를 직접 포함하기 때문에 기본 계산은 다음과 같음.
+    현재 formulation에서는 p_un(t)를 직접 포함하므로 다음과 같이 계산한다.
 
         e_comm(t) = sum_n (p_un(t) * slot_duration)
+
+    energy_to_soc_factor는 battery queue update에서 별도로 적용된다.
+    따라서 여기에서 임의의 추가 scale이나 delivered chunk 조건을
+    곱하지 않는다.
     """
     total = 0.0
 
     for link in links:
         if not bool(link.scheduled):
             continue
-        if int(link.delivered_chunks) <= 0:
-            continue
-        if float(link.payload_bits) <= 0.0: 
-            continue
 
-        tx_time = max(0.0, float(link.tx_time))
-        if tx_time <= 0.0:
-            tx_time = float(config.slot_duration)
-        
-        tx_power = max(0.0, float(link.tx_power))
-        total += tx_power * tx_time * float(config.tx_energy_coeff)
+        tx_power = max(
+            0.0,
+            float(
+                0.0 if link.tx_power is None else link.tx_power
+            ),
+        )
+        total += tx_power * float(config.slot_duration)
     
     return float(total)
     

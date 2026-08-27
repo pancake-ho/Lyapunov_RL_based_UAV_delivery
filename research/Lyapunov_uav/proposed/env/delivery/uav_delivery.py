@@ -310,91 +310,154 @@ def compute_uav_delivery(
 
     links_uav: list[list[CommLinkInput]] = [[] for _ in range(num_uav)]
 
-    # requested link 생성 및 link feasiblity 계산
-    for u in range(num_uav):
-        if not bool(hire_mask[u]):
-            continue
-        if bool(charge_mask[u]):
-            continue
-        if float(battery_soc[u]) < float(cfg.battery.e_min):
-            continue
+    # requested link 생성 및 link feasibility 계산
+    cache_known = (
+        (cached_content[:, None] >= 0)
+        & (requested_content[None, :] >= 0)
+    )
+    cache_compatible = (
+        (~cache_known)
+        | (
+            cached_content[:, None]
+            == requested_content[None, :]
+        )
+    )
 
-        for n in range(num_user):
-            if not bool(sched_mask[u, n]):
-                continue     
-            if not bool(residual_mask[n]):
-                continue
-            if int(req_chunks[u, n]) <= 0:
-                continue
-            if int(req_layers[u, n]) <= 0:
-                continue
-            if float(tx_power[u, n]) <= 0.0:
-                continue
-            
-            # cache 제약:
-            # requested_content와 cached_content가 둘 다 알려진 경우에만 검사
-            cache_known = (int(cached_content[u]) >= 0) and (int(requested_content[n]) >= 0)
-            if cache_known and int(cached_content[u]) != int(requested_content[n]):
-                continue
+    battery_eligible = (
+        battery_soc >= float(cfg.battery.e_min)
+    )
 
-            requested_mask[u, n] = True
-            
-            horizontal_distance = max(float(uav_user_distance[u, n]), 0.0)
-            raw_gain = float(uav_channel.compute_gain(distance=horizontal_distance, rng=rng))
-            cap_bps = float(
-                uav_channel.capacity_from_gain(
-                    tx_power=float(tx_power[u, n]),
-                    gain=raw_gain,
+    requested_mask = (
+        sched_mask
+        & hire_mask[:, None]
+        & residual_mask[None, :]
+        & (req_chunks > 0)
+        & (req_layers > 0)
+        & (tx_power > 0.0)
+        & (~charge_mask[:, None])
+        & battery_eligible[:, None]
+        & cache_compatible
+    )
+
+    # 각 candidate link의 slot-t channel realization은 한 번만 계산한다.
+    # 과거 바깥 ``for u in range(num_uav)`` 루프는 전체 link 집합을
+    # num_uav번 반복 계산했다.
+    candidate_links = np.argwhere(requested_mask)
+
+    for u, n in candidate_links:
+        u = int(u)
+        n = int(n)
+
+        horizontal_distance = max(
+            float(uav_user_distance[u, n]),
+            0.0,
+        )
+
+        raw_gain = float(
+            uav_channel.compute_gain(
+                distance=horizontal_distance,
+                rng=rng,
+            )
+        )
+        cap_bps = float(
+            uav_channel.capacity_from_gain(
+                tx_power=float(tx_power[u, n]),
+                gain=raw_gain,
+            )
+        )
+
+        raw_channel_gain[u, n] = raw_gain
+        link_capacity_bps[u, n] = cap_bps
+
+        chunk_bits = _chunk_size_bits(
+            cfg,
+            int(req_layers[u, n]),
+        )
+
+        if chunk_bits <= 0.0 or cap_bps <= 0.0:
+            feasible = 0
+        else:
+            feasible = int(
+                np.floor(
+                    cap_bps
+                    * slot_duration
+                    / chunk_bits
                 )
             )
 
-            raw_channel_gain[u, n] = raw_gain
-            link_capacity_bps[u, n] = cap_bps
-
-            chunk_bits = _chunk_size_bits(cfg, int(req_layers[u, n]))
-            if chunk_bits <= 0.0 or cap_bps <= 0.0:
-                feasible = 0
-            else:
-                bit_budget = cap_bps * slot_duration
-                feasible = int(np.floor(bit_budget / chunk_bits))
-            
-            feasible_chunks = max(0, min(int(req_chunks[u, n]), feasible))
-            potential_chunks[u, n] = feasible_chunks
+        potential_chunks[u, n] = max(
+            0,
+            min(int(req_chunks[u, n]), feasible),
+        )
     
     # UAV별 동시 서비스 가능 user cap 적용
     for u in range(num_uav):
-        candidate_users = np.flatnonzero(requested_mask[u])
-        if candidate_users.size == 0:
-            continue
-        if user_cap <= 0:
-            continue
-
-        # 이미 e_min 미만 UAV는 위에서 skip되지만,
-        # projection score 구조 유지 차원에서 battery_penalty를 둔다.
-        battery_penalty = max(0.0, float(cfg.battery.e_min) - float(battery_soc[u]))
-
-        scores = np.array(
-            [
-                _priority_score(
-                    cfg=cfg,
-                    feasible_chunks=int(potential_chunks[u, n]),
-                    layer=int(req_layers[u, n]),
-                    tx_power=float(tx_power[u, n]),
-                    user_virtual_queue=float(user_virtual_queue[n]),
-                    estimated_cap=float(link_capacity_bps[u, n]),
-                    battery_penalty=battery_penalty,
-                )
-                for n in candidate_users
-            ],
-            dtype=np.float64,
+        candidate_users = np.flatnonzero(
+            requested_mask[u]
         )
 
-        order = np.argsort(-scores)
-        selected_users = candidate_users[order[:user_cap]]
+        if (
+            candidate_users.size == 0
+            or user_cap <= 0
+        ):
+            continue
 
-        for n in selected_users:
-            if potential_chunks[u, n] > 0:
-                capped_mask[u, n] = True
+        if candidate_users.size <= user_cap:
+            selected_users = candidate_users
+
+        else:
+            battery_penalty = max(
+                0.0,
+                float(cfg.battery.e_min)
+                - float(battery_soc[u]),
+            )
+
+            scores = np.asarray(
+                [
+                    _priority_score(
+                        cfg=cfg,
+                        feasible_chunks=int(
+                            potential_chunks[u, n]
+                        ),
+                        layer=int(
+                            req_layers[u, n]
+                        ),
+                        tx_power=float(
+                            tx_power[u, n]
+                        ),
+                        user_virtual_queue=float(
+                            user_virtual_queue[n]
+                        ),
+                        estimated_cap=float(
+                            link_capacity_bps[u, n]
+                        ),
+                        battery_penalty=(
+                            battery_penalty
+                        ),
+                    )
+                    for n in candidate_users
+                ],
+                dtype=np.float64,
+            )
+
+            order = np.argsort(
+                -scores
+            )
+            selected_users = candidate_users[
+                order[:user_cap]
+            ]
+
+        positive = (
+            potential_chunks[
+                u,
+                selected_users,
+            ]
+            > 0
+        )
+        capped_mask[
+            u,
+            selected_users[positive],
+        ] = True
     
     # 동일 user에 대해 여러 UAV가 경쟁할 경우 하나의 UAV만 선택 (안전장치)
     active_mask = np.zeros((num_uav, num_user), dtype=bool)
@@ -432,7 +495,7 @@ def compute_uav_delivery(
         if potential_chunks[best_u, n] > 0:
             active_mask[best_u, n] = True
     
-    # 최종 delivery 확정 및 battery 연동용 CommLinkInput 생성
+    # 최종 delivery 확정
     active_links = np.argwhere(active_mask)
     
     for u, n in active_links:
@@ -447,17 +510,32 @@ def compute_uav_delivery(
         delivered_bits[u, n] = payload_bits
         delivered_quality[u, n] = float(chunks) * float(quality_weight)
 
+    # Battery communication energy는 formulation의 실제 power action
+    # p_un(t)를 기준으로 계산한다. 따라서 channel 때문에 0 chunk가
+    # 전달됐더라도 송신을 시도한 requested link는 energy accounting에
+    # 포함한다.
+    for u, n in candidate_links:
+        u = int(u)
+        n = int(n)
+        delivered_layer = (
+            int(req_layers[u, n])
+            if bool(active_mask[u, n])
+            else 0
+        )
+        delivered_chunk = int(delivered_chunks[u, n])
+        payload_bits = float(delivered_bits[u, n])
+
         links_uav[u].append(
             CommLinkInput(
                 scheduled=True,
-                delivered_layers=layer,
-                delivered_chunks=chunks,
+                delivered_layers=delivered_layer,
+                delivered_chunks=delivered_chunk,
                 payload_bits=payload_bits,
                 channel_gain=float(raw_channel_gain[u, n]),
                 noise_power=float(uav_channel.noise_power),
                 tx_power=float(tx_power[u, n]),
                 user_idx=int(n),
-                layer_idx=int(layer),
+                layer_idx=int(req_layers[u, n]),
                 link_capacity_bps=float(link_capacity_bps[u, n]),
                 tx_time=float(slot_duration),
             )

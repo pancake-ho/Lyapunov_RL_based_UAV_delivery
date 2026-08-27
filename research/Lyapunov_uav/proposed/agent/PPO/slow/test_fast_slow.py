@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
+import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import Dict, Sequence
 
 import numpy as np
 
@@ -11,167 +13,716 @@ PROPOSED_ROOT = Path(__file__).resolve().parents[3]
 if str(PROPOSED_ROOT) not in sys.path:
     sys.path.insert(0, str(PROPOSED_ROOT))
 
+
 from config import EnvConfig  # noqa: E402
 from env.env import Env  # noqa: E402
-from agent.PPO.common import (  # noqa: E402
-    infer_fast_obs_dim,
-    infer_slow_obs_dim,
-    split_env_reset,
-    split_env_step,
-)
-from agent.PPO.fast.fast_agent import (  # noqa: E402
-    FastPPOAgent,
-    FastPPOConfig,
-)
-from agent.PPO.slow.slow_agent import (  # noqa: E402
-    SlowPPOAgent,
-    SlowPPOConfig,
+from agent.PPO.slow.slow_matching import (  # noqa: E402
+    PairEdge,
+    select_dpp_max_weight_matching,
+    solve_max_weight_b_matching,
 )
 
 
-def run_contract_smoke_test() -> None:
-    """
-    Exercise one complete high-level transition with a short test horizon.
-
-    The production scenario keeps slow_T=3600.  This smoke test uses slow_T=8
-    only to test the boundary contract quickly; it does not change or validate
-    the research timescale itself.
-    """
-    env_cfg = replace(
-        EnvConfig(),
-        slow_T=8,
-        episode_slots=8,
-        move_prob=0.0,
-        seed=9876,
-    )
-    env = Env(env_cfg)
-    fast_obs, _ = split_env_reset(env.reset())
-    slow_obs = env.get_slow_obs()
-
-    slow_agent = SlowPPOAgent(
-        env_cfg=env_cfg,
-        obs_dim=infer_slow_obs_dim(slow_obs),
-        ppo_cfg=SlowPPOConfig(
-            rollout_rounds=8,
-            batch_size=4,
-            normalize_obs=False,
-            device="cpu",
-            rsu_init_logit=0.0,
-            hiring_init_logit=0.0,
-            uav_init_logit=0.0,
-        ),
-    )
-    fast_agent = FastPPOAgent(
-        env_cfg=env_cfg,
-        obs_dim=infer_fast_obs_dim(fast_obs),
-        ppo_cfg=FastPPOConfig(
-            rollout_steps=8,
-            batch_size=4,
-            normalize_obs=False,
-            device="cpu",
-        ),
-    )
-
-    selected_slow = slow_agent.select_action(
-        slow_obs,
-        context=env,
-        deterministic=True,
-        update_norm=False,
-    )
-    if int(selected_slow["action_info"]["projection_count"]) != 0:
-        raise AssertionError("slow action required post-sampling projection.")
-
-    binary = np.asarray(
-        selected_slow["binary_action"], dtype=np.float32
-    )
-    mask = np.asarray(
-        selected_slow["action_mask"], dtype=np.float32
-    )
-    if np.any(binary * (1.0 - mask) != 0.0):
-        raise AssertionError("slow action has non-zero bits outside its mask.")
-
-    env_action = selected_slow["env_action"]
-    rsu = np.asarray(env_action["rsu_scheduling"], dtype=np.int32)
-    hiring = np.asarray(env_action["uav_hiring"], dtype=np.int32)
-    uav = np.asarray(env_action["uav_scheduling"], dtype=np.int32)
-    if np.any(uav > hiring[:, None]):
-        raise AssertionError("phi_un=1 while mu_u=0.")
-    if np.any(rsu.sum(axis=0) + uav.sum(axis=0) > 1):
-        raise AssertionError("per-user slow scheduling is not exclusive.")
-
-    env.apply_slow_action(env_action)
-    fixed_rsu = env.rsu_scheduling.copy()
-    fixed_hiring = env.uav_hiring.copy()
-    fixed_uav = env.uav_scheduling.copy()
-
-    boundary_info = None
-    for slot in range(int(env_cfg.slow_T)):
-        selected_fast = fast_agent.select_action(
-            fast_obs,
-            deterministic=True,
-            update_norm=False,
-        )
-        fast_obs, _, terminated, truncated, info = split_env_step(
-            env.step(selected_fast["env_action"])
+class SlowMaximumWeightMatchingTest(
+    unittest.TestCase
+):
+    def test_b_matching_respects_capacities_and_unique_users(
+        self,
+    ) -> None:
+        edges = (
+            PairEdge(0, 0, 10.0, 90.0),
+            PairEdge(0, 1, 9.0, 91.0),
+            PairEdge(0, 2, 1.0, 99.0),
+            PairEdge(1, 0, 8.0, 92.0),
+            PairEdge(1, 2, 7.0, 93.0),
+            PairEdge(1, 3, 6.0, 94.0),
         )
 
-        if slot + 1 < int(env_cfg.slow_T):
-            if not np.array_equal(env.rsu_scheduling, fixed_rsu):
-                raise AssertionError("RSU slow action changed within a round.")
-            if not np.array_equal(env.uav_hiring, fixed_hiring):
-                raise AssertionError(
-                    "UAV hiring action changed within a round."
+        selected = solve_max_weight_b_matching(
+            edges=edges,
+            provider_count=2,
+            user_count=4,
+            capacities=(2, 1),
+            min_weight=0.0,
+        )
+
+        provider_load = np.zeros(
+            2,
+            dtype=np.int32,
+        )
+        users = []
+
+        for edge in selected:
+            provider_load[
+                int(edge.provider)
+            ] += 1
+            users.append(
+                int(edge.user)
+            )
+
+        self.assertTrue(
+            np.all(
+                provider_load
+                <= np.asarray(
+                    [2, 1],
+                    dtype=np.int32,
                 )
-            if not np.array_equal(env.uav_scheduling, fixed_uav):
-                raise AssertionError("UAV slow action changed within a round.")
-
-        if bool(info.get("is_round_boundary", False)):
-            boundary_info = info
-        if terminated:
-            raise AssertionError("unexpected termination in smoke test.")
-        if truncated and slot + 1 < int(env_cfg.slow_T):
-            raise AssertionError("episode truncated before round boundary.")
-
-    if boundary_info is None:
-        raise AssertionError("no slow round boundary was produced.")
-
-    reward_components = boundary_info.get("reward_components", {})
-    slow_components = reward_components.get(
-        "slow_reward_components", {}
-    )
-    if not bool(slow_components.get("is_round_boundary", False)):
-        raise AssertionError("slow reward missing at round boundary.")
-
-    observed = float(reward_components.get("slow_reward", np.nan))
-    expected = float(slow_components["hire_cost"]) + float(
-        slow_components["round_fast_reward_sum"]
-    )
-    tolerance = 1e-3 + 1e-6 * abs(expected)
-    if not np.isfinite(observed) or abs(observed - expected) > tolerance:
-        raise AssertionError(
-            "slow reward identity failed: "
-            f"observed={observed}, expected={expected}, "
-            f"tolerance={tolerance}"
+            )
+        )
+        self.assertEqual(
+            len(users),
+            len(set(users)),
         )
 
-    required_info = {
-        "transmitted_rsu_per_user",
-        "transmitted_uav_per_user",
-        "battery_step_info",
-        "prev_connection_state",
-        "next_connection_state",
-    }
-    missing = sorted(required_info - set(boundary_info))
-    if missing:
-        raise AssertionError(
-            f"boundary info is missing required metrics: {missing}"
+        # Optimal value = 10 + 9 + 7 = 26.
+        self.assertAlmostEqual(
+            sum(
+                float(edge.weight)
+                for edge in selected
+            ),
+            26.0,
+            places=6,
         )
 
-    print(
-        "[PASS] fast/slow contract smoke test: "
-        "mask, exclusivity, fixed round action, and reward identity"
-    )
+    @staticmethod
+    def _small_env() -> Env:
+        base = EnvConfig()
+        cfg = replace(
+            base,
+            num_user=4,
+            num_rsu=2,
+            num_uav=2,
+            rsu_capacity=1,
+            uav_user_cap=2,
+            slow_T=2,
+            episode_slots=2,
+            mobility_mode="fsmc",
+            move_prob=0.0,
+            uav_hiring_cost=5.0,
+            hire_weight=1.0,
+            seed=2026,
+        )
+
+        env = Env(cfg)
+        env.reset()
+
+        env.user_region = np.asarray(
+            [0, 0, 1, 1],
+            dtype=np.int32,
+        )
+        env.requested_content = np.asarray(
+            [0, 0, 0, 1],
+            dtype=np.int32,
+        )
+        env.uav_cached_content = np.asarray(
+            [0, 0],
+            dtype=np.int32,
+        )
+        env._refresh_link_distances()
+        return env
+
+    def test_sequential_rsu_priority_residual_uav_matching(
+        self,
+    ) -> None:
+        env = self._small_env()
+
+        rsu_gain = {
+            (0, 0): 10.0,
+            (0, 1): 7.0,
+            (1, 2): 8.0,
+            (1, 3): 3.0,
+        }
+        uav_gain = {
+            (0, 1): 9.0,
+        }
+
+        def evaluate(
+            actions: Sequence[
+                Dict[str, np.ndarray]
+            ],
+        ) -> list[float]:
+            scores = []
+            for action in actions:
+                y = np.asarray(
+                    action["rsu_scheduling"],
+                    dtype=np.int32,
+                )
+                mu = np.asarray(
+                    action["uav_hiring"],
+                    dtype=np.int32,
+                )
+                phi = np.asarray(
+                    action["uav_scheduling"],
+                    dtype=np.int32,
+                )
+
+                cost = 100.0
+
+                for provider, user in zip(
+                    *np.nonzero(y)
+                ):
+                    cost -= rsu_gain.get(
+                        (
+                            int(provider),
+                            int(user),
+                        ),
+                        0.0,
+                    )
+
+                for provider, user in zip(
+                    *np.nonzero(phi)
+                ):
+                    cost -= uav_gain.get(
+                        (
+                            int(provider),
+                            int(user),
+                        ),
+                        0.0,
+                    )
+
+                cost += (
+                    5.0
+                    * float(mu.sum())
+                )
+                scores.append(
+                    float(cost)
+                )
+            return scores
+
+        selected = (
+            select_dpp_max_weight_matching(
+                env=env,
+                evaluate=evaluate,
+                min_edge_weight=0.0,
+                forbid_empty_hiring=True,
+            )
+        )
+
+        action = selected.action
+        y = action["rsu_scheduling"]
+        mu = action["uav_hiring"]
+        phi = action["uav_scheduling"]
+
+        expected_y = np.zeros(
+            (2, 4),
+            dtype=np.int32,
+        )
+        expected_y[0, 0] = 1
+        expected_y[1, 2] = 1
+
+        expected_phi = np.zeros(
+            (2, 4),
+            dtype=np.int32,
+        )
+        expected_phi[0, 1] = 1
+
+        np.testing.assert_array_equal(
+            y,
+            expected_y,
+        )
+        np.testing.assert_array_equal(
+            mu,
+            np.asarray(
+                [1, 0],
+                dtype=np.int32,
+            ),
+        )
+        np.testing.assert_array_equal(
+            phi,
+            expected_phi,
+        )
+
+        # 100 - 10 - 8 - 9 + 5 = 78.
+        self.assertAlmostEqual(
+            selected.predicted_round_cost,
+            78.0,
+            places=6,
+        )
+        self.assertEqual(
+            selected.chosen_stage,
+            "rsu_uav_matching",
+        )
+        self.assertAlmostEqual(
+            selected.baseline_cost,
+            100.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_only_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_final_cost,
+            78.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.rsu_candidate_edges,
+            4,
+        )
+
+        self.assertEqual(
+            selected.rsu_positive_candidate_edges,
+            4,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_rsu_edge_weight,
+            10.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.rsu_matches
+            ),
+            2,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_weight_sum,
+            18.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.uav_candidate_edges,
+            1,
+        )
+
+        self.assertEqual(
+            selected.uav_positive_candidate_edges,
+            1,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_uav_edge_weight,
+            9.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_match_count,
+            1,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_provider_count,
+            1,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_service_weight_sum,
+            9.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_hiring_cost_sum,
+            5.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_net_weight_sum,
+            4.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_uav_provider_net_gain,
+            4.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.uav_matches
+            ),
+            1,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_service_weight_sum,
+            9.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_net_weight_sum,
+            4.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.hired_uavs,
+            (0,),
+        )
+
+        applied = env.apply_slow_action(
+            action
+        )
+        np.testing.assert_array_equal(
+            applied.rsu_scheduling,
+            expected_y,
+        )
+        np.testing.assert_array_equal(
+            applied.uav_hiring,
+            np.asarray(
+                [1, 0],
+                dtype=np.int32,
+            ),
+        )
+        np.testing.assert_array_equal(
+            applied.uav_scheduling,
+            expected_phi,
+        )
+
+    def test_env_rejects_empty_hiring(
+        self,
+    ) -> None:
+        env = self._small_env()
+        action = {
+            "rsu_scheduling": np.zeros(
+                (2, 4),
+                dtype=np.int32,
+            ),
+            "uav_hiring": np.asarray(
+                [1, 0],
+                dtype=np.int32,
+            ),
+            "uav_scheduling": np.zeros(
+                (2, 4),
+                dtype=np.int32,
+            ),
+        }
+
+        with self.assertRaises(
+            ValueError
+        ):
+            env.apply_slow_action(
+                action
+            )
+    
+    def test_rsu_only_ablation_never_generates_uav_action(
+        self,
+    ) -> None:
+        env = self._small_env()
+
+        rsu_gain = {
+            (0, 0): 10.0,
+            (0, 1): 7.0,
+            (1, 2): 8.0,
+            (1, 3): 3.0,
+        }
+
+        def evaluate(
+            actions: Sequence[
+                Dict[str, np.ndarray]
+            ],
+        ) -> list[float]:
+            scores = []
+
+            for action in actions:
+                y = np.asarray(
+                    action[
+                        "rsu_scheduling"
+                    ],
+                    dtype=np.int32,
+                )
+
+                mu = np.asarray(
+                    action[
+                        "uav_hiring"
+                    ],
+                    dtype=np.int32,
+                )
+
+                phi = np.asarray(
+                    action[
+                        "uav_scheduling"
+                    ],
+                    dtype=np.int32,
+                )
+
+                # RSU-only ablation의 핵심 contract:
+                # evaluator로 전달되는 candidate 자체에
+                # UAV action이 포함되면 안 된다.
+                if np.any(mu):
+                    self.fail(
+                        "RSU-only ablation generated "
+                        "a UAV hiring candidate."
+                    )
+
+                if np.any(phi):
+                    self.fail(
+                        "RSU-only ablation generated "
+                        "a UAV scheduling candidate."
+                    )
+
+                cost = 100.0
+
+                for provider, user in zip(
+                    *np.nonzero(y)
+                ):
+                    cost -= rsu_gain.get(
+                        (
+                            int(provider),
+                            int(user),
+                        ),
+                        0.0,
+                    )
+
+                scores.append(
+                    float(cost)
+                )
+
+            return scores
+
+        selected = (
+            select_dpp_max_weight_matching(
+                env=env,
+                evaluate=evaluate,
+                min_edge_weight=0.0,
+                forbid_empty_hiring=True,
+                enable_uav=False,
+            )
+        )
+
+        action = selected.action
+
+        y = np.asarray(
+            action[
+                "rsu_scheduling"
+            ],
+            dtype=np.int32,
+        )
+
+        mu = np.asarray(
+            action[
+                "uav_hiring"
+            ],
+            dtype=np.int32,
+        )
+
+        phi = np.asarray(
+            action[
+                "uav_scheduling"
+            ],
+            dtype=np.int32,
+        )
+
+        # ------------------------------------------------------
+        # Expected RSU maximum-weight matching
+        #
+        # region 0:
+        #   user 0 gain = 10
+        #   user 1 gain = 7
+        #   capacity = 1
+        #   -> user 0
+        #
+        # region 1:
+        #   user 2 gain = 8
+        #   user 3 gain = 3
+        #   capacity = 1
+        #   -> user 2
+        #
+        # total predicted cost
+        # = 100 - 10 - 8
+        # = 82
+        # ------------------------------------------------------
+
+        expected_y = np.zeros(
+            (2, 4),
+            dtype=np.int32,
+        )
+
+        expected_y[0, 0] = 1
+        expected_y[1, 2] = 1
+
+        np.testing.assert_array_equal(
+            y,
+            expected_y,
+        )
+
+        np.testing.assert_array_equal(
+            mu,
+            np.zeros(
+                2,
+                dtype=np.int32,
+            ),
+        )
+
+        np.testing.assert_array_equal(
+            phi,
+            np.zeros(
+                (2, 4),
+                dtype=np.int32,
+            ),
+        )
+
+        # ------------------------------------------------------
+        # Cost / stage contract
+        # ------------------------------------------------------
+
+        self.assertAlmostEqual(
+            selected.baseline_cost,
+            100.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_only_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.predicted_round_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_final_cost,
+            82.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.chosen_stage,
+            "rsu_matching",
+        )
+
+        # ------------------------------------------------------
+        # RSU diagnostics
+        # ------------------------------------------------------
+
+        self.assertEqual(
+            selected.rsu_candidate_edges,
+            4,
+        )
+
+        self.assertEqual(
+            selected.rsu_positive_candidate_edges,
+            4,
+        )
+
+        self.assertAlmostEqual(
+            selected.best_rsu_edge_weight,
+            10.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.rsu_matches
+            ),
+            2,
+        )
+
+        self.assertAlmostEqual(
+            selected.rsu_weight_sum,
+            18.0,
+            places=6,
+        )
+
+        # ------------------------------------------------------
+        # UAV ablation contract
+        # ------------------------------------------------------
+
+        self.assertEqual(
+            selected.uav_candidate_edges,
+            0,
+        )
+
+        self.assertEqual(
+            selected.uav_positive_candidate_edges,
+            0,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_match_count,
+            0,
+        )
+
+        self.assertEqual(
+            selected.provisional_uav_provider_count,
+            0,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_service_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_hiring_cost_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.provisional_uav_net_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            len(
+                selected.uav_matches
+            ),
+            0,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_service_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertAlmostEqual(
+            selected.uav_net_weight_sum,
+            0.0,
+            places=6,
+        )
+
+        self.assertEqual(
+            selected.hired_uavs,
+            tuple(),
+        )
+
+        # 최종 action도 실제 Env validation을 통과해야 한다.
+        applied = env.apply_slow_action(
+            action
+        )
+
+        np.testing.assert_array_equal(
+            applied.rsu_scheduling,
+            expected_y,
+        )
+
+        np.testing.assert_array_equal(
+            applied.uav_hiring,
+            np.zeros(
+                2,
+                dtype=np.int32,
+            ),
+        )
+
+        np.testing.assert_array_equal(
+            applied.uav_scheduling,
+            np.zeros(
+                (2, 4),
+                dtype=np.int32,
+            ),
+        )
 
 
 if __name__ == "__main__":
-    run_contract_smoke_test()
+    unittest.main()

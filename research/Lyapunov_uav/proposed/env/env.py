@@ -11,7 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - script-style fallback
     from config import EnvConfig
 
 from .action_types import EnvAction, SlowAction, FastAction
-from .validators import parse_slow_action, parse_fast_action
+from .validators import parse_slow_action, parse_fast_action, validate_slow_action_strict
 from .channel import RSUChannelModel, UAVChannelModel
 from .delivery.rsu_delivery import compute_rsu_delivery
 from .delivery.uav_delivery import compute_uav_delivery
@@ -73,7 +73,29 @@ class Env:
         # user는 왼쪽으로만 이동한다고 가정
         self.user_region = np.zeros(self.num_user, dtype=np.int32)
 
-        # default distance states
+        # 1-D road mobility state.
+        # RSU/UAV u is placed at the center of coverage region u.
+        self.road_length_m = (
+            float(self.num_rsu)
+            * float(self.cfg.region_len)
+        )
+        self.node_position_m = (
+            (
+                np.arange(self.num_rsu, dtype=np.float32)
+                + 0.5
+            )
+            * float(self.cfg.region_len)
+        ).astype(np.float32)
+        self.user_position_m = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+        self.user_speed_mps = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+
+        # slot-varying link distance states
         self.rsu_user_distance = self._default_rsu_user_distance()
         self.uav_user_distance = self._default_uav_user_distance()
 
@@ -97,13 +119,13 @@ class Env:
 
         # round-level reward accumulator
         self.round_fast_reward_sum = 0.0
+        self.round_fast_dpp_cost_sum = 0.0
         self.round_quality_sum = 0.0
         self.round_delivery_sum = 0.0
         self.round_stall_sum = 0.0
         self.round_battery_consume_sum = 0.0
         self.round_battery_charge_sum = 0.0
     
-
     @property
     def E(self) -> np.ndarray:
         """
@@ -198,15 +220,84 @@ class Env:
             dtype=np.float32,
         )
     
-    def _reset_user_regions(self) -> None:
+    def _sample_user_speed_mps(
+        self,
+        size: int | tuple[int, ...],
+    ) -> np.ndarray:
         """
-        episode 시작 시 user region을 초기화하는 함수
+        차량 속도를 [speed_min_kmh, speed_max_kmh]에서 샘플링한다.
+
+        mobility_speed_scale은 학습용 정적/약한 이동 ablation에만 사용하며,
+        기본값 1.0에서는 30--60 km/h를 그대로 사용한다.
         """
-        self.user_region = self.rng.integers(
-            low=0,
-            high=self.num_rsu,
-            size=self.num_user,
-            dtype=np.int32,
+        if str(self.cfg.mobility_mode) == "fsmc":
+            expected_mps = (
+                float(self.cfg.move_prob)
+                * float(self.cfg.region_len)
+                / float(self.cfg.battery.slot_duration)
+            )
+            return np.full(
+                size,
+                expected_mps,
+                dtype=np.float32,
+            )
+
+        low_kmh = float(self.cfg.speed_min_kmh)
+        high_kmh = float(self.cfg.speed_max_kmh)
+        sampled_kmh = self.rng.uniform(
+            low=low_kmh,
+            high=high_kmh,
+            size=size,
+        )
+        sampled_mps = (
+            sampled_kmh
+            / 3.6
+            * float(self.cfg.mobility_speed_scale)
+        )
+        return np.asarray(sampled_mps, dtype=np.float32)
+
+    def _reset_user_mobility(self) -> None:
+        """
+        episode 시작 시 연속 위치, 속도 및 region index를 초기화한다.
+        """
+        if self.road_length_m <= 0.0:
+            raise ValueError(
+                "road_length_m은 양수여야 합니다. "
+                f"현재 값: {self.road_length_m}"
+            )
+
+        if str(self.cfg.mobility_mode) == "fsmc":
+            self.user_region = self.rng.integers(
+                low=0,
+                high=self.num_rsu,
+                size=self.num_user,
+                dtype=np.int32,
+            )
+            self.user_position_m = (
+                (
+                    self.user_region.astype(np.float32)
+                    + 0.5
+                )
+                * float(self.cfg.region_len)
+            ).astype(np.float32)
+        else:
+            self.user_position_m = self.rng.uniform(
+                low=0.0,
+                high=self.road_length_m,
+                size=self.num_user,
+            ).astype(np.float32)
+            self.user_region = np.floor(
+                self.user_position_m
+                / float(self.cfg.region_len)
+            ).astype(np.int32)
+            self.user_region = np.clip(
+                self.user_region,
+                0,
+                self.num_rsu - 1,
+            ).astype(np.int32)
+
+        self.user_speed_mps = self._sample_user_speed_mps(
+            self.num_user
         )
     
     def _sample_local_distance(self, channel_cfg, size: tuple[int, ...]) -> np.ndarray:
@@ -231,71 +322,164 @@ class Env:
     
     def _refresh_link_distances(self) -> None:
         """
-        Coverage region의 representative ground coordinate에 대응하는
-        고정 horizontal distance를 생성한다.
+        현재 연속 user 위치로부터 모든 RSU/UAV horizontal distance를
+        갱신한다.
 
-        현재 formulation은 continuous user coordinate를 직접 추적하지
-        않으므로 매 slot random distance를 재샘플링하지 않는다.
-
-        UAVChannelModel은 이 horizontal distance와 altitude를 이용해
-        3D distance 및 channel gain을 계산한다.
+        scheduling matrix는 round 동안 고정되지만, 이 distance는 매
+        slot 갱신되므로 이미 연결된 link의 channel capacity는 이동과
+        fading에 따라 계속 달라진다.
         """
-        rsu_distance = max(
-            float(self.cfg.rsu_channel.distance),
+        horizontal_distance = np.abs(
+            self.node_position_m[:, None]
+            - self.user_position_m[None, :]
+        )
+
+        self.rsu_user_distance = np.maximum(
+            horizontal_distance,
             float(self.cfg.rsu_channel.min_distance),
-        )
-        uav_distance = max(
-            float(self.cfg.uav_channel.distance),
+        ).astype(np.float32)
+
+        self.uav_user_distance = np.maximum(
+            horizontal_distance,
             float(self.cfg.uav_channel.min_distance),
-        )
+        ).astype(np.float32)
 
-        self.rsu_user_distance = np.full(
-            (self.num_rsu, self.num_user),
-            rsu_distance,
-            dtype=np.float32,
-        )
-
-        self.uav_user_distance = np.full(
-            (self.num_uav, self.num_user),
-            uav_distance,
-            dtype=np.float32,
-        )
-
-    def _update_user_region(self) -> Dict[str, np.ndarray]:
+    def _drop_departed_user_association(
+        self,
+        entered_mask: np.ndarray,
+    ) -> None:
         """
-        FSMC에 따른 user 위치 영역을 업데이트하는 함수.
-        다음과 같은 동작 수행.
-        
-            1) 매 slot마다 각 user는 move_prob 확률로 왼쪽 region으로 이동한다.
-            2) region 0에서 user 이동이 발생하면 해당 user가 오른쪽 끝 region으로 재진입.
-            3) 새로 진입한 user는 queue와 requested content를 새로 초기화.
+        Slow action arrays must remain bitwise fixed for the complete round.
+
+        A replacement vehicle must not inherit the departed vehicle's
+        association. Mark it invalid in the effective service mask without
+        mutating the raw round-level decision phi_{un}(r). The next slow
+        decision resets validity at the following round boundary.
+        """
+        departed_users = np.flatnonzero(
+            np.asarray(entered_mask, dtype=np.int32) > 0
+        )
+        if departed_users.size == 0:
+            return
+        self.round_user_association_valid[
+            departed_users
+        ] = 0
+
+    def _update_user_mobility(self) -> Dict[str, np.ndarray]:
+        """
+        한 slot 동안 user mobility를 갱신한다.
+
+        continuous mode:
+            x_n(t+1) = x_n(t) - v_n * slot_duration.
+            region 경계를 넘어도 기존 association은 유지된다.
+            road 왼쪽 끝을 벗어난 차량만 새 차량으로 교체한다.
+
+        fsmc mode:
+            과거 실험 재현을 위한 legacy 경로이다.
         """
         prev_region = self.user_region.copy()
-
-        move_prob = float(self.cfg.move_prob)
-        move_mask = (self.rng.random(self.num_user) < move_prob)
-
+        prev_position_m = self.user_position_m.copy()
+        prev_speed_mps = self.user_speed_mps.copy()
         entered_mask = np.zeros(self.num_user, dtype=np.int32)
 
-        for n in range(self.num_user):
-            if not bool(move_mask[n]):
-                continue
+        if str(self.cfg.mobility_mode) == "continuous":
+            displacement_m = (
+                self.user_speed_mps
+                * float(self.cfg.battery.slot_duration)
+            ).astype(np.float32)
 
-            if int(self.user_region[n]) > 0:
-                self.user_region[n] -= 1
-            else:
-                # print(f"user {n} | region 이탈로 재진입 발생")
-                self.user_region[n] = self.num_rsu - 1
+            next_position_m = (
+                self.user_position_m
+                - displacement_m
+            )
+            entered_mask = (
+                next_position_m < 0.0
+            ).astype(np.int32)
+
+            self.user_position_m = np.mod(
+                next_position_m,
+                self.road_length_m,
+            ).astype(np.float32)
+
+            for n in np.flatnonzero(entered_mask > 0):
+                n = int(n)
                 self.queue[n] = float(self.cfg.init_queue)
-                self.requested_content[n] = self._sample_user_requested_content()
-                entered_mask[n] = 1
-        
+                self.requested_content[n] = (
+                    self._sample_user_requested_content()
+                )
+                self.user_speed_mps[n] = float(
+                    self._sample_user_speed_mps(1)[0]
+                )
+
+            self.user_region = np.floor(
+                self.user_position_m
+                / float(self.cfg.region_len)
+            ).astype(np.int32)
+            self.user_region = np.clip(
+                self.user_region,
+                0,
+                self.num_rsu - 1,
+            ).astype(np.int32)
+        else:
+            fsmc_move = (
+                self.rng.random(self.num_user)
+                < float(self.cfg.move_prob)
+            )
+            for n in range(self.num_user):
+                if not bool(fsmc_move[n]):
+                    continue
+                if int(self.user_region[n]) > 0:
+                    self.user_region[n] -= 1
+                else:
+                    self.user_region[n] = self.num_rsu - 1
+                    self.queue[n] = float(self.cfg.init_queue)
+                    self.requested_content[n] = (
+                        self._sample_user_requested_content()
+                    )
+                    entered_mask[n] = 1
+
+            self.user_position_m = (
+                (
+                    self.user_region.astype(np.float32)
+                    + 0.5
+                )
+                * float(self.cfg.region_len)
+            ).astype(np.float32)
+            displacement_m = np.where(
+                fsmc_move,
+                float(self.cfg.region_len),
+                0.0,
+            ).astype(np.float32)
+
+        region_crossing_mask = (
+            self.user_region != prev_region
+        ).astype(np.int32)
+
+        self._drop_departed_user_association(entered_mask)
+        self._refresh_link_distances()
+
         return {
             "prev_user_region": prev_region.astype(np.int32),
             "next_user_region": self.user_region.copy().astype(np.int32),
-            "move_mask": move_mask.astype(np.int32),
+            "move_mask": region_crossing_mask.copy(),
+            "region_crossing_mask": region_crossing_mask.copy(),
             "entered_mask": entered_mask.astype(np.int32),
+            "prev_user_position_m": prev_position_m.astype(np.float32),
+            "next_user_position_m":
+                self.user_position_m.copy().astype(np.float32),
+            "prev_user_speed_mps": prev_speed_mps.astype(np.float32),
+            "next_user_speed_mps":
+                self.user_speed_mps.copy().astype(np.float32),
+            "displacement_m": displacement_m.astype(np.float32),
         }
+
+    def _update_user_region(self) -> Dict[str, np.ndarray]:
+        """
+        Legacy private-method alias.
+
+        신규 코드는 _update_user_mobility()를 사용한다.
+        """
+        return self._update_user_mobility()
     
     def _region_mask_rsu(self) -> np.ndarray:
         """
@@ -316,9 +500,24 @@ class Env:
     
     def _get_effective_rsu_connection_matrix(self) -> np.ndarray:
         """
-        현재 region constraint가 반영된 RSU-user connection matrix.
+        round 시작에 확정된 RSU-user association을 반환한다.
+
+        현재 region은 association 후보를 만들 때만 사용한다. Round 도중
+        region을 넘어가더라도 association을 제거하지 않으며, 실제 전송량은
+        slot별 distance/channel capacity constraint가 결정한다.
         """
-        return (self.rsu_scheduling * self._region_mask_rsu()).astype(np.int32)
+        valid = np.asarray(
+            getattr(
+                self,
+                "round_user_association_valid",
+                np.ones(self.num_user, dtype=np.int32),
+            ),
+            dtype=np.int32,
+        )
+        return (
+            self.rsu_scheduling
+            * valid[None, :]
+        ).astype(np.int32)
 
     def _get_effective_uav_connection_matrix(self) -> np.ndarray:
         """
@@ -328,14 +527,12 @@ class Env:
         
             1) phi_un(r) = 1 (scheduling=1)
             2) 해당 coverage region의 UAV가 hired 상태
-            3) user와 UAV가 동일한 region에 위치 (안전 장치)
-            4) user가 RSU에 scheduling되지 않은 residual user
-            5) UAV cached content와 requested content가 일치
-        """
-        region_mask = self._region_mask_uav().astype(
-            np.int32
-        )
+            3) user가 RSU에 scheduling되지 않은 residual user
+            4) UAV cached content와 requested content가 일치
 
+        Region constraint는 round 시작의 apply_slow_action()에서만 적용한다.
+        Round 중 region crossing은 association을 제거하지 않는다.
+        """
         rsu_connection = (
             self._get_effective_rsu_connection_matrix()
         )
@@ -354,79 +551,160 @@ class Env:
         effective_link = (
             self.uav_scheduling
             * self.uav_hiring[:, None]
-            * region_mask
             * residual_user_mask[None, :]
             * cache_match
+            * np.asarray(
+                getattr(
+                    self,
+                    "round_user_association_valid",
+                    np.ones(
+                        self.num_user,
+                        dtype=np.int32,
+                    ),
+                ),
+                dtype=np.int32,
+            )[None, :]
         )
 
         return effective_link.astype(np.int32)
     
-    def _get_user_node_connection_state(self) -> Dict[str, np.ndarray]:
-        """
-        fast-timescale policy에 제공할 user별 node connection state를 만든다.
+    def _get_user_node_connection_state(
+        self,
+    ) -> Dict[str, np.ndarray]:
+        rsu_connection = (
+            self._get_effective_rsu_connection_matrix()
+        )
+        uav_connection = (
+            self._get_effective_uav_connection_matrix()
+        )
 
-        반환값:
-            rsu_connection:
-                shape = (M, N)
-                rsu_connection[m, n] = 1이면 user n이 RSU m과 연결됨.
+        has_rsu = np.any(
+            rsu_connection > 0,
+            axis=0,
+        )
+        has_uav = np.any(
+            uav_connection > 0,
+            axis=0,
+        )
 
-            uav_connection:
-                shape = (U, N)
-                uav_connection[u, n] = 1이면 user n이 UAV u와 연결됨.
+        connected_rsu = np.full(
+            self.num_user,
+            -1,
+            dtype=np.int32,
+        )
+        connected_uav = np.full(
+            self.num_user,
+            -1,
+            dtype=np.int32,
+        )
 
-            connected_rsu:
-                shape = (N,)
-                user n이 연결된 RSU index. 없으면 -1.
+        if np.any(has_rsu):
+            connected_rsu[has_rsu] = (
+                np.argmax(
+                    rsu_connection[
+                        :,
+                        has_rsu,
+                    ],
+                    axis=0,
+                )
+                .astype(np.int32)
+            )
 
-            connected_uav:
-                shape = (N,)
-                user n이 연결된 UAV index. 없으면 -1.
+        if np.any(has_uav):
+            connected_uav[has_uav] = (
+                np.argmax(
+                    uav_connection[
+                        :,
+                        has_uav,
+                    ],
+                    axis=0,
+                )
+                .astype(np.int32)
+            )
 
-            connection_type:
-                shape = (N,)
-                0 = no connection
-                1 = RSU only
-                2 = UAV only
-                3 = both RSU and UAV candidate connection
-
-        주의:
-            현재 slow action validator가 user별 단일 연결을 강제하지 않을 수 있으므로,
-            matrix 형태를 함께 제공한다. connected_rsu/connected_uav는 첫 번째 연결 index만 제공한다.
-        """
-        rsu_connection = self._get_effective_rsu_connection_matrix()
-        uav_connection = self._get_effective_uav_connection_matrix()
-
-        connected_rsu = np.full(self.num_user, -1, dtype=np.int32)
-        connected_uav = np.full(self.num_user, -1, dtype=np.int32)
-        connection_type = np.zeros(self.num_user, dtype=np.int32)
-
-        for n in range(self.num_user):
-            rsu_candidates = np.flatnonzero(rsu_connection[:, n] > 0)
-            uav_candidates = np.flatnonzero(uav_connection[:, n] > 0)
-
-            has_rsu = len(rsu_candidates) > 0
-            has_uav = len(uav_candidates) > 0
-
-            if has_rsu:
-                connected_rsu[n] = int(rsu_candidates[0])
-            if has_uav:
-                connected_uav[n] = int(uav_candidates[0])
-
-            if has_rsu and has_uav:
-                connection_type[n] = 3
-            elif has_rsu:
-                connection_type[n] = 1
-            elif has_uav:
-                connection_type[n] = 2
-            else:
-                connection_type[n] = 0
+        connection_type = (
+            has_rsu.astype(np.int32)
+            + 2 * has_uav.astype(np.int32)
+        )
 
         return {
-            "rsu_connection": rsu_connection.astype(np.int32),
-            "uav_connection": uav_connection.astype(np.int32),
-            "connected_rsu": connected_rsu.astype(np.int32),
-            "connected_uav": connected_uav.astype(np.int32),
-            "connection_type": connection_type.astype(np.int32),
+            "rsu_connection":
+                rsu_connection.astype(
+                    np.int32,
+                    copy=False,
+                ),
+            "uav_connection":
+                uav_connection.astype(
+                    np.int32,
+                    copy=False,
+                ),
+            "connected_rsu":
+                connected_rsu,
+            "connected_uav":
+                connected_uav,
+            "connection_type":
+                connection_type.astype(
+                    np.int32,
+                    copy=False,
+                ),
+        }
+
+    def _get_serving_distance_state(
+        self,
+        connection_state: Dict[str, np.ndarray],
+    ) -> Dict[str, np.ndarray]:
+        connected_rsu = np.asarray(
+            connection_state["connected_rsu"],
+            dtype=np.int32,
+        )
+        connected_uav = np.asarray(
+            connection_state["connected_uav"],
+            dtype=np.int32,
+        )
+
+        user_indices = np.arange(
+            self.num_user,
+            dtype=np.int64,
+        )
+
+        rsu_serving_distance = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+        uav_serving_distance = np.zeros(
+            self.num_user,
+            dtype=np.float32,
+        )
+
+        valid_rsu = (
+            (connected_rsu >= 0)
+            & (connected_rsu < self.num_rsu)
+        )
+        if np.any(valid_rsu):
+            rsu_serving_distance[valid_rsu] = (
+                self.rsu_user_distance[
+                    connected_rsu[valid_rsu],
+                    user_indices[valid_rsu],
+                ]
+            )
+
+        valid_uav = (
+            (connected_uav >= 0)
+            & (connected_uav < self.num_uav)
+        )
+        if np.any(valid_uav):
+            uav_serving_distance[valid_uav] = (
+                self.uav_user_distance[
+                    connected_uav[valid_uav],
+                    user_indices[valid_uav],
+                ]
+            )
+
+        return {
+            "rsu_serving_distance":
+                rsu_serving_distance,
+            "uav_serving_distance":
+                uav_serving_distance,
         }
 
     def reset(self) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
@@ -442,7 +720,7 @@ class Env:
         # 사용자 큐 초기화
         self.queue = np.full(self.num_user, float(self.cfg.init_queue), dtype=np.float32)
 
-        self._reset_user_regions()
+        self._reset_user_mobility()
 
         # slow-timescale decision 초기화
         self.rsu_scheduling = np.zeros(
@@ -451,6 +729,10 @@ class Env:
         self.uav_hiring = np.zeros(self.num_uav, dtype=np.int32)
         self.uav_scheduling = np.zeros(
             (self.num_uav, self.num_user), dtype=np.int32
+        )
+        self.round_user_association_valid = np.ones(
+            self.num_user,
+            dtype=np.int32,
         )
 
         # content 초기화
@@ -480,6 +762,9 @@ class Env:
             "reset": True,
             "obs_type": "fast_obs",
             "user_region": self.user_region.copy(),
+            "user_position_m": self.user_position_m.copy(),
+            "user_speed_kmh":
+                (self.user_speed_mps * 3.6).astype(np.float32),
             "requested_content": self.requested_content.copy(),
             "uav_cached_content": self.uav_cached_content.copy(),
         }
@@ -491,6 +776,7 @@ class Env:
         (slot별 fast reward component을 누적)
         """
         self.round_fast_reward_sum = 0.0
+        self.round_fast_dpp_cost_sum = 0.0
         self.round_quality_sum = 0.0
         self.round_delivery_sum = 0.0
         self.round_stall_sum = 0.0
@@ -537,6 +823,9 @@ class Env:
     def apply_slow_action(self, action: EnvAction) -> SlowAction:
         """
         round-level slow-timescale decision을 갱신하는 함수.
+
+        현재 region mask는 round 시작의 candidate feasibility에만 적용한다.
+        여기서 확정된 scheduling은 다음 round boundary까지 고정된다.
         """
         if int(self.round_slot) != 0: # 안전장치
             raise RuntimeError(
@@ -545,6 +834,14 @@ class Env:
             )
 
         slow_act = parse_slow_action(action, self.cfg)
+        validate_slow_action_strict(
+            slow_act,
+            self.cfg,
+            user_region=self.user_region,
+            requested_content=self.requested_content,
+            uav_cached_content=self.uav_cached_content,
+            forbid_empty_hiring=True,
+        )
 
         rsu_region_mask = self._region_mask_rsu()
         uav_region_mask = self._region_mask_uav()
@@ -556,6 +853,10 @@ class Env:
             * self.uav_hiring[:, None]
             * uav_region_mask
         ).astype(np.int32)
+        self.round_user_association_valid = np.ones(
+            self.num_user,
+            dtype=np.int32,
+        )
 
         self._start_new_round()
 
@@ -567,8 +868,12 @@ class Env:
     
     def _build_effective_fast_action(self, fast_act: FastAction) -> FastAction:
         """
-        slow-timescale decision과 현재 region constraint를 반영하여
+        round-fixed slow-timescale decision을 반영하여
         실제 실행 가능한 fast action으로 projection하는 함수.
+
+        현재 user_region은 projection mask로 사용하지 않는다. 이동 효과는
+        rsu_user_distance/uav_user_distance와 channel capacity constraint로
+        반영된다.
         """
         rsu_connection = self._get_effective_rsu_connection_matrix()
         uav_connection = self._get_effective_uav_connection_matrix()
@@ -582,7 +887,7 @@ class Env:
         effective_uav_layers = fast_act.uav_layers.copy()
         effective_uav_power = fast_act.uav_power.copy()
 
-        # RSU scheduling + region constraint
+        # round-fixed RSU scheduling
         effective_rsu_chunks = effective_rsu_chunks * rsu_connection
         effective_rsu_layers = effective_rsu_layers * rsu_connection
 
@@ -592,7 +897,7 @@ class Env:
         effective_uav_layers[inactive_uav_mask, :] = 0
         effective_uav_power[inactive_uav_mask, :] = 0.0
 
-        # UAV scheduling + residual + region constraint
+        # round-fixed UAV scheduling + residual constraint
         effective_uav_chunks = (
             effective_uav_chunks
             * uav_connection
@@ -631,6 +936,8 @@ class Env:
         mu_active: bool,
         mode: UAVBatteryMode,
         links,
+        *,
+        compact: bool = False,
     ) -> Dict[str, Any]:
         """
         UAV battery transition을 수행하는 함수
@@ -667,6 +974,15 @@ class Env:
             )
         )
         self.outage[uav_idx] = int(is_outage)
+        if compact:
+            return {
+                "consumed_soc": float(
+                    consumed_soc
+                ),
+                "charged_soc": float(
+                    charged_soc
+                ),
+            }
 
         step_info = BatteryStepInfo(
             hover_energy=float(energy_info["hover_energy"]),
@@ -858,17 +1174,21 @@ class Env:
         uav_hiring: np.ndarray,
         charging_state: np.ndarray,
         battery_step_info: list[Dict[str, Any]],
+        *,
+        compact: bool = False,
     ) -> Tuple[float, Dict[str, Any]]:
         """
-        Scaled Fast-timescale DPP reward 계산을 수행하는 함수.
+        Fast-timescale의 정확한 one-slot DPP cost와 그 음수 reward를 계산한다.
 
-        다음과 같은 산식을 가짐:
+        J^F(t)
+        = alpha_Z * sum_n Z_n(t)[b-d_n(t)]
+          + alpha_B * sum_u B_u(t)e_u(t)
+          - alpha_B * sum_u B_u(t)e_u^c(t)
+          + V * sum_n[P_bar*d_n(t)-q_n(t)]
 
-            R_L(t)
-            = alpha_Z * sum_n Z_n(t)d_n(t)
-                - alpha_B * sum_u B_u(t)e_u(t)
-                + alpha_B * sum_u B_u(t)e_c(t)
-                - V * sum_n[P_bar*d_n(t) - q_n(t)]
+        Fast PPO reward는 R^F(t)=-J^F(t)로 둔다. 환경은 raw DPP
+        단위를 유지하며 PPO 전용 reward scaling은 fast_train.py에서만
+        적용한다.
         """
         prev_Q_arr = np.asarray(prev_Q, dtype=np.float32)
         next_Q_arr = np.asarray(next_Q, dtype=np.float32)
@@ -901,6 +1221,7 @@ class Env:
         alpha_B = float(self.cfg.alpha_B)
         V = float(self.cfg.V)
         P_bar = float(max(self.cfg.quality_weights))
+        playback_rate = float(self.cfg.playback_rate)
 
         # quality degradation
         quality_degradation_arr = P_bar * delivered_arr - quality_arr
@@ -925,6 +1246,7 @@ class Env:
         ).astype(np.float32)
         
         # raw formulation terms
+        raw_queue_playback_term = -float(np.sum(prev_Z_arr * playback_rate))
         raw_video_delivery_term = float(np.sum(prev_Z_arr * delivered_arr))
         raw_battery_consume_term = -float(np.sum(prev_B_arr * consumed_soc_arr))
         raw_battery_charge_term = float(np.sum(prev_B_arr * charged_soc_arr))
@@ -932,17 +1254,51 @@ class Env:
         raw_quality_degradation_term = float(np.sum(quality_degradation_arr))
 
         # scaled reward terms
+        # reward contributions
+        queue_playback_term = alpha_Z * raw_queue_playback_term
         video_delivery_term = alpha_Z * raw_video_delivery_term
         battery_consume_term = alpha_B * raw_battery_consume_term
         battery_charge_term = alpha_B * raw_battery_charge_term
         quality_degradation_term = -V * raw_quality_degradation_term
 
         fast_reward = float(
-            video_delivery_term
+            queue_playback_term
+            + video_delivery_term
             + battery_consume_term
             + battery_charge_term
             + quality_degradation_term
         )
+        one_slot_dpp_cost = -fast_reward
+
+        # Positive/negative DPP breakdown for audit and slow candidate COST.
+        video_queue_dpp_cost_term = float(
+            alpha_Z
+            * np.sum(
+                prev_Z_arr
+                * (playback_rate - delivered_arr)
+            )
+        )
+        battery_consume_dpp_cost_term = -battery_consume_term
+        battery_charge_dpp_cost_term = -battery_charge_term
+        quality_degradation_dpp_cost_term = -quality_degradation_term
+
+        reconstructed_dpp_cost = float(
+            video_queue_dpp_cost_term
+            + battery_consume_dpp_cost_term
+            + battery_charge_dpp_cost_term
+            + quality_degradation_dpp_cost_term
+        )
+        if not np.isclose(
+            one_slot_dpp_cost,
+            reconstructed_dpp_cost,
+            rtol=1e-6,
+            atol=1e-4,
+        ):
+            raise RuntimeError(
+                "one-slot DPP cost reconstruction mismatch: "
+                f"reward_based={one_slot_dpp_cost}, "
+                f"term_sum={reconstructed_dpp_cost}"
+            )
 
         sum_delivery = float(np.sum(delivered_arr))
         sum_quality = float(np.sum(quality_arr))
@@ -956,6 +1312,34 @@ class Env:
             np.sum(charged_soc_arr)
         )
 
+        if compact:
+            return fast_reward, {
+                "one_slot_dpp_cost": float(
+                    one_slot_dpp_cost
+                ),
+                "sum_delivery": float(
+                    sum_delivery
+                ),
+                "sum_quality": float(
+                    sum_quality
+                ),
+                "sum_quality_degradation": float(
+                    sum_quality_degradation
+                ),
+                "sum_consumed_soc": float(
+                    sum_consumed_soc
+                ),
+                "sum_charged_soc": float(
+                    sum_charged_soc
+                ),
+                "battery_consume_term": float(
+                    battery_consume_term
+                ),
+                "battery_charge_term": float(
+                    battery_charge_term
+                ),
+            }
+
         quality_per_chunk = (
             sum_quality / sum_delivery
             if sum_delivery > 0.0
@@ -968,13 +1352,18 @@ class Env:
         )
 
         term_abs_sum = float(
-            abs(video_delivery_term)
+            abs(queue_playback_term)
+            + abs(video_delivery_term)
             + abs(battery_consume_term)
             + abs(battery_charge_term)
             + abs(quality_degradation_term)
             + 1e-8
         )
 
+        queue_playback_term_share = (
+            abs(queue_playback_term)
+            / term_abs_sum
+        )
         delivery_term_share = (
             abs(video_delivery_term)
             / term_abs_sum
@@ -1018,6 +1407,8 @@ class Env:
             "charged_soc_per_uav":
                 charged_soc_arr.copy(),
 
+            "raw_queue_playback_term":
+                raw_queue_playback_term,
             "raw_video_delivery_term":
                 raw_video_delivery_term,
             "raw_battery_consume_term":
@@ -1029,6 +1420,8 @@ class Env:
             "raw_quality_degradation_term":
                 raw_quality_degradation_term,
 
+            "queue_playback_term":
+                queue_playback_term,
             "video_delivery_term":
                 video_delivery_term,
             "battery_consume_term":
@@ -1039,8 +1432,19 @@ class Env:
                 quality_degradation_term,
 
             "fast_reward": fast_reward,
+            "one_slot_dpp_cost":
+                one_slot_dpp_cost,
+            "video_queue_dpp_cost_term":
+                video_queue_dpp_cost_term,
+            "battery_consume_dpp_cost_term":
+                battery_consume_dpp_cost_term,
+            "battery_charge_dpp_cost_term":
+                battery_charge_dpp_cost_term,
+            "quality_degradation_dpp_cost_term":
+                quality_degradation_dpp_cost_term,
 
             "P_bar": P_bar,
+            "playback_rate": playback_rate,
             "sum_delivery": sum_delivery,
             "sum_quality": sum_quality,
             "sum_quality_degradation":
@@ -1055,6 +1459,8 @@ class Env:
             "quality_degradation_per_chunk":
                 quality_degradation_per_chunk,
 
+            "queue_playback_term_share":
+                queue_playback_term_share,
             "delivery_term_share":
                 delivery_term_share,
             "battery_consume_term_share":
@@ -1108,6 +1514,13 @@ class Env:
               + sum_{t in T_r} R_L(t)
         """
         self.round_fast_reward_sum += float(fast_reward)
+        one_slot_dpp_cost = float(
+            reward_components.get(
+                "one_slot_dpp_cost",
+                -float(fast_reward),
+            )
+        )
+        self.round_fast_dpp_cost_sum += one_slot_dpp_cost
         self.round_quality_sum += float(reward_components.get("sum_quality", 0.0))
         self.round_delivery_sum += float(reward_components.get("sum_delivery", 0.0))
         self.round_battery_consume_sum += float(reward_components.get("battery_consume_term", 0.0))
@@ -1123,6 +1536,9 @@ class Env:
                 "is_round_boundary": False,
                 "slow_reward": 0.0,
                 "round_fast_reward_sum_so_far": float(self.round_fast_reward_sum),
+                "round_fast_dpp_cost_sum_so_far": float(
+                    self.round_fast_dpp_cost_sum
+                ),
                 "round_quality_sum_so_far": float(self.round_quality_sum),
                 "round_delivery_sum_so_far": float(self.round_delivery_sum),
                 "round_battery_consume_sum_so_far": float(self.round_battery_consume_sum),
@@ -1134,12 +1550,32 @@ class Env:
             return 0.0, components
         
         slow_reward = float(hire_cost) + float(self.round_fast_reward_sum)
+        round_dpp_cost = float(
+            -float(hire_cost)
+            + self.round_fast_dpp_cost_sum
+        )
+
+        if not np.isclose(
+            slow_reward,
+            -round_dpp_cost,
+            rtol=1e-6,
+            atol=1e-3,
+        ):
+            raise RuntimeError(
+                "round DPP cost/reward mismatch: "
+                f"slow_reward={slow_reward}, "
+                f"round_dpp_cost={round_dpp_cost}"
+            )
 
         components = {
             "is_round_boundary": True,
             "slow_reward": float(slow_reward),
 
             "round_fast_reward_sum": float(self.round_fast_reward_sum),
+            "round_fast_dpp_cost_sum": float(
+                self.round_fast_dpp_cost_sum
+            ),
+            "round_dpp_cost": round_dpp_cost,
             "round_quality_sum": float(self.round_quality_sum),
             "round_delivery_sum": float(self.round_delivery_sum),
             "round_battery_consume_sum": float(
@@ -1220,6 +1656,9 @@ class Env:
             "Z": self.Z.copy(),
             "B": self.Y.copy(),
             "user_region": self.user_region.copy(),
+            "user_position_m": self.user_position_m.copy(),
+            "user_speed_kmh":
+                (self.user_speed_mps * 3.6).astype(np.float32),
         }
 
     def get_fast_obs(self) -> Dict[str, np.ndarray]:
@@ -1227,11 +1666,20 @@ class Env:
         fast-timescale 상태값을 반환하는 함수.
         """
         connection_state = self._get_user_node_connection_state()
+        serving_distance = self._get_serving_distance_state(
+            connection_state
+        )
 
         return {
             "Z": self.Z.copy(),
             "B": self.Y.copy(),
             "user_region": self.user_region.copy(),
+            "user_speed_kmh":
+                (self.user_speed_mps * 3.6).astype(np.float32),
+            "rsu_serving_distance":
+                serving_distance["rsu_serving_distance"].copy(),
+            "uav_serving_distance":
+                serving_distance["uav_serving_distance"].copy(),
 
             # user가 어떤 node와 연결돼 있는지 나타내는 fast policy state
             "connection_type": connection_state["connection_type"].copy(),
@@ -1241,10 +1689,35 @@ class Env:
             "uav_connection": connection_state["uav_connection"].copy(),
         }
 
-    def step(self, action: EnvAction) -> tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+    def step(
+        self,
+        action: EnvAction,
+        *,
+        info_level: str = "full",
+    ) -> tuple[
+        Dict[str, np.ndarray],
+        float,
+        bool,
+        bool,
+        Dict[str, Any],
+    ]:
         """
-        환경의 1-slot 진행 함수로, Fast-timescale 진행을 담당.
+        환경의 1-slot transition.
+
+        info_level:
+            "full":
+                실제 training/evaluation용 전체 diagnostic info를 생성한다.
+
+            "forecast":
+                Slow-DPP shadow rollout에 필요한 최소 정보만 생성한다.
+                physical transition, reward, mobility, queue, battery 동작은
+                full 경로와 완전히 동일하다.
         """
+        if info_level not in {"full", "forecast"}:
+            raise ValueError(
+                "info_level must be 'full' or 'forecast', "
+                f"got {info_level!r}."
+            )
         fast_act = parse_fast_action(action, self.cfg)
 
         fast_act.rsu_user_distance = self.rsu_user_distance.copy()
@@ -1266,6 +1739,10 @@ class Env:
         prev_round_slot = int(self.round_slot)
 
         prev_user_region = self.user_region.copy()
+        prev_user_position_m = self.user_position_m.copy()
+        prev_user_speed_mps = self.user_speed_mps.copy()
+        prev_rsu_user_distance = self.rsu_user_distance.copy()
+        prev_uav_user_distance = self.uav_user_distance.copy()
         prev_connection_state = self._get_user_node_connection_state()
 
         prev_E = self.E.copy()
@@ -1324,8 +1801,11 @@ class Env:
                 mu_active=mu_active,
                 mode=mode,
                 links=links,
+                compact=(info_level == "forecast"),
             )
-            battery_info_u["mode"] = str(mode.value)
+
+            if info_level == "full":
+                battery_info_u["mode"] = str(mode.value)
             battery_step_info.append(battery_info_u)
         
         # delivery 총계산
@@ -1392,22 +1872,58 @@ class Env:
         else:
             truncated = bool(next_t >= int(self.cfg.episode_slots))
 
-        reward, reward_components = self._compute_reward(
-            prev_Q=prev_Q,
-            next_Q=self.queue,
-            prev_Z=prev_Z,
-            next_Z=self.Z,
-            prev_E=prev_E,
-            next_E=self.E,
-            prev_Y=prev_B,
-            next_Y=self.Y,
-            delivered_total_per_user=admitted_total_per_user,
-            quality_total_per_user=admitted_quality_total_per_user,
-            uav_hiring=self.uav_hiring,
-            charging_state=self.charging_state,
-            battery_step_info=battery_step_info,
-            is_round_boundary=is_round_boundary,
-        )
+        if info_level == "forecast":
+            reward, compact_fast_components = (
+                self._compute_fast_reward(
+                    prev_Q=prev_Q,
+                    next_Q=self.queue,
+                    prev_Z=prev_Z,
+                    next_Z=self.Z,
+                    prev_E=prev_E,
+                    next_E=self.E,
+                    prev_Y=prev_B,
+                    next_Y=self.Y,
+                    delivered_total_per_user=(
+                        admitted_total_per_user
+                    ),
+                    quality_total_per_user=(
+                        admitted_quality_total_per_user
+                    ),
+                    uav_hiring=self.uav_hiring,
+                    charging_state=self.charging_state,
+                    battery_step_info=battery_step_info,
+                    compact=True,
+                )
+            )
+
+            one_slot_dpp_cost = float(
+                compact_fast_components[
+                    "one_slot_dpp_cost"
+                ]
+            )
+        else:
+            reward, reward_components = (
+                self._compute_reward(
+                    prev_Q=prev_Q,
+                    next_Q=self.queue,
+                    prev_Z=prev_Z,
+                    next_Z=self.Z,
+                    prev_E=prev_E,
+                    next_E=self.E,
+                    prev_Y=prev_B,
+                    next_Y=self.Y,
+                    delivered_total_per_user=(
+                        admitted_total_per_user
+                    ),
+                    quality_total_per_user=(
+                        admitted_quality_total_per_user
+                    ),
+                    uav_hiring=self.uav_hiring,
+                    charging_state=self.charging_state,
+                    battery_step_info=battery_step_info,
+                    is_round_boundary=is_round_boundary,
+                )
+            )
 
         # round state update
         if is_round_boundary:
@@ -1416,7 +1932,41 @@ class Env:
             self.round_idx = int(next_round_idx)
             self.round_slot = int(next_round_slot)
 
-        region_info = self._update_user_region()
+        region_info = self._update_user_mobility()
+        obs = self.get_fast_obs()
+
+        if info_level == "forecast":
+            if not np.isclose(
+                one_slot_dpp_cost,
+                -float(reward),
+                rtol=1e-6,
+                atol=1e-4,
+            ):
+                raise RuntimeError(
+                    "Forecast reward/DPP identity mismatch: "
+                    f"reward={reward}, "
+                    f"cost={one_slot_dpp_cost}"
+                )
+
+            return (
+                obs,
+                float(reward),
+                bool(terminated),
+                bool(truncated),
+                {
+                    "is_round_boundary": bool(
+                        is_round_boundary
+                    ),
+                    "one_slot_dpp_cost": float(
+                        one_slot_dpp_cost
+                    ),
+                    "has_outage": bool(
+                        np.any(
+                            self.outage > 0
+                        )
+                    ),
+                },
+            )
 
         next_connection_state = self._get_user_node_connection_state()
 
@@ -1448,6 +1998,14 @@ class Env:
             # mobility
             "prev_user_region": prev_user_region.copy(),
             "next_user_region": self.user_region.copy(),
+            "prev_user_position_m": prev_user_position_m.copy(),
+            "next_user_position_m": self.user_position_m.copy(),
+            "prev_user_speed_mps": prev_user_speed_mps.copy(),
+            "next_user_speed_mps": self.user_speed_mps.copy(),
+            "prev_rsu_user_distance": prev_rsu_user_distance.copy(),
+            "next_rsu_user_distance": self.rsu_user_distance.copy(),
+            "prev_uav_user_distance": prev_uav_user_distance.copy(),
+            "next_uav_user_distance": self.uav_user_distance.copy(),
             "region_info": region_info,
 
             # queue transition
@@ -1538,6 +2096,5 @@ class Env:
             },
         }
 
-        obs = self.get_fast_obs()
 
         return obs, float(reward), terminated, truncated, info

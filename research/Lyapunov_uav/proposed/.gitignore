@@ -1,1 +1,10 @@
 /fast/
+/joint/
+/eval/
+/logs/
+outputs/
+/.runtime-cache/
+/matplotlib-*/
+
+__pycache__/
+*.py[cod]

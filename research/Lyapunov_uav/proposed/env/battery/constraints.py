@@ -41,7 +41,7 @@ def validate_links(links: List[CommLinkInput],) -> List[CommLinkInput]:
         delivered_layers = max(0, int(link.delivered_layers))
         payload_bits = max(0.0, float(link.payload_bits))
         channel_gain = max(0.0, float(link.channel_gain))
-        noise_power = max(1e-12, float(link.noise_power))
+        noise_power = max(1e-30, float(link.noise_power))
 
         tx_power = None if link.tx_power is None else max(0.0, float(link.tx_power))
         link_capacity_bps = max(0.0, float(link.link_capacity_bps))

@@ -100,8 +100,9 @@ class UAVChannelModel(BaseChannelModel):
             return 0.0
 
         denominator = max(
-            1e-12,
-            float(self.receiver_noise_power) * float(self.capacity_gap),
+            1e-30,
+            float(self.receiver_noise_power)
+            * float(self.capacity_gap),
         )
         return float(tx_power * gain / denominator)
 
