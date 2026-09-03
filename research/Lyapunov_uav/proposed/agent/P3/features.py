@@ -5,7 +5,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from config_p3 import P3Config
-from env.p3.battery import active_frame_energy_required_j
+from env.p3.battery import activation_energy_required_j
 from env.p3.types import P3State, RegionAction
 
 
@@ -35,11 +35,7 @@ def build_state_features(
         (max(z_values) if z_values else 0.0) / cfg.large_queue_level,
         float(
             state.battery_j[region]
-            < active_frame_energy_required_j(
-                state.uav_x[region],
-                cfg.depot_x(region),
-                cfg,
-            )
+            < activation_energy_required_j(cfg)
         ),
     ]
 

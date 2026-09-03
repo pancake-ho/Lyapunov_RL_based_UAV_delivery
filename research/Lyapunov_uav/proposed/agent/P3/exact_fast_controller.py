@@ -102,7 +102,6 @@ class ExactFastController:
         fading_by_user: Mapping[int, float],
         battery_j: float,
         remaining_slots_including_current: int,
-        required_end_energy_j: float | None = None,
     ) -> dict[int, FastOption]:
         ordered_users = tuple(sorted(int(user) for user in users))
         if len(ordered_users) > self.cfg.uav_capacity:
@@ -113,7 +112,6 @@ class ExactFastController:
             battery_j,
             remaining_slots_including_current,
             self.cfg,
-            required_end_energy_j,
         )
         option_sets = [
             self.feasible_uav_options(

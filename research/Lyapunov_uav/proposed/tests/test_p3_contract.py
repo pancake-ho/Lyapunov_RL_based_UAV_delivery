@@ -27,14 +27,15 @@ from agent.P3.features import build_candidate_feature_matrix, build_state_featur
 from agent.P3.slow_rollout_controller import SlowRolloutController
 from config_p3 import P3Config
 from env.p3.battery import (
+    activation_energy_required_j,
+    apply_active_slot,
     battery_power_cap_w,
     diagnose_return_to_charge,
-    safe_return_reserve_j,
 )
 from env.p3.environment import (
-    apply_region_result,
     generate_frame_trace,
     simulate_region_frame,
+    update_playback_queue,
 )
 from env.p3.topology import (
     enumerate_region_actions,
@@ -63,6 +64,11 @@ class P3ContractTests(unittest.TestCase):
             replace(self.cfg, uav_capacity=self.cfg.rsu_capacity)
         with self.assertRaises(ValueError):
             replace(self.cfg, candidate_offsets_m=(-100.0, 0.0, 100.0))
+        with self.assertRaises(ValueError):
+            replace(
+                self.cfg,
+                reserve_battery_j=self.cfg.relocation_energy_j - 1.0,
+            )
 
     def test_enumeration_enforces_capacity_and_single_provider(self) -> None:
         users = self.users(0)
@@ -108,9 +114,40 @@ class P3ContractTests(unittest.TestCase):
         self.assertAlmostEqual(actual_cost, brute_cost, places=10)
         self.assertLessEqual(sum(option.power_w for option in result.values()), cap + 1e-12)
 
-    def test_return_to_charge_diagnostic_has_explicit_denominator_event(self) -> None:
+    def test_battery_equations_count_threshold_exactly_once(self) -> None:
+        required = activation_energy_required_j(self.cfg)
+        expected = (
+            self.cfg.reserve_battery_j
+            + self.cfg.frame_slots * self.cfg.hover_energy_per_slot_j
+        )
+        self.assertAlmostEqual(required, expected)
+
+        remaining = 5
+        target_power = 1.25
+        battery = (
+            self.cfg.reserve_battery_j
+            + remaining * self.cfg.hover_energy_per_slot_j
+            + self.cfg.slot_duration_s * target_power / self.cfg.pa_efficiency
+        )
+        cap = battery_power_cap_w(battery, remaining, self.cfg)
+        self.assertAlmostEqual(cap, target_power)
+
+        step = apply_active_slot(
+            battery,
+            target_power,
+            remaining,
+            self.cfg,
+        )
+        expected_consumed = (
+            self.cfg.hover_energy_per_slot_j
+            + self.cfg.slot_duration_s * target_power / self.cfg.pa_efficiency
+        )
+        self.assertAlmostEqual(step.consumed_j, expected_consumed)
+        self.assertAlmostEqual(step.battery_after_j, battery - expected_consumed)
+
+    def test_return_to_charge_diagnostic_checks_pre_return_threshold(self) -> None:
         depot = self.cfg.depot_x(0)
-        away = depot + 50.0
+        away = depot + 60.0
         depleted = diagnose_return_to_charge(
             self.cfg.relocation_energy_j - 1.0,
             away,
@@ -120,8 +157,10 @@ class P3ContractTests(unittest.TestCase):
         )
         self.assertTrue(depleted.is_return_to_charge)
         self.assertTrue(depleted.depletion_before_arrival)
+        self.assertTrue(depleted.reserve_breach_before_charge)
+
         reserve_breach = diagnose_return_to_charge(
-            self.cfg.relocation_energy_j + self.cfg.reserve_battery_j - 1.0,
+            self.cfg.reserve_battery_j - 1.0,
             away,
             depot,
             True,
@@ -130,60 +169,67 @@ class P3ContractTests(unittest.TestCase):
         self.assertFalse(reserve_breach.depletion_before_arrival)
         self.assertTrue(reserve_breach.reserve_breach_before_charge)
 
-    def test_safe_return_reserve_covers_multiframe_path(self) -> None:
-        depot = self.cfg.depot_x(0)
-        required = safe_return_reserve_j(depot + 100.0, depot, self.cfg)
-        expected = (
-            self.cfg.reserve_battery_j
-            + 2.0 * self.cfg.relocation_energy_j
-            + self.cfg.frame_slots * self.cfg.hover_energy_per_slot_j
+        safe = diagnose_return_to_charge(
+            self.cfg.reserve_battery_j,
+            away,
+            depot,
+            True,
+            self.cfg,
         )
-        self.assertAlmostEqual(required, expected)
+        self.assertFalse(safe.depletion_before_arrival)
+        self.assertFalse(safe.reserve_breach_before_charge)
 
-    def test_multiframe_return_records_need_without_stranding(self) -> None:
+    def test_unhired_uav_returns_then_charges_by_equations_4_4_to_4_6(self) -> None:
         depot = self.cfg.depot_x(0)
-        self.state.uav_x[0] = depot + 100.0
-        self.state.battery_j[0] = safe_return_reserve_j(
-            self.state.uav_x[0], depot, self.cfg
-        )
+        self.state.uav_x[0] = depot + 60.0
+        self.state.battery_j[0] = self.cfg.reserve_battery_j
         users = self.users(0)
-        controller = SlowRolloutController(self.cfg)
-
-        first_candidates = controller.candidate_actions(
-            self.state, 0, users, policy="nearest_hotspot", frame=0
+        action = RegionAction(
+            region=0,
+            hired=0,
+            point_index=-1,
+            rsu_users=tuple(users[: self.cfg.rsu_capacity]),
+            uav_users=tuple(),
         )
-        first = first_candidates.actions[0]
-        self.assertEqual(first.target_x(self.cfg), depot + 50.0)
-        self.assertFalse(first.uav_users)
-        first_result = simulate_region_frame(
+        result = simulate_region_frame(
             self.state,
-            first,
+            action,
             users,
             generate_frame_trace(self.cfg, 101),
             self.cfg,
             self.fast,
         )
-        self.assertEqual(first_result.charging_need_events, 1)
-        self.assertEqual(first_result.stranded_before_charge_events, 0)
-        apply_region_result(self.state, 0, users, first_result)
+        expected = min(
+            self.cfg.battery_capacity_j,
+            self.cfg.reserve_battery_j
+            - self.cfg.relocation_energy_j
+            + self.cfg.frame_slots * self.cfg.charge_energy_per_slot_j,
+        )
+        self.assertAlmostEqual(result.battery_after_j, expected)
+        self.assertEqual(result.return_to_charge_events, 1)
+        self.assertEqual(result.precharge_depletion_events, 0)
+        self.assertEqual(result.precharge_reserve_breach_events, 0)
+        self.assertEqual(result.charging_slots, self.cfg.frame_slots)
 
-        second_candidates = controller.candidate_actions(
-            self.state, 0, users, policy="nearest_hotspot", frame=1
-        )
-        second = second_candidates.actions[0]
-        self.assertEqual(second.hired, 0)
-        second_result = simulate_region_frame(
-            self.state,
-            second,
-            users,
-            generate_frame_trace(self.cfg, 102),
-            self.cfg,
-            self.fast,
-        )
-        self.assertEqual(second_result.charging_need_events, 1)
-        self.assertEqual(second_result.return_to_charge_events, 1)
-        self.assertEqual(second_result.precharge_depletion_events, 0)
-        self.assertEqual(second_result.precharge_reserve_breach_events, 0)
+    def test_queue_update_preserves_virtual_queue_identity(self) -> None:
+        cases = ((0.0, 0.0), (0.4, 1.0), (5.0, 1.0), (100.5, 0.0))
+        for queue_before, delivered in cases:
+            queue_after, z_before, z_after, actual_departure = (
+                update_playback_queue(queue_before, delivered, self.cfg)
+            )
+            self.assertAlmostEqual(
+                queue_after,
+                max(queue_before - self.cfg.playback_chunks_per_slot, 0.0)
+                + delivered,
+            )
+            self.assertAlmostEqual(
+                z_after,
+                z_before + actual_departure - delivered,
+            )
+            self.assertAlmostEqual(
+                z_after,
+                self.cfg.large_queue_level - queue_after,
+            )
 
     def test_frame_tracks_quality_switch_and_distance_accounting(self) -> None:
         users = self.users(0)

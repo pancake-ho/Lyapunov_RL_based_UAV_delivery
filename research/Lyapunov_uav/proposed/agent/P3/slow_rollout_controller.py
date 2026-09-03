@@ -174,16 +174,15 @@ class SlowRolloutController:
             return actions
         no_hire = [action for action in actions if action.hired == 0]
         hired = [action for action in actions if action.hired == 1]
-        emergency_return = self._emergency_return_actions(hired, state, region)
         if policy == "rsu_only":
-            return no_hire or emergency_return
+            return no_hire
         if policy == "always_hire":
             return hired or no_hire
         if policy == "load_threshold":
             return (
                 (hired or no_hire)
                 if len(region_users) > self.cfg.rsu_capacity
-                else (no_hire or emergency_return)
+                else no_hire
             )
         if policy == "fixed_rsu":
             points = self.cfg.candidate_points(region)
@@ -192,7 +191,7 @@ class SlowRolloutController:
                 key=lambda index: abs(points[index] - self.cfg.rsu_x(region)),
             )
             fixed = [action for action in hired if action.point_index == center]
-            return fixed or no_hire or emergency_return
+            return fixed or no_hire
         if policy == "nearest_hotspot":
             if not region_users:
                 return no_hire
@@ -200,42 +199,8 @@ class SlowRolloutController:
             points = self.cfg.candidate_points(region)
             nearest = min(range(len(points)), key=lambda index: abs(points[index] - hotspot))
             selected = [action for action in hired if action.point_index == nearest]
-            return selected or no_hire or emergency_return
+            return selected or no_hire
         raise ValueError(f"unknown policy: {policy}")
-
-    def _emergency_return_actions(
-        self,
-        hired_actions: Sequence[RegionAction],
-        state: P3State,
-        region: int,
-    ) -> list[RegionAction]:
-        """Keep heuristic baselines viable during a multi-frame depot return.
-
-        A UAV farther than one control interval from the depot cannot switch
-        directly to the no-hire/charging action.  If a heuristic's requested
-        point is no longer battery-feasible, take the closest feasible point
-        toward the depot with no UAV association.  This is a safety fallback,
-        not an additional optimization policy.
-        """
-
-        depot = self.cfg.depot_x(region)
-        previous_distance = abs(float(state.uav_x[region]) - depot)
-        returnward = [
-            action
-            for action in hired_actions
-            if not action.uav_users
-            and abs(action.target_x(self.cfg) - depot) < previous_distance - 1e-9
-        ]
-        if not returnward:
-            return []
-        closest = min(
-            abs(action.target_x(self.cfg) - depot) for action in returnward
-        )
-        return [
-            action
-            for action in returnward
-            if abs(abs(action.target_x(self.cfg) - depot) - closest) <= 1e-9
-        ]
 
     def _prune_actions(
         self,

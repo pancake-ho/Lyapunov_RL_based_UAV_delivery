@@ -7,15 +7,12 @@ import numpy as np
 from agent.P3.exact_fast_controller import ExactFastController
 from config_p3 import P3Config
 from env.p3.battery import (
-    active_frame_energy_required_j,
+    activation_energy_required_j,
     apply_active_slot,
     apply_relocation,
     apply_unhired_slot,
     battery_power_cap_w,
     diagnose_return_to_charge,
-    relocation_energy_j,
-    return_travel_energy_j,
-    safe_return_reserve_j,
 )
 from env.p3.topology import validate_region_action
 from env.p3.types import FastOption, FrameTrace, P3State, RegionAction, RegionFrameResult
@@ -67,6 +64,37 @@ def distance_bin_index(distance_m: float, cfg: P3Config) -> int:
     return int(np.clip(index, 0, cfg.num_distance_bins - 1))
 
 
+def update_playback_queue(
+    queue_before: float,
+    delivered_chunks: float,
+    cfg: P3Config,
+) -> tuple[float, float, float, float]:
+    """Equations (3.9), (3.10), and (3.13), with an exact identity check.
+
+    Returns ``(queue_after, z_before, z_after, actual_departure)``.
+    ``Z`` is deliberately derived from the physical queue instead of stored as
+    an independently drifting state variable.
+    """
+
+    q_before = float(queue_before)
+    delivered = float(delivered_chunks)
+    if q_before < -1e-9 or delivered < -1e-9:
+        raise ValueError("queue and delivered chunks must be non-negative")
+    actual_departure = min(q_before, cfg.playback_chunks_per_slot)
+    queue_after = q_before - actual_departure + delivered
+    z_before = cfg.large_queue_level - q_before
+    z_after = cfg.large_queue_level - queue_after
+    recurrence = z_before + actual_departure - delivered
+    if not np.isclose(z_after, recurrence, rtol=0.0, atol=1e-9):
+        raise RuntimeError("virtual/physical queue identity violation")
+    return (
+        float(queue_after),
+        float(z_before),
+        float(z_after),
+        float(actual_departure),
+    )
+
+
 def simulate_region_frame(
     state: P3State,
     action: RegionAction,
@@ -94,33 +122,11 @@ def simulate_region_frame(
         will_charge=action.hired == 0,
         cfg=cfg,
     )
-    charging_needed = battery < active_frame_energy_required_j(
-        previous_x,
-        cfg.depot_x(action.region),
-        cfg,
-    ) - 1e-9
-    return_energy = return_travel_energy_j(
-        previous_x,
-        cfg.depot_x(action.region),
-        cfg,
-    )
-    stranded_before_charge = bool(
-        charging_needed
-        and abs(previous_x - cfg.depot_x(action.region)) > 1e-9
-        and battery < return_energy - 1e-9
-    )
+    charging_needed = battery < activation_energy_required_j(cfg) - 1e-9
+    stranded_before_charge = return_diag.depletion_before_arrival
     relocation = apply_relocation(battery, previous_x, target_x, cfg)
     battery = relocation.battery_after_j
-    required_end_energy = safe_return_reserve_j(
-        target_x,
-        cfg.depot_x(action.region),
-        cfg,
-    )
-    if action.hired and battery + 1e-9 < active_frame_energy_required_j(
-        target_x,
-        cfg.depot_x(action.region),
-        cfg,
-    ):
+    if action.hired and battery + 1e-9 < activation_energy_required_j(cfg):
         raise RuntimeError("frame activation reserve violation")
 
     dpp_sum = 0.0
@@ -199,7 +205,6 @@ def simulate_region_frame(
                 fading_by_user=fading_by_user,
                 battery_j=battery,
                 remaining_slots_including_current=remaining,
-                required_end_energy_j=required_end_energy,
             )
             options.update(uav_options)
             for user in action.uav_users:
@@ -213,7 +218,6 @@ def simulate_region_frame(
             battery,
             remaining,
             cfg,
-            required_end_energy,
         )
         power_violations += int(total_uav_power > effective_cap + 1e-9)
         provider_violations += sum(int(count > 1) for count in provider_count.values())
@@ -221,11 +225,15 @@ def simulate_region_frame(
         for user in users:
             q_before = float(queue[user])
             z_before = cfg.large_queue_level - q_before
-            actual_departure = min(q_before, cfg.playback_chunks_per_slot)
             option = options.get(user, FastOption())
             delivered = float(option.chunks)
             degradation = float(option.degradation)
             stalled = int(q_before < cfg.playback_chunks_per_slot)
+            q_after, z_before, _, actual_departure = update_playback_queue(
+                q_before,
+                delivered,
+                cfg,
+            )
 
             dpp_sum += (
                 cfg.alpha_z * z_before * (actual_departure - delivered)
@@ -257,10 +265,7 @@ def simulate_region_frame(
                     distance_quality[bin_index] += option.utility
                     distance_power[bin_index] += option.power_w
 
-            queue[user] = max(
-                q_before - cfg.playback_chunks_per_slot,
-                0.0,
-            ) + delivered
+            queue[user] = q_after
 
         if action.hired:
             battery_step = apply_active_slot(
@@ -268,11 +273,10 @@ def simulate_region_frame(
                 total_uav_power,
                 remaining,
                 cfg,
-                required_end_energy,
             )
             battery = battery_step.battery_after_j
             consumed_energy += battery_step.consumed_j
-            required_after = required_end_energy + (
+            required_after = cfg.reserve_battery_j + (
                 remaining - 1
             ) * cfg.hover_energy_per_slot_j
             reserve_violations += int(battery + 1e-7 < required_after)

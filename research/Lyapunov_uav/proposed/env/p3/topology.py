@@ -6,7 +6,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from config_p3 import P3Config
-from env.p3.battery import active_frame_energy_required_j, relocation_energy_j
+from env.p3.battery import activation_energy_required_j, relocation_energy_j
 from env.p3.types import P3State, RegionAction
 
 
@@ -130,11 +130,7 @@ def enumerate_region_actions(
             continue
         move_energy = relocation_energy_j(previous_x, point_x, cfg)
         remaining_battery = battery - move_energy
-        if remaining_battery + 1e-9 < active_frame_energy_required_j(
-            point_x,
-            depot,
-            cfg,
-        ):
+        if remaining_battery + 1e-9 < activation_energy_required_j(cfg):
             continue
         # The formulation permits a hired UAV to serve from zero to J^U users.
         for uav_users in powerset_at_most(candidates, cfg.uav_capacity):

@@ -30,11 +30,11 @@ class P3Config:
     vehicle_speed_max_mps: float = 20.0
     uav_max_speed_mps: float = 20.0
     candidate_offsets_m: tuple[float, ...] = (
-        -100.0,
-        -50.0,
+        -60.0,
+        -30.0,
         0.0,
-        50.0,
-        100.0,
+        30.0,
+        60.0,
     )
 
     rsu_capacity: int = 3
@@ -133,6 +133,14 @@ class P3Config:
             raise ValueError("max_chunks_per_slot must be positive")
         if not (0.0 <= self.reserve_battery_j < self.battery_capacity_j):
             raise ValueError("battery reserve is invalid")
+        if self.relocation_energy_j < 0.0:
+            raise ValueError("relocation_energy_j must be non-negative")
+        if self.hovering_power_w < 0.0 or self.charging_power_w < 0.0:
+            raise ValueError("hovering and charging power must be non-negative")
+        if self.reserve_battery_j + 1e-9 < self.relocation_energy_j:
+            raise ValueError(
+                "reserve_battery_j must include the fixed depot-return energy"
+            )
         if not (self.reserve_battery_j <= self.initial_battery_j <= self.battery_capacity_j):
             raise ValueError("initial battery is outside the feasible range")
         if not (0.0 < self.pa_efficiency <= 1.0):
@@ -154,14 +162,16 @@ class P3Config:
             abs(offset) <= 1e-9 for offset in self.candidate_offsets_m
         ):
             raise ValueError("candidate offsets must include the depot offset 0")
-        points = sorted(set(self.candidate_points(0)))
-        if any(
-            right - left > self.reachable_distance_m + 1e-9
-            for left, right in zip(points, points[1:])
-        ):
-            raise ValueError(
-                "candidate point graph must be connected under the relocation limit"
-            )
+        for region in range(self.num_regions):
+            depot = self.depot_x(region)
+            if any(
+                abs(point - depot) > self.reachable_distance_m + 1e-9
+                for point in self.candidate_points(region)
+            ):
+                raise ValueError(
+                    "every candidate point must be directly returnable to the depot "
+                    "within one control interval"
+                )
 
     @property
     def num_users(self) -> int:
