@@ -91,6 +91,7 @@ class P3Config:
     ppo_value_coef: float = 0.50
     ppo_entropy_coef: float = 0.01
     ppo_max_grad_norm: float = 0.50
+    ppo_target_kl: float = 0.015
     ppo_update_epochs: int = 4
     ppo_batch_size: int = 64
     ppo_reward_scale: float = 1e-3
@@ -147,6 +148,8 @@ class P3Config:
             raise ValueError("the final distance bin edge must be infinity")
         if not (0.0 < self.ppo_reward_scale):
             raise ValueError("ppo_reward_scale must be positive")
+        if self.ppo_target_kl <= 0.0:
+            raise ValueError("ppo_target_kl must be positive")
         if not self.candidate_offsets_m or not any(
             abs(offset) <= 1e-9 for offset in self.candidate_offsets_m
         ):

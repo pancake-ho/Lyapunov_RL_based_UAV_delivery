@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -185,9 +186,12 @@ class PPOAgent:
             dtype=np.int64,
         )
 
-        losses: list[tuple[float, float, float, float, float]] = []
+        losses: list[tuple[float, float, float, float, float, float, float, float]] = []
         total = len(transitions)
+        epochs_completed = 0
+        stopped_by_kl = False
         for _ in range(self.cfg.ppo_update_epochs):
+            epoch_kls: list[float] = []
             permutation = np.random.permutation(total)
             for start in range(0, total, self.cfg.ppo_batch_size):
                 indices = permutation[start : start + self.cfg.ppo_batch_size]
@@ -216,7 +220,15 @@ class PPOAgent:
                 distribution = Categorical(logits=logits)
                 new_log = distribution.log_prob(selected)
                 entropy = distribution.entropy().mean()
+                candidate_counts = mask.sum(dim=1).to(dtype=torch.float32)
+                entropy_scale = torch.log(candidate_counts).clamp_min(1e-8)
+                normalized_entropy = (
+                    distribution.entropy() / entropy_scale
+                ).mean()
                 ratio = torch.exp(new_log - old_log)
+                clip_fraction = torch.mean(
+                    (torch.abs(ratio - 1.0) > self.cfg.ppo_clip_ratio).float()
+                )
                 unclipped = ratio * advantage
                 clipped = torch.clamp(
                     ratio,
@@ -231,6 +243,10 @@ class PPOAgent:
                     + self.cfg.ppo_value_coef * value_loss
                     - self.cfg.ppo_entropy_coef * entropy
                 )
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        "non-finite PPO loss; aborting before optimizer step"
+                    )
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -238,8 +254,13 @@ class PPOAgent:
                     self.network.parameters(),
                     self.cfg.ppo_max_grad_norm,
                 )
+                if not torch.isfinite(grad_norm):
+                    raise FloatingPointError(
+                        "non-finite PPO gradient norm; aborting optimizer step"
+                    )
                 self.optimizer.step()
                 approx_kl = torch.mean(old_log - new_log).detach()
+                epoch_kls.append(float(approx_kl.item()))
                 losses.append(
                     (
                         float(loss.detach().item()),
@@ -247,15 +268,38 @@ class PPOAgent:
                         float(value_loss.detach().item()),
                         float(entropy.detach().item()),
                         float(approx_kl.item()),
+                        float(normalized_entropy.detach().item()),
+                        float(clip_fraction.detach().item()),
+                        float(grad_norm.detach().item()),
                     )
                 )
+            epochs_completed += 1
+            mean_epoch_kl = float(np.mean(epoch_kls)) if epoch_kls else 0.0
+            if mean_epoch_kl > self.cfg.ppo_target_kl:
+                stopped_by_kl = True
+                break
         matrix = np.asarray(losses, dtype=np.float64)
+        old_values = np.asarray(
+            [transition.old_value for transition in transitions], dtype=np.float32
+        )
+        return_variance = float(np.var(returns))
+        explained_variance = (
+            1.0 - float(np.var(returns - old_values)) / return_variance
+            if return_variance > 1e-12
+            else 0.0
+        )
         return {
             "loss": float(matrix[:, 0].mean()),
             "policy_loss": float(matrix[:, 1].mean()),
             "value_loss": float(matrix[:, 2].mean()),
             "entropy": float(matrix[:, 3].mean()),
             "approx_kl": float(matrix[:, 4].mean()),
+            "normalized_entropy": float(matrix[:, 5].mean()),
+            "clip_fraction": float(matrix[:, 6].mean()),
+            "grad_norm": float(matrix[:, 7].mean()),
+            "explained_variance": explained_variance,
+            "update_epochs_completed": float(epochs_completed),
+            "stopped_by_kl": float(stopped_by_kl),
             "transitions": float(total),
         }
 
@@ -279,15 +323,21 @@ class PPOAgent:
 
     def save(self, path: Path, metadata: dict | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "model_state_dict": self.network.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "config": asdict(self.cfg),
-                "metadata": metadata or {},
-            },
-            path,
-        )
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            torch.save(
+                {
+                    "model_state_dict": self.network.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "config": asdict(self.cfg),
+                    "metadata": metadata or {},
+                },
+                temporary,
+            )
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def load(self, path: Path, load_optimizer: bool = False) -> dict:
         try:
