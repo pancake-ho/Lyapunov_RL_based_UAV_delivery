@@ -16,6 +16,7 @@ readonly EVAL_PROGRESS_INTERVAL="${EVAL_PROGRESS_INTERVAL:-10}"
 readonly EVAL_DEVICE="${EVAL_DEVICE:-cpu}"
 readonly EVAL_SELECTION_WORKERS="${EVAL_SELECTION_WORKERS:-4}"
 readonly MAX_PARALLEL="${MAX_PARALLEL:-2}"
+readonly MAX_SUBMITTED_JOBS="${MAX_SUBMITTED_JOBS:-10}"
 
 cd "$PROJECT_DIR"
 if ! command -v sbatch >/dev/null ||
@@ -41,12 +42,18 @@ if ! [[ "$EVAL_SELECTION_WORKERS" =~ ^[1-9][0-9]*$ ]] || (( EVAL_SELECTION_WORKE
     exit 2
 fi
 
-# This workflow needs both available submission slots at once: one preflight
-# job and one dependent worker array.  Fail before submitting anything so a
-# partial dependency chain cannot be left behind.
-existing_job_ids="$(squeue -h -u "$USER" -o '%A' | sort -u)"
-if [[ -n "$existing_job_ids" ]]; then
-    echo "The evaluation needs both MaxSubmitJobsPU=2 slots, but jobs already exist:" >&2
+# Seraph counts every array element toward MaxSubmitPU.  This workflow submits
+# one preflight job plus MAX_PARALLEL long-lived array workers, never 80 array
+# elements.  Check the accounting limit before creating a partial chain.
+existing_job_count="$(
+    squeue -h -r -u "$USER" -o '%i' \
+        | sed '/^[[:space:]]*$/d' \
+        | sort -u \
+        | wc -l
+)"
+required_submit_slots="$((1 + MAX_PARALLEL))"
+if (( existing_job_count + required_submit_slots > MAX_SUBMITTED_JOBS )); then
+    echo "Insufficient MaxSubmitPU slots: existing=$existing_job_count required=$required_submit_slots limit=$MAX_SUBMITTED_JOBS" >&2
     squeue -u "$USER" -o '%.18i %.12P %.24j %.2t %.10M %.10l %R' >&2
     exit 2
 fi
@@ -54,19 +61,20 @@ fi
 seed_count="$(awk -F: '{print NF}' <<< "$EVAL_SEEDS")"
 policy_count="$(awk -F: '{print NF}' <<< "$EVAL_BASELINE_POLICIES")"
 task_count="$((seed_count * (policy_count + 2)))"
-last_task="$((task_count - 1))"
+last_worker="$((MAX_PARALLEL - 1))"
 mkdir -p logs "$EVAL_ROOT"
 
 export PROJECT_DIR BEST_CHECKPOINT LATEST_CHECKPOINT EVAL_ROOT
 export EVAL_SEEDS EVAL_BASELINE_POLICIES EVAL_FRAMES EVAL_ROLLOUTS
 export EVAL_PROGRESS_INTERVAL EVAL_DEVICE EVAL_SELECTION_WORKERS
+export EVAL_JOB_WORKERS="$MAX_PARALLEL"
 
 preflight_submission="$(sbatch --parsable --export=ALL run/submit_p3_eval_preflight.sbatch)"
 preflight_job="${preflight_submission%%;*}"
 if ! array_submission="$(
     sbatch --parsable \
         --dependency="afterok:$preflight_job" \
-        --array="0-${last_task}%${MAX_PARALLEL}" \
+        --array="0-${last_worker}%${MAX_PARALLEL}" \
         --export=ALL \
         run/submit_p3_eval.sbatch
 )"; then
@@ -87,7 +95,9 @@ array_job="${array_submission%%;*}"
     echo "rollouts=$EVAL_ROLLOUTS"
     echo "selection_workers=$EVAL_SELECTION_WORKERS"
     echo "tasks=$task_count"
-    echo "max_parallel=$MAX_PARALLEL"
+    echo "job_workers=$MAX_PARALLEL"
+    echo "tasks_per_worker=$(((task_count + MAX_PARALLEL - 1) / MAX_PARALLEL))"
+    echo "submitted_slots=$required_submit_slots"
     echo "preflight_job=$preflight_job"
     echo "array_job=$array_job"
     echo "aggregate_mode=final_completed_array_task"

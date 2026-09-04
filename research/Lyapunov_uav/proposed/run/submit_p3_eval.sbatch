@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=6G
-#SBATCH --time=0-08:00:00
+#SBATCH --time=1-00:00:00
 #SBATCH --output=logs/p3-eval-%A_%a.out
 #SBATCH --error=logs/p3-eval-%A_%a.err
 
@@ -22,16 +22,17 @@ readonly EVAL_ROLLOUTS="${EVAL_ROLLOUTS:-4}"
 readonly EVAL_PROGRESS_INTERVAL="${EVAL_PROGRESS_INTERVAL:-10}"
 readonly EVAL_DEVICE="${EVAL_DEVICE:-cpu}"
 readonly EVAL_SELECTION_WORKERS="${EVAL_SELECTION_WORKERS:-4}"
+readonly EVAL_JOB_WORKERS="${EVAL_JOB_WORKERS:-2}"
 readonly BEST_CHECKPOINT="${BEST_CHECKPOINT:?BEST_CHECKPOINT must be exported}"
 readonly LATEST_CHECKPOINT="${LATEST_CHECKPOINT:?LATEST_CHECKPOINT must be exported}"
-readonly TASK_INDEX="${SLURM_ARRAY_TASK_ID:?submit this file as a Slurm array}"
+readonly WORKER_INDEX="${SLURM_ARRAY_TASK_ID:?submit this file as a Slurm array}"
 
 started_epoch="$(date +%s)"
 on_exit() {
     local exit_code="$?"
     local finished_epoch
     finished_epoch="$(date +%s)"
-    echo "[SBATCH-END] job=${SLURM_JOB_ID:-unknown} task=$TASK_INDEX exit=$exit_code runtime=$((finished_epoch - started_epoch))s"
+    echo "[SBATCH-END] job=${SLURM_JOB_ID:-unknown} worker=$WORKER_INDEX exit=$exit_code runtime=$((finished_epoch - started_epoch))s"
     trap - EXIT
     exit "$exit_code"
 }
@@ -49,6 +50,11 @@ if [[ ! -f "$BEST_CHECKPOINT" || ! -f "$LATEST_CHECKPOINT" ]]; then
     echo "Missing PPO checkpoint(s): best=$BEST_CHECKPOINT latest=$LATEST_CHECKPOINT" >&2
     exit 2
 fi
+if ! [[ "$EVAL_JOB_WORKERS" =~ ^[1-9][0-9]*$ ]] ||
+    (( WORKER_INDEX < 0 || WORKER_INDEX >= EVAL_JOB_WORKERS )); then
+    echo "Invalid worker assignment: index=$WORKER_INDEX count=$EVAL_JOB_WORKERS" >&2
+    exit 2
+fi
 
 cd "$PROJECT_DIR"
 mkdir -p logs "$EVAL_ROOT"
@@ -59,12 +65,13 @@ export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-echo "[SBATCH-START] timestamp=$(date --iso-8601=seconds) job=${SLURM_JOB_ID:-unknown} array=${SLURM_ARRAY_JOB_ID:-unknown} task=$TASK_INDEX host=$(hostname)"
+echo "[SBATCH-START] timestamp=$(date --iso-8601=seconds) job=${SLURM_JOB_ID:-unknown} array=${SLURM_ARRAY_JOB_ID:-unknown} worker=$WORKER_INDEX/$EVAL_JOB_WORKERS host=$(hostname)"
 echo "[SBATCH-START] branch=$(git branch --show-current 2>/dev/null || echo unknown) commit=$(git rev-parse HEAD 2>/dev/null || echo unknown) dirty_files=$(git status --short 2>/dev/null | wc -l)"
 echo "[SBATCH-START] root=$EVAL_ROOT frames=$EVAL_FRAMES rollouts=$EVAL_ROLLOUTS selection_workers=$EVAL_SELECTION_WORKERS device=$EVAL_DEVICE"
 
 python -u -m run.p3_eval_shard \
-    --task-index "$TASK_INDEX" \
+    --worker-index "$WORKER_INDEX" \
+    --worker-count "$EVAL_JOB_WORKERS" \
     --seeds "$EVAL_SEEDS" \
     --baseline-policies "$EVAL_BASELINE_POLICIES" \
     --frames "$EVAL_FRAMES" \
@@ -78,9 +85,8 @@ python -u -m run.p3_eval_shard \
     --fail-on-hard-violation \
     --output "$EVAL_ROOT"
 
-# MaxSubmitJobsPU=2 permits only preflight + worker array.  Every completed
-# shard checks under one filesystem lock whether it is the final shard; only
-# the final one performs the strict aggregate.  Incomplete checks return 0.
+# The two long-lived workers each process a balanced strided half of the 80
+# evaluation tasks.  The worker finishing last performs the strict aggregate.
 (
     flock 9
     python -u -m run.p3_eval_aggregate \

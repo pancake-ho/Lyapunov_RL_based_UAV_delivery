@@ -11,6 +11,7 @@ from run.p3_eval_shard import (
     DEFAULT_BASELINE_POLICIES,
     DEFAULT_SEEDS,
     EvalTask,
+    assigned_task_indices,
     artifact_paths,
     build_eval_tasks,
     is_complete,
@@ -34,6 +35,18 @@ class P3EvalPipelineTests(unittest.TestCase):
             self.assertIn(("ppo_latest", "ppo", seed), triples)
             for policy in DEFAULT_BASELINE_POLICIES:
                 self.assertIn(("baselines", policy, seed), triples)
+
+    def test_two_long_lived_workers_cover_tasks_once_and_balance_policies(self) -> None:
+        tasks = build_eval_tasks(DEFAULT_SEEDS, DEFAULT_BASELINE_POLICIES)
+        left = assigned_task_indices(len(tasks), worker_index=0, worker_count=2)
+        right = assigned_task_indices(len(tasks), worker_index=1, worker_count=2)
+        self.assertEqual(len(left), 40)
+        self.assertEqual(len(right), 40)
+        self.assertEqual(set(left).intersection(right), set())
+        self.assertEqual(set(left).union(right), set(range(80)))
+        for policy in DEFAULT_BASELINE_POLICIES:
+            self.assertEqual(sum(tasks[index].policy == policy for index in left), 5)
+            self.assertEqual(sum(tasks[index].policy == policy for index in right), 5)
 
     def test_list_parser_supports_shell_safe_colon_lists(self) -> None:
         self.assertEqual(parse_list("3026:3027:3028", int), (3026, 3027, 3028))

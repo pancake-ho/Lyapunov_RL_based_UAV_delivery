@@ -97,6 +97,24 @@ def build_eval_tasks(
     return tuple(tasks)
 
 
+def assigned_task_indices(
+    task_count: int,
+    worker_index: int,
+    worker_count: int,
+) -> tuple[int, ...]:
+    """Return a deterministic, balanced strided assignment for one worker."""
+
+    if task_count <= 0:
+        raise ValueError("task_count must be positive")
+    if worker_count <= 0:
+        raise ValueError("worker_count must be positive")
+    if not 0 <= worker_index < worker_count:
+        raise ValueError(
+            f"worker_index must be in [0, {worker_count - 1}], got {worker_index}"
+        )
+    return tuple(range(worker_index, task_count, worker_count))
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -403,7 +421,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=":".join(DEFAULT_BASELINE_POLICIES),
         help="comma- or colon-separated non-PPO policies",
     )
-    parser.add_argument("--task-index", type=int, default=0)
+    task_group = parser.add_mutually_exclusive_group()
+    task_group.add_argument("--task-index", type=int)
+    task_group.add_argument(
+        "--worker-index",
+        type=int,
+        help="run this worker's strided share of the complete task matrix",
+    )
+    parser.add_argument(
+        "--worker-count",
+        type=int,
+        default=1,
+        help="number of long-lived Slurm workers sharing the task matrix",
+    )
     parser.add_argument("--print-task-count", action="store_true")
     parser.add_argument("--frames", type=int, default=400)
     parser.add_argument("--rollouts", type=int, default=4)
@@ -452,9 +482,32 @@ def main() -> None:
         parser.error(
             "frames, rollouts, progress-interval, and selection-workers must be positive"
         )
-    if not 0 <= args.task_index < len(tasks):
-        parser.error(f"task-index must be in [0, {len(tasks) - 1}]")
-    raise SystemExit(run_task(args, tasks[args.task_index]))
+    if args.worker_index is not None:
+        try:
+            task_indices = assigned_task_indices(
+                len(tasks),
+                args.worker_index,
+                args.worker_count,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    else:
+        task_index = 0 if args.task_index is None else args.task_index
+        if not 0 <= task_index < len(tasks):
+            parser.error(f"task-index must be in [0, {len(tasks) - 1}]")
+        task_indices = (task_index,)
+
+    for position, task_index in enumerate(task_indices, start=1):
+        task = tasks[task_index]
+        print(
+            f"[WORKER-TASK] worker={args.worker_index} "
+            f"position={position}/{len(task_indices)} task_index={task_index} "
+            f"group={task.group} policy={task.policy} seed={task.seed}",
+            flush=True,
+        )
+        exit_code = run_task(args, task)
+        if exit_code:
+            raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

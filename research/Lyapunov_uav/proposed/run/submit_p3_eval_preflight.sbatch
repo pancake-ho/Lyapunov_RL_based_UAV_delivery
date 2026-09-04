@@ -16,6 +16,7 @@ readonly CONDA_SH="${CONDA_SH:-/data/$USER/anaconda3/etc/profile.d/conda.sh}"
 readonly CONDA_ENV="${CONDA_ENV:-lab}"
 readonly EVAL_SEEDS="${EVAL_SEEDS:-3026:3027:3028:3029:3030:3031:3032:3033:3034:3035}"
 readonly EVAL_BASELINE_POLICIES="${EVAL_BASELINE_POLICIES:-dpp:load_threshold:always_hire:fixed_rsu:nearest_hotspot:rsu_only}"
+readonly EVAL_JOB_WORKERS="${EVAL_JOB_WORKERS:-2}"
 readonly BEST_CHECKPOINT="${BEST_CHECKPOINT:?BEST_CHECKPOINT must be exported}"
 readonly LATEST_CHECKPOINT="${LATEST_CHECKPOINT:?LATEST_CHECKPOINT must be exported}"
 
@@ -31,9 +32,14 @@ echo "[PREFLIGHT] branch=$(git branch --show-current) commit=$(git rev-parse HEA
 test -f "$BEST_CHECKPOINT"
 test -f "$LATEST_CHECKPOINT"
 command -v flock >/dev/null
-python -m run.p3_eval_shard \
+task_count="$(python -m run.p3_eval_shard \
     --seeds "$EVAL_SEEDS" \
     --baseline-policies "$EVAL_BASELINE_POLICIES" \
-    --print-task-count
+    --print-task-count)"
+echo "[PREFLIGHT] tasks=$task_count job_workers=$EVAL_JOB_WORKERS"
+if (( EVAL_JOB_WORKERS <= 0 || EVAL_JOB_WORKERS > 2 || EVAL_JOB_WORKERS > task_count )); then
+    echo "Invalid EVAL_JOB_WORKERS=$EVAL_JOB_WORKERS for task_count=$task_count" >&2
+    exit 2
+fi
 python -m unittest discover -s tests -p 'test_p3_*.py' -v
 echo "[PREFLIGHT-DONE]"
