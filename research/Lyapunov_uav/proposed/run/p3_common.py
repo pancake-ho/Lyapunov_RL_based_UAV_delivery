@@ -6,7 +6,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 
@@ -24,6 +24,9 @@ from env.p3.types import RegionAction
 
 if TYPE_CHECKING:
     from agent.P3.ppo_agent import PPOAgent
+
+
+ProgressCallback = Callable[[int, dict], None]
 
 
 @dataclass
@@ -78,11 +81,15 @@ def run_policy(
     policy: str,
     output_dir: Path,
     ppo_agent: "PPOAgent | None" = None,
+    rollout_workers: int = 1,
+    progress_interval_frames: int = 0,
+    progress_callback: ProgressCallback | None = None,
+    write_outputs: bool = True,
 ) -> PolicyRunResult:
     if policy == "ppo" and ppo_agent is None:
         raise ValueError("policy='ppo' requires a loaded PPOAgent")
     state = initialize_state(cfg)
-    controller = SlowRolloutController(cfg)
+    controller = SlowRolloutController(cfg, rollout_workers=rollout_workers)
     frame_rows: list[dict] = []
     total_float = {
         key: 0.0
@@ -319,7 +326,20 @@ def run_policy(
             total_int[key] += frame_int[key]
         quality_hist += frame_quality_hist
         peak_uav_power = max(peak_uav_power, frame_peak_power)
+        processed_frames = frame + 1
+        should_report = (
+            progress_callback is not None
+            and progress_interval_frames > 0
+            and (
+                processed_frames == 1
+                or processed_frames % progress_interval_frames == 0
+                or processed_frames == cfg.num_frames
+            )
+        )
+        if should_report:
+            progress_callback(processed_frames, frame_rows[-1])
 
+    controller.close()
     runtime = time.perf_counter() - started
     total_user_slots = cfg.num_frames * cfg.num_users * cfg.frame_slots
     total_uav_frames = cfg.num_frames * cfg.num_regions
@@ -451,5 +471,6 @@ def run_policy(
         }
         for index in range(cfg.num_quality_levels)
     ]
-    write_csv(output_dir / f"frames_{policy}_seed{cfg.seed}.csv", frame_rows)
+    if write_outputs:
+        write_csv(output_dir / f"frames_{policy}_seed{cfg.seed}.csv", frame_rows)
     return PolicyRunResult(summary, frame_rows, distance_rows, point_rows, quality_rows)

@@ -19,6 +19,8 @@ from run.p3_common import PolicyRunResult, run_policy, safe_ratio, write_csv
 POLICY_LABELS = {
     "dpp": "Structured rollout",
     "ppo": "PPO + exact fast",
+    "ppo_best": "PPO best checkpoint",
+    "ppo_latest": "PPO latest checkpoint",
     "always_hire": "Always hire",
     "fixed_rsu": "Fixed at RSU",
     "nearest_hotspot": "Nearest hotspot",
@@ -29,6 +31,8 @@ POLICY_LABELS = {
 POLICY_COLORS = {
     "dpp": "#4472C4",
     "ppo": "#7030A0",
+    "ppo_best": "#7030A0",
+    "ppo_latest": "#A56CC1",
     "always_hire": "#ED7D31",
     "fixed_rsu": "#70AD47",
     "nearest_hotspot": "#5B9BD5",
@@ -279,6 +283,16 @@ def plot_location_distance(
         ("average_quality_utility", "Delivered quality by distance", "average utility"),
         ("average_required_power_w", "Required RF power by distance", "W per served user-slot"),
     )
+    distance_examples = {}
+    for row in distance_rows:
+        distance_examples.setdefault(int(row["bin_index"]), row)
+    distance_labels = []
+    for bin_index in sorted(distance_examples):
+        row = distance_examples[bin_index]
+        left = float(row["distance_left_m"])
+        right = float(row["distance_right_m"])
+        right_text = "inf" if math.isinf(right) else f"{right:g}"
+        distance_labels.append(f"{left:g}-{right_text}")
     for axis, (metric, title, ylabel) in zip(
         (axes[0, 1], axes[1, 0], axes[1, 1]), distance_metrics
     ):
@@ -287,12 +301,6 @@ def plot_location_distance(
             selected.sort(key=lambda row: int(row["bin_index"]))
             if not any(float(row["opportunities"]) > 0.0 for row in selected):
                 continue
-            labels = []
-            for row in selected:
-                left = float(row["distance_left_m"])
-                right = float(row["distance_right_m"])
-                right_text = "inf" if math.isinf(right) else f"{right:g}"
-                labels.append(f"{left:g}-{right_text}")
             values = [
                 float(row[metric]) if float(row["opportunities"]) > 0.0 else math.nan
                 for row in selected
@@ -307,9 +315,16 @@ def plot_location_distance(
         axis.set_title(title)
         axis.set_ylabel(ylabel)
         axis.set_xlabel("horizontal distance bin (m)")
-        axis.set_xticks(np.arange(len(labels)))
-        axis.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
-        axis.legend(fontsize=7)
+        axis.set_xticks(np.arange(len(distance_labels)))
+        axis.set_xticklabels(
+            distance_labels,
+            rotation=20,
+            ha="right",
+            fontsize=8,
+        )
+        handles, legend_labels = axis.get_legend_handles_labels()
+        if handles:
+            axis.legend(handles, legend_labels, fontsize=7)
     fig.suptitle("UAV Position and Distance Effects")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=180)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -43,12 +44,51 @@ class SelectionResult:
     evaluated_count: int
 
 
+def _score_action_batch(
+    state: P3State,
+    actions: tuple[RegionAction, ...],
+    region_users: tuple[int, ...],
+    traces: tuple,
+    cfg: P3Config,
+) -> list[float]:
+    """Evaluate an independent action batch in a worker process."""
+
+    fast_controller = ExactFastController(cfg)
+    return [
+        float(
+            np.mean(
+                [
+                    simulate_region_frame(
+                        state,
+                        action,
+                        region_users,
+                        trace,
+                        cfg,
+                        fast_controller,
+                    ).frame_dpp_cost
+                    for trace in traces
+                ]
+            )
+        )
+        for action in actions
+    ]
+
+
 class SlowRolloutController:
     """Equations (8.2)-(8.3): structured frame-level rollout."""
 
-    def __init__(self, cfg: P3Config) -> None:
+    def __init__(self, cfg: P3Config, rollout_workers: int = 1) -> None:
         self.cfg = cfg
         self.fast_controller = ExactFastController(cfg)
+        self.rollout_workers = int(rollout_workers)
+        if self.rollout_workers <= 0:
+            raise ValueError("rollout_workers must be positive")
+        self._executor: ProcessPoolExecutor | None = None
+
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
 
     def candidate_actions(
         self,
@@ -119,24 +159,15 @@ class SlowRolloutController:
             )
             for scenario in range(self.cfg.rollout_scenarios)
         ]
+        scores = self._score_actions(
+            state,
+            actions,
+            tuple(int(user) for user in region_users),
+            tuple(traces),
+        )
         best_action: RegionAction | None = None
         best_score = math.inf
-        for action in actions:
-            score = float(
-                np.mean(
-                    [
-                        simulate_region_frame(
-                            state,
-                            action,
-                            region_users,
-                            trace,
-                            self.cfg,
-                            self.fast_controller,
-                        ).frame_dpp_cost
-                        for trace in traces
-                    ]
-                )
-            )
+        for action, score in zip(actions, scores):
             if self._is_better(action, score, best_action, best_score):
                 best_action = action
                 best_score = score
@@ -148,6 +179,48 @@ class SlowRolloutController:
             enumerated_count=candidates.enumerated_count,
             evaluated_count=candidates.evaluated_count,
         )
+
+    def _score_actions(
+        self,
+        state: P3State,
+        actions: Sequence[RegionAction],
+        region_users: tuple[int, ...],
+        traces: tuple,
+    ) -> list[float]:
+        actions = tuple(actions)
+        if self.rollout_workers == 1 or len(actions) <= 1:
+            return _score_action_batch(
+                state,
+                actions,
+                region_users,
+                traces,
+                self.cfg,
+            )
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(max_workers=self.rollout_workers)
+        batch_count = min(len(actions), self.rollout_workers * 2)
+        batch_size = int(math.ceil(len(actions) / batch_count))
+        batches = [
+            actions[start : start + batch_size]
+            for start in range(0, len(actions), batch_size)
+        ]
+        futures = [
+            self._executor.submit(
+                _score_action_batch,
+                state,
+                batch,
+                region_users,
+                traces,
+                self.cfg,
+            )
+            for batch in batches
+        ]
+        scores: list[float] = []
+        for future in futures:
+            scores.extend(future.result())
+        if len(scores) != len(actions):
+            raise RuntimeError("parallel rollout returned an invalid score count")
+        return scores
 
     def rollout_seed(self, frame: int, region: int, scenario: int) -> int:
         return int(
