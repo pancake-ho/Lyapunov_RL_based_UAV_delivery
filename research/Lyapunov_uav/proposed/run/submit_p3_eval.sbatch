@@ -77,3 +77,16 @@ python -u -m run.p3_eval_shard \
     --resume \
     --fail-on-hard-violation \
     --output "$EVAL_ROOT"
+
+# MaxSubmitJobsPU=2 permits only preflight + worker array.  Every completed
+# shard checks under one filesystem lock whether it is the final shard; only
+# the final one performs the strict aggregate.  Incomplete checks return 0.
+(
+    flock 9
+    python -u -m run.p3_eval_aggregate \
+        --if-complete \
+        --seeds "$EVAL_SEEDS" \
+        --baseline-policies "$EVAL_BASELINE_POLICIES" \
+        --input "$EVAL_ROOT" \
+        --output "$EVAL_ROOT/aggregate"
+) 9>"$EVAL_ROOT/.aggregate.lock"

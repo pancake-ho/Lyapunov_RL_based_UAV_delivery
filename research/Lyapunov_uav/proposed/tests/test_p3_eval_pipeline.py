@@ -17,6 +17,7 @@ from run.p3_eval_shard import (
     parse_list,
     task_fingerprint,
 )
+from run.p3_eval_aggregate import completed_payloads
 
 
 class P3EvalPipelineTests(unittest.TestCase):
@@ -113,6 +114,17 @@ class P3EvalPipelineTests(unittest.TestCase):
             self.assertFalse(is_complete(paths, changed))
             paths["quality"].unlink()
             self.assertFalse(is_complete(paths, fingerprint))
+
+    def test_aggregate_completion_probe_is_non_destructive(self) -> None:
+        tasks = (
+            EvalTask(group="baselines", policy="rsu_only", seed=3026),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payloads, incomplete = completed_payloads(root, tasks)
+            self.assertEqual(payloads, [])
+            self.assertEqual(incomplete, list(tasks))
+            self.assertEqual(list(root.rglob("*")), [])
 
 
 if __name__ == "__main__":

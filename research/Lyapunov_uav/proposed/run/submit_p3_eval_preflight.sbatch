@@ -30,6 +30,7 @@ echo "[PREFLIGHT] timestamp=$(date --iso-8601=seconds) host=$(hostname)"
 echo "[PREFLIGHT] branch=$(git branch --show-current) commit=$(git rev-parse HEAD) dirty_files=$(git status --short | wc -l)"
 test -f "$BEST_CHECKPOINT"
 test -f "$LATEST_CHECKPOINT"
+command -v flock >/dev/null
 python -m run.p3_eval_shard \
     --seeds "$EVAL_SEEDS" \
     --baseline-policies "$EVAL_BASELINE_POLICIES" \

@@ -18,6 +18,12 @@ readonly EVAL_SELECTION_WORKERS="${EVAL_SELECTION_WORKERS:-4}"
 readonly MAX_PARALLEL="${MAX_PARALLEL:-2}"
 
 cd "$PROJECT_DIR"
+if ! command -v sbatch >/dev/null ||
+    ! command -v squeue >/dev/null ||
+    ! command -v scancel >/dev/null; then
+    echo "Slurm commands sbatch, squeue, and scancel are required" >&2
+    exit 2
+fi
 if [[ "$(git branch --show-current)" != "$EXPECTED_BRANCH" ]]; then
     echo "Expected branch $EXPECTED_BRANCH, got $(git branch --show-current)" >&2
     exit 2
@@ -35,6 +41,16 @@ if ! [[ "$EVAL_SELECTION_WORKERS" =~ ^[1-9][0-9]*$ ]] || (( EVAL_SELECTION_WORKE
     exit 2
 fi
 
+# This workflow needs both available submission slots at once: one preflight
+# job and one dependent worker array.  Fail before submitting anything so a
+# partial dependency chain cannot be left behind.
+existing_job_ids="$(squeue -h -u "$USER" -o '%A' | sort -u)"
+if [[ -n "$existing_job_ids" ]]; then
+    echo "The evaluation needs both MaxSubmitJobsPU=2 slots, but jobs already exist:" >&2
+    squeue -u "$USER" -o '%.18i %.12P %.24j %.2t %.10M %.10l %R' >&2
+    exit 2
+fi
+
 seed_count="$(awk -F: '{print NF}' <<< "$EVAL_SEEDS")"
 policy_count="$(awk -F: '{print NF}' <<< "$EVAL_BASELINE_POLICIES")"
 task_count="$((seed_count * (policy_count + 2)))"
@@ -47,21 +63,18 @@ export EVAL_PROGRESS_INTERVAL EVAL_DEVICE EVAL_SELECTION_WORKERS
 
 preflight_submission="$(sbatch --parsable --export=ALL run/submit_p3_eval_preflight.sbatch)"
 preflight_job="${preflight_submission%%;*}"
-array_submission="$(
+if ! array_submission="$(
     sbatch --parsable \
         --dependency="afterok:$preflight_job" \
         --array="0-${last_task}%${MAX_PARALLEL}" \
         --export=ALL \
         run/submit_p3_eval.sbatch
-)"
+)"; then
+    echo "Worker array submission failed; cancelling orphan preflight $preflight_job" >&2
+    scancel "$preflight_job"
+    exit 1
+fi
 array_job="${array_submission%%;*}"
-aggregate_submission="$(
-    sbatch --parsable \
-        --dependency="afterok:$array_job" \
-        --export=ALL \
-        run/submit_p3_eval_aggregate.sbatch
-)"
-aggregate_job="${aggregate_submission%%;*}"
 
 {
     echo "submitted_at=$(date --iso-8601=seconds)"
@@ -77,7 +90,7 @@ aggregate_job="${aggregate_submission%%;*}"
     echo "max_parallel=$MAX_PARALLEL"
     echo "preflight_job=$preflight_job"
     echo "array_job=$array_job"
-    echo "aggregate_job=$aggregate_job"
+    echo "aggregate_mode=final_completed_array_task"
 } | tee "$EVAL_ROOT/submission.txt"
 
 echo "Monitor with: EVAL_ROOT=$EVAL_ROOT bash run/p3_watch_eval.sh"

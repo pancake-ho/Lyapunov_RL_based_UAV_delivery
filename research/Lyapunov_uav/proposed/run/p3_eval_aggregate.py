@@ -82,6 +82,71 @@ def expected_tasks(
     return tuple(tasks)
 
 
+def completed_payloads(
+    root: Path,
+    tasks: tuple[EvalTask, ...],
+) -> tuple[list[dict], list[EvalTask]]:
+    payloads = []
+    incomplete = []
+    for task in tasks:
+        paths = artifact_paths(root / task.group, task)
+        required = ("frames", "distance", "points", "quality", "summary")
+        if not all(paths[name].is_file() for name in required):
+            incomplete.append(task)
+            continue
+        try:
+            with paths["summary"].open(encoding="utf-8") as stream:
+                payload = json.load(stream)
+        except (OSError, json.JSONDecodeError):
+            incomplete.append(task)
+            continue
+        if payload.get("event") != "completed":
+            incomplete.append(task)
+            continue
+        payloads.append(payload)
+    return payloads, incomplete
+
+
+def aggregate_marker_matches(
+    path: Path,
+    seeds: tuple[int, ...],
+    policies: tuple[str, ...],
+    payloads: list[dict],
+) -> bool:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            marker = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        return False
+    fingerprints = [payload.get("fingerprint", {}) for payload in payloads]
+    source_set = {item.get("source_sha256") for item in fingerprints}
+    frames_set = {int(item.get("frames", -1)) for item in fingerprints}
+    rollouts_set = {int(item.get("rollouts", -1)) for item in fingerprints}
+    checkpoint_sha256 = {
+        group: next(
+            (
+                item.get("checkpoint_sha256")
+                for item in fingerprints
+                if item.get("group") == group
+            ),
+            None,
+        )
+        for group in ("ppo_best", "ppo_latest")
+    }
+    return bool(
+        marker.get("event") == "completed"
+        and marker.get("seeds") == list(seeds)
+        and marker.get("policies") == list(policies)
+        and len(source_set) == 1
+        and marker.get("source_sha256") == next(iter(source_set))
+        and len(frames_set) == 1
+        and marker.get("frames") == next(iter(frames_set))
+        and len(rollouts_set) == 1
+        and marker.get("rollouts") == next(iter(rollouts_set))
+        and marker.get("checkpoint_sha256") == checkpoint_sha256
+    )
+
+
 def load_completed_task(
     root: Path,
     task: EvalTask,
@@ -136,6 +201,11 @@ def main() -> None:
     )
     parser.add_argument("--input", type=Path, default=Path("outputs/p3_eval_final"))
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--if-complete",
+        action="store_true",
+        help="return successfully without aggregation while shards are incomplete",
+    )
     args = parser.parse_args()
 
     try:
@@ -151,6 +221,24 @@ def main() -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    available = set(baseline_policies) | {"ppo_best", "ppo_latest"}
+    policies = tuple(policy for policy in DEFAULT_POLICY_ORDER if policy in available)
+    policies += tuple(sorted(available - set(policies)))
+    tasks = expected_tasks(seeds, baseline_policies)
+    if args.if_complete:
+        payloads, incomplete = completed_payloads(input_root, tasks)
+        if incomplete:
+            print(
+                f"[AGGREGATE-DEFER] completed={len(payloads)}/{len(tasks)} "
+                f"remaining={len(incomplete)}",
+                flush=True,
+            )
+            return
+        marker = output_dir / "experiment.json"
+        if aggregate_marker_matches(marker, seeds, policies, payloads):
+            print(f"[AGGREGATE-SKIP] matching result exists: {marker}", flush=True)
+            return
+
     summaries: list[dict] = []
     distance_rows: list[dict] = []
     point_rows: list[dict] = []
@@ -160,7 +248,6 @@ def main() -> None:
     fingerprints: list[dict] = []
     configs: list[dict] = []
 
-    tasks = expected_tasks(seeds, baseline_policies)
     for task in tasks:
         summary, frames, distance, points, quality, payload = load_completed_task(
             input_root,
@@ -196,9 +283,6 @@ def main() -> None:
             f"frames={frames_set}, rollouts={rollouts_set}, sources={source_set}"
         )
 
-    available = set(baseline_policies) | {"ppo_best", "ppo_latest"}
-    policies = tuple(policy for policy in DEFAULT_POLICY_ORDER if policy in available)
-    policies += tuple(sorted(available - set(policies)))
     expected_pairs = {(policy, seed) for policy in policies for seed in seeds}
     actual_pairs = {(str(row["policy"]), int(row["seed"])) for row in summaries}
     if actual_pairs != expected_pairs:
@@ -210,6 +294,17 @@ def main() -> None:
     distance_aggregate = aggregate_distance(distance_rows, policies)
     point_aggregate = aggregate_points(point_rows, policies)
     quality_aggregate = aggregate_quality(quality_rows, policies)
+    checkpoint_sha256 = {
+        group: next(
+            (
+                item.get("checkpoint_sha256")
+                for item in fingerprints
+                if item.get("group") == group
+            ),
+            None,
+        )
+        for group in ("ppo_best", "ppo_latest")
+    }
 
     write_csv(output_dir / "seed_summaries.csv", summaries)
     write_csv(output_dir / "aggregate_summary.csv", aggregate)
@@ -233,12 +328,14 @@ def main() -> None:
     atomic_write_json(
         output_dir / "experiment.json",
         {
+            "event": "completed",
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "formulation": "P3: one persistent multi-user UAV per RSU region",
             "seeds": list(seeds),
             "frames": next(iter(frames_set)),
             "rollouts": next(iter(rollouts_set)),
             "source_sha256": next(iter(source_set)),
+            "checkpoint_sha256": checkpoint_sha256,
             "selection_workers": sorted(
                 {int(row["selection_workers"]) for row in runtime_rows}
             ),
