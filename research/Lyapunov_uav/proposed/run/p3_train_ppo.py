@@ -24,7 +24,7 @@ from env.p3.environment import (
     simulate_region_frame,
 )
 from env.p3.topology import initialize_state, region_membership, validate_state
-from run.p3_common import run_policy, safe_ratio, write_csv
+from run.p3_common import array_max_or_current, run_policy, safe_ratio, write_csv
 
 
 ProgressCallback = Callable[[int, dict], None]
@@ -254,6 +254,7 @@ def train_episode(
     quality_histogram = np.zeros(cfg.num_quality_levels, dtype=np.float64)
     min_battery_soc = float(np.min(state.battery_j) / cfg.battery_capacity_j)
     peak_uav_total_power_w = 0.0
+    totals["max_queue"] = array_max_or_current(0.0, state.queue)
 
     for frame in range(cfg.num_frames):
         membership = region_membership(state, cfg)
@@ -313,8 +314,8 @@ def train_episode(
             totals["quality_transitions"] += result.quality_transitions
             totals["queue_sum"] += result.queue_sum
             totals["z_sum"] += float(np.sum(result.z_samples))
-            totals["max_queue"] = max(
-                totals["max_queue"], float(np.max(result.queue_samples))
+            totals["max_queue"] = array_max_or_current(
+                totals["max_queue"], result.queue_samples
             )
             totals["large_queue_violation_user_slots"] += (
                 result.large_queue_violation_user_slots
@@ -348,6 +349,9 @@ def train_episode(
 
         advance_mobility_one_frame(state, cfg)
         validate_state(state, cfg)
+        totals["max_queue"] = array_max_or_current(
+            totals["max_queue"], state.queue
+        )
         min_battery_soc = min(
             min_battery_soc,
             float(np.min(state.battery_j) / cfg.battery_capacity_j),

@@ -44,7 +44,7 @@ from env.p3.topology import (
     validate_region_action,
 )
 from env.p3.types import RegionAction
-from run.p3_common import run_policy
+from run.p3_common import array_max_or_current, run_policy
 
 
 class P3ContractTests(unittest.TestCase):
@@ -282,6 +282,30 @@ class P3ContractTests(unittest.TestCase):
         )
         present = set(np.flatnonzero(user_matrix[:, 0] > 0.5).tolist())
         self.assertEqual(present, set(users))
+
+    def test_empty_region_frame_has_safe_queue_statistics(self) -> None:
+        empty_region = 0
+        self.state.user_x[:] = self.cfg.rsu_x(1)
+        users = self.users(empty_region)
+        self.assertEqual(users, [])
+        actions = enumerate_region_actions(
+            self.state, empty_region, users, self.cfg
+        )
+        action = next(candidate for candidate in actions if candidate.hired == 0)
+        result = simulate_region_frame(
+            self.state,
+            action,
+            users,
+            generate_frame_trace(self.cfg, 456),
+            self.cfg,
+            self.fast,
+        )
+        self.assertEqual(result.queue_samples.size, 0)
+        self.assertEqual(result.z_samples.size, 0)
+        self.assertEqual(
+            array_max_or_current(7.0, result.queue_samples),
+            7.0,
+        )
 
     @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is required for PPO tests")
     def test_ppo_features_and_choice_are_feasible(self) -> None:

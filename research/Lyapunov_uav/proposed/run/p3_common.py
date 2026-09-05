@@ -43,6 +43,17 @@ def safe_ratio(numerator: float, denominator: float) -> float:
     return float(numerator / denominator) if denominator > 0.0 else 0.0
 
 
+def array_max_or_current(current: float, values: Sequence[float]) -> float:
+    """Update a running maximum without reducing an empty region array."""
+
+    array = np.asarray(values, dtype=np.float64)
+    if array.size == 0:
+        return float(current)
+    if not np.all(np.isfinite(array)):
+        raise FloatingPointError("running-maximum samples contain non-finite values")
+    return max(float(current), float(np.max(array)))
+
+
 def jain_fairness(values: np.ndarray) -> float:
     values = np.asarray(values, dtype=np.float64)
     denominator = values.size * float(np.sum(values**2))
