@@ -51,7 +51,7 @@ if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || (( MAX_PARALLEL > 2 )); then
     echo "MAX_PARALLEL must be 1 or 2 for the current Seraph QoS" >&2
     exit 2
 fi
-if ! [[ "$EVAL_SELECTION_WORKERS" =~ ^[1-9][0-9]*$ ]] || (( EVAL_SELECTION_WORKERS > 4 )); then
+if ! [[ "$EVAL_SELECTION_WORKERS" =~ ^[1-9][0-9]*$ ]] || (( EVAL_SELECTION_WORKERS > 16 )); then
     echo "EVAL_SELECTION_WORKERS must be between 1 and 4" >&2
     exit 2
 fi
