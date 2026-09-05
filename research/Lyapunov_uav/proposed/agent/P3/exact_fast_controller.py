@@ -13,8 +13,13 @@ from env.p3.types import FastOption
 class ExactFastController:
     """Algorithm 1: exact current-slot controller for small J^U.
 
-    RSU users are separable.  UAV users are coupled by the total RF power cap,
+    RSU users are separable. UAV users are coupled by the total RF power cap,
     so their option product is enumerated exactly as required by Section 7.3.
+
+    The queue-admissibility guard implements the operating condition
+    0 <= Q_n(t) <= Q^e used by the large-Q^e Lyapunov derivation. It does not
+    change the DPP ranking among admissible actions; it only removes chunk
+    choices that would make the next playback queue exceed Q^e.
     """
 
     def __init__(self, cfg: P3Config) -> None:
@@ -28,6 +33,21 @@ class ExactFastController:
             self.cfg.lyapunov_v * degradation - self.cfg.alpha_z * float(z)
         )
 
+    def max_queue_admissible_chunks(self, z: float) -> int:
+        """Largest integer delivery that keeps Q(t+1) <= Q^e.
+
+        Because Z(t)=Q^e-Q(t), the physical queue is reconstructed from Z.
+        Queue dynamics are
+            Q(t+1) = Q(t) - min(Q(t), b) + d(t).
+        """
+        q_before = max(0.0, self.cfg.large_queue_level - float(z))
+        actual_departure = min(q_before, self.cfg.playback_chunks_per_slot)
+        available_room = (
+            self.cfg.large_queue_level - (q_before - actual_departure)
+        )
+        cap = int(math.floor(available_room + 1e-9))
+        return int(max(0, min(self.cfg.max_chunks_per_slot, cap)))
+
     def solve_rsu(
         self,
         z: float,
@@ -37,12 +57,18 @@ class ExactFastController:
         capacity = rsu_link_capacity_bps(horizontal_distance_m, fading, self.cfg)
         best = FastOption()
         fixed_power = self.cfg.rsu_total_power_w / self.cfg.rsu_capacity
+        queue_cap = self.max_queue_admissible_chunks(z)
         for quality_index, (utility, chunk_bits) in enumerate(
             zip(self.cfg.quality_utility, self.cfg.chunk_size_bits)
         ):
             feasible = min(
                 self.cfg.max_chunks_per_slot,
-                int(math.floor(capacity * self.cfg.slot_duration_s / chunk_bits)),
+                queue_cap,
+                int(
+                    math.floor(
+                        capacity * self.cfg.slot_duration_s / chunk_bits
+                    )
+                ),
             )
             for chunks in range(1, feasible + 1):
                 option = FastOption(
@@ -68,8 +94,9 @@ class ExactFastController:
         individual_power_cap_w: float,
     ) -> list[FastOption]:
         options = [FastOption()]
+        queue_cap = self.max_queue_admissible_chunks(z)
         for quality_index, utility in enumerate(self.cfg.quality_utility):
-            for chunks in range(1, self.cfg.max_chunks_per_slot + 1):
+            for chunks in range(1, queue_cap + 1):
                 required = required_uav_power_w(
                     chunks,
                     quality_index,
@@ -77,15 +104,23 @@ class ExactFastController:
                     fading,
                     self.cfg,
                 )
-                if not math.isfinite(required) or required > individual_power_cap_w + 1e-12:
+                if (
+                    not math.isfinite(required)
+                    or required > individual_power_cap_w + 1e-12
+                ):
                     continue
                 options.append(
                     FastOption(
                         chunks=chunks,
                         quality_index=quality_index,
                         utility=chunks * utility,
-                        degradation=chunks * (self.cfg.quality_max - utility),
-                        payload_bits=chunks * self.cfg.chunk_size_bits[quality_index],
+                        degradation=chunks * (
+                            self.cfg.quality_max - utility
+                        ),
+                        payload_bits=(
+                            chunks
+                            * self.cfg.chunk_size_bits[quality_index]
+                        ),
                         power_w=required,
                         controllable_dpp_cost=self.controllable_cost(
                             z, chunks, quality_index
@@ -108,6 +143,7 @@ class ExactFastController:
             raise ValueError("scheduled UAV users exceed J^U")
         if not ordered_users:
             return {}
+
         total_cap = battery_power_cap_w(
             battery_j,
             remaining_slots_including_current,
@@ -116,7 +152,9 @@ class ExactFastController:
         option_sets = [
             self.feasible_uav_options(
                 z=float(z_by_user[user]),
-                horizontal_distance_m=float(horizontal_distance_by_user_m[user]),
+                horizontal_distance_m=float(
+                    horizontal_distance_by_user_m[user]
+                ),
                 fading=float(fading_by_user[user]),
                 individual_power_cap_w=total_cap,
             )
@@ -131,8 +169,12 @@ class ExactFastController:
             total_power = sum(option.power_w for option in combo)
             if total_power > total_cap + 1e-12:
                 continue
-            total_cost = sum(option.controllable_dpp_cost for option in combo)
-            key = tuple((option.chunks, option.quality_index) for option in combo)
+            total_cost = sum(
+                option.controllable_dpp_cost for option in combo
+            )
+            key = tuple(
+                (option.chunks, option.quality_index) for option in combo
+            )
             better = total_cost < best_cost - 1e-12
             tied_cost = abs(total_cost - best_cost) <= 1e-12
             if tied_cost and total_power < best_power - 1e-12:
@@ -150,14 +192,28 @@ class ExactFastController:
                 best_key = key
 
         if best_combo is None:
-            raise RuntimeError("zero-option should always make the UAV fast problem feasible")
+            raise RuntimeError(
+                "zero-option should always make the UAV fast problem feasible"
+            )
         return dict(zip(ordered_users, best_combo))
 
     @staticmethod
-    def _option_better(candidate: FastOption, incumbent: FastOption) -> bool:
-        if candidate.controllable_dpp_cost < incumbent.controllable_dpp_cost - 1e-12:
+    def _option_better(
+        candidate: FastOption,
+        incumbent: FastOption,
+    ) -> bool:
+        if (
+            candidate.controllable_dpp_cost
+            < incumbent.controllable_dpp_cost - 1e-12
+        ):
             return True
-        if abs(candidate.controllable_dpp_cost - incumbent.controllable_dpp_cost) > 1e-12:
+        if (
+            abs(
+                candidate.controllable_dpp_cost
+                - incumbent.controllable_dpp_cost
+            )
+            > 1e-12
+        ):
             return False
         if candidate.power_w < incumbent.power_w - 1e-12:
             return True
