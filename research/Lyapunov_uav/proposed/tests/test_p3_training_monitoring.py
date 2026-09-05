@@ -143,6 +143,92 @@ class P3TrainingMonitoringTests(unittest.TestCase):
         self.assertTrue(required.issubset(summary))
         self.assertTrue(all(math.isfinite(float(value)) for value in summary.values()))
 
+    def test_compact_distribution_removes_infeasible_logits_from_graph(self) -> None:
+        cfg = P3Config(seed=17, ppo_hidden_dim=16)
+        agent = PPOAgent(cfg, device="cpu")
+        devices = ["cpu"]
+        if torch.cuda.is_available():
+            devices.append("cuda")
+        for device in devices:
+            with self.subTest(device=device):
+                logits = torch.tensor(
+                    [0.5, 1000.0, -0.25], device=device, requires_grad=True
+                )
+                allowed = torch.tensor([0, 2], dtype=torch.long, device=device)
+
+                distribution, support = agent._compact_distribution(logits, allowed)
+
+                self.assertIsNotNone(distribution)
+                self.assertTrue(torch.equal(support, allowed))
+                expected = torch.softmax(
+                    torch.tensor([0.5, -0.25], device=device), dim=0
+                )
+                self.assertTrue(torch.allclose(distribution.probs, expected))
+                loss = -distribution.log_prob(
+                    torch.tensor(0, device=device)
+                ) - distribution.entropy()
+                loss.backward()
+                self.assertTrue(bool(torch.isfinite(logits.grad).all()))
+                self.assertEqual(float(logits.grad[1].item()), 0.0)
+
+    def test_singleton_factor_support_has_finite_zero_entropy_gradient(self) -> None:
+        cfg = P3Config(
+            seed=19,
+            ppo_hidden_dim=16,
+            ppo_update_epochs=2,
+            ppo_batch_size=4,
+        )
+        agent = PPOAgent(cfg, device="cpu")
+        state = np.zeros(cfg.ppo_state_dim, dtype=np.float32)
+        signatures = np.zeros((1, cfg.ppo_signature_dim), dtype=np.int64)
+        transitions: list[PPOTransition] = []
+        for index in range(8):
+            choice = agent.select(state, signatures)
+            self.assertEqual(choice.action_index, 0)
+            self.assertEqual(choice.log_prob, 0.0)
+            self.assertEqual(choice.entropy, 0.0)
+            self.assertEqual(choice.normalized_entropy, 0.0)
+            transitions.append(
+                PPOTransition(
+                    state_features=state.copy(),
+                    candidate_signatures=signatures.copy(),
+                    action_index=choice.action_index,
+                    old_log_prob=choice.log_prob,
+                    old_value=choice.value,
+                    reward=-0.1 - 0.01 * index,
+                    next_value=0.0,
+                    done=index == 7,
+                )
+            )
+
+        finish_trajectory(transitions, cfg)
+        summary = agent.update(transitions)
+        self.assertEqual(summary["entropy"], 0.0)
+        self.assertEqual(summary["normalized_entropy"], 0.0)
+        self.assertTrue(all(math.isfinite(float(value)) for value in summary.values()))
+        for parameter in agent.network.parameters():
+            self.assertTrue(bool(torch.isfinite(parameter).all()))
+
+    def test_ppo_update_rejects_nonfinite_transition_before_backward(self) -> None:
+        cfg = P3Config(seed=23, ppo_hidden_dim=16)
+        agent = PPOAgent(cfg, device="cpu")
+        transition = PPOTransition(
+            state_features=np.zeros(cfg.ppo_state_dim, dtype=np.float32),
+            candidate_signatures=np.zeros(
+                (1, cfg.ppo_signature_dim), dtype=np.int64
+            ),
+            action_index=0,
+            old_log_prob=0.0,
+            old_value=0.0,
+            reward=0.0,
+            next_value=0.0,
+            done=True,
+            advantage=math.nan,
+            return_value=0.0,
+        )
+        with self.assertRaisesRegex(FloatingPointError, "advantages"):
+            agent.update([transition])
+
     def test_validation_points_and_atomic_outputs_are_rendered(self) -> None:
         rows = []
         for episode in range(12):

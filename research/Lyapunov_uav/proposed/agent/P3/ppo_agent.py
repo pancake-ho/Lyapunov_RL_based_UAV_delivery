@@ -154,14 +154,88 @@ class PPOAgent:
         )
 
     @staticmethod
-    def _masked_distribution(
+    def _compact_distribution(
         logits: torch.Tensor,
         allowed_tokens: torch.Tensor,
-    ) -> Categorical:
-        mask = torch.zeros_like(logits, dtype=torch.bool)
-        mask[allowed_tokens.long()] = True
-        masked = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
-        return Categorical(logits=masked)
+    ) -> tuple[Categorical | None, torch.Tensor]:
+        """Build a categorical only on the feasible support.
+
+        Filling infeasible logits with ``torch.finfo(dtype).min`` is finite in
+        the forward pass, but entropy backward can still create non-finite
+        gradients on CUDA, especially when a factor has exactly one feasible
+        token and normalized entropy amplifies the result.  Removing infeasible
+        logits from the autograd graph is mathematically equivalent to an exact
+        action mask and avoids that numerical failure mode.
+
+        A singleton support is deterministic.  Returning ``None`` lets callers
+        produce an explicit differentiable zero instead of asking
+        ``Categorical.entropy`` to operate on a degenerate distribution.
+        """
+
+        if logits.ndim != 1:
+            raise ValueError("factor logits must be one-dimensional")
+        support = allowed_tokens.to(device=logits.device, dtype=torch.long)
+        if support.ndim != 1 or support.numel() == 0:
+            raise ValueError("a factor must have at least one feasible token")
+        if torch.unique(support).numel() != support.numel():
+            raise ValueError("feasible factor tokens must be unique")
+        compact_logits = logits.index_select(0, support)
+        if support.numel() == 1:
+            return None, support
+        return Categorical(logits=compact_logits), support
+
+    @staticmethod
+    def _differentiable_zero(logits: torch.Tensor, token: torch.Tensor) -> torch.Tensor:
+        """Return an exact zero connected to the selected logit's graph."""
+
+        return logits.index_select(0, token.reshape(1).long()).sum() * 0.0
+
+    @staticmethod
+    def _bad_named_tensors(
+        named_tensors: Sequence[tuple[str, torch.Tensor]],
+    ) -> list[str]:
+        """Find non-finite tensors with one device synchronization per device."""
+
+        groups: dict[torch.device, list[tuple[str, torch.Tensor, torch.Tensor]]] = {}
+        for name, tensor in named_tensors:
+            finite = torch.isfinite(tensor).all()
+            groups.setdefault(tensor.device, []).append((name, tensor, finite))
+        bad: list[str] = []
+        for group in groups.values():
+            if bool(torch.stack([finite for _, _, finite in group]).all()):
+                continue
+            bad.extend(
+                name
+                for name, _, finite in group
+                if not bool(finite)
+            )
+        return bad
+
+    @classmethod
+    def _bad_parameter_names(cls, network: nn.Module) -> list[str]:
+        return cls._bad_named_tensors(list(network.named_parameters()))
+
+    @classmethod
+    def _bad_gradient_names(cls, network: nn.Module) -> list[str]:
+        return cls._bad_named_tensors(
+            [
+                (name, parameter.grad)
+                for name, parameter in network.named_parameters()
+                if parameter.grad is not None
+            ]
+        )
+
+    def _bad_optimizer_state_names(self) -> list[str]:
+        named_states: list[tuple[str, torch.Tensor]] = []
+        parameter_names = {
+            id(parameter): name for name, parameter in self.network.named_parameters()
+        }
+        for parameter, state in self.optimizer.state.items():
+            parameter_name = parameter_names.get(id(parameter), "<unknown>")
+            for state_name, value in state.items():
+                if torch.is_tensor(value):
+                    named_states.append((f"{parameter_name}.{state_name}", value))
+        return self._bad_named_tensors(named_states)
 
     def _evaluate_choice(
         self,
@@ -173,6 +247,8 @@ class PPOAgent:
             raise ValueError("expected one state and a 2-D signature matrix")
         if signatures.shape[1] != self.cfg.ppo_signature_dim:
             raise ValueError("candidate signature width does not match configuration")
+        if signatures.shape[0] == 0:
+            raise ValueError("candidate signature matrix must not be empty")
         if not 0 <= int(action_index) < signatures.shape[0]:
             raise IndexError("selected action index is outside candidate set")
 
@@ -187,13 +263,22 @@ class PPOAgent:
             nonlocal pool, log_prob, entropy, max_entropy
             allowed = torch.unique(signatures[pool, column], sorted=True)
             token = chosen[column].long()
-            if not bool(torch.any(allowed == token)):
-                raise RuntimeError("chosen factor is not feasible under its prefix")
-            distribution = self._masked_distribution(logits.squeeze(0), allowed)
-            log_prob = log_prob + distribution.log_prob(token)
-            entropy = entropy + distribution.entropy()
-            if allowed.numel() > 1:
-                max_entropy = max_entropy + math.log(float(allowed.numel()))
+            factor_logits = logits.squeeze(0)
+            distribution, support = self._compact_distribution(
+                factor_logits, allowed
+            )
+            local_matches = torch.nonzero(support == token, as_tuple=False).flatten()
+            if local_matches.numel() != 1:
+                raise RuntimeError("chosen factor token has no unique local index")
+            if distribution is None:
+                factor_zero = self._differentiable_zero(factor_logits, token)
+                log_prob = log_prob + factor_zero
+                entropy = entropy + factor_zero
+            else:
+                local_token = local_matches[0]
+                log_prob = log_prob + distribution.log_prob(local_token)
+                entropy = entropy + distribution.entropy()
+                max_entropy = max_entropy + math.log(float(support.numel()))
             pool = pool[signatures[pool, column] == token]
             return token
 
@@ -230,11 +315,26 @@ class PPOAgent:
         candidate_signatures: np.ndarray,
         deterministic: bool = False,
     ) -> PPOChoice:
+        state_array = np.asarray(state_features)
+        signature_array = np.asarray(candidate_signatures)
+        if state_array.ndim != 1 or state_array.size != self.cfg.ppo_state_dim:
+            raise ValueError("state feature width does not match configuration")
+        if not bool(np.isfinite(state_array).all()):
+            raise FloatingPointError("non-finite PPO state features")
+        if (
+            signature_array.ndim != 2
+            or signature_array.shape[1] != self.cfg.ppo_signature_dim
+        ):
+            raise ValueError("candidate signature shape does not match configuration")
+        if signature_array.shape[0] == 0:
+            raise ValueError("candidate signature matrix must not be empty")
+        if not bool(np.isfinite(signature_array).all()):
+            raise FloatingPointError("non-finite PPO candidate signatures")
         state = torch.as_tensor(
-            state_features, dtype=torch.float32, device=self.device
+            state_array, dtype=torch.float32, device=self.device
         )
         signatures = torch.as_tensor(
-            candidate_signatures, dtype=torch.long, device=self.device
+            signature_array, dtype=torch.long, device=self.device
         )
         latent = self.network.encode(state.unsqueeze(0))
         pool = torch.arange(signatures.shape[0], device=self.device)
@@ -246,24 +346,41 @@ class PPOAgent:
         def choose(logits: torch.Tensor, column: int) -> int:
             nonlocal pool, log_prob, entropy, max_entropy, hire_probability
             allowed = torch.unique(signatures[pool, column], sorted=True)
-            distribution = self._masked_distribution(logits.squeeze(0), allowed)
-            token_tensor = (
-                torch.argmax(distribution.logits)
-                if deterministic
-                else distribution.sample()
+            factor_logits = logits.squeeze(0)
+            distribution, support = self._compact_distribution(
+                factor_logits, allowed
             )
+            if distribution is None:
+                local_token = torch.zeros((), dtype=torch.long, device=self.device)
+                token_tensor = support[0]
+                factor_log_prob = 0.0
+                factor_entropy = 0.0
+            else:
+                local_token = (
+                    torch.argmax(distribution.logits)
+                    if deterministic
+                    else distribution.sample()
+                )
+                token_tensor = support[local_token]
+                factor_log_prob = float(distribution.log_prob(local_token).item())
+                factor_entropy = float(distribution.entropy().item())
             token = int(token_tensor.item())
             if column == 0:
-                probabilities = distribution.probs
-                hire_probability = (
-                    float(probabilities[1].item())
-                    if probabilities.numel() > 1
-                    else float(token == 1)
-                )
-            log_prob += float(distribution.log_prob(token_tensor).item())
-            entropy += float(distribution.entropy().item())
-            if allowed.numel() > 1:
-                max_entropy += math.log(float(allowed.numel()))
+                hire_matches = torch.nonzero(
+                    support == 1, as_tuple=False
+                ).flatten()
+                if hire_matches.numel() == 0:
+                    hire_probability = 0.0
+                elif distribution is None:
+                    hire_probability = 1.0
+                else:
+                    hire_probability = float(
+                        distribution.probs[hire_matches[0]].item()
+                    )
+            log_prob += factor_log_prob
+            entropy += factor_entropy
+            if distribution is not None:
+                max_entropy += math.log(float(support.numel()))
             pool = pool[signatures[pool, column] == token]
             return token
 
@@ -310,30 +427,89 @@ class PPOAgent:
 
     @torch.no_grad()
     def value(self, state_features: np.ndarray) -> float:
+        state_array = np.asarray(state_features)
+        if state_array.ndim != 1 or state_array.size != self.cfg.ppo_state_dim:
+            raise ValueError("state feature width does not match configuration")
+        if not bool(np.isfinite(state_array).all()):
+            raise FloatingPointError("non-finite PPO state features")
         state = torch.as_tensor(
-            state_features, dtype=torch.float32, device=self.device
+            state_array, dtype=torch.float32, device=self.device
         ).unsqueeze(0)
         return float(self.network.values(state).item())
 
     def update(self, transitions: Sequence[PPOTransition]) -> dict[str, float]:
         if not transitions:
             raise ValueError("PPO update requires at least one transition")
-        advantages = np.asarray(
-            [transition.advantage for transition in transitions], dtype=np.float32
-        )
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        returns = np.asarray(
-            [transition.return_value for transition in transitions], dtype=np.float32
-        )
-        old_log_probs = np.asarray(
-            [transition.old_log_prob for transition in transitions], dtype=np.float32
-        )
+        raw_arrays = {
+            "advantages": np.asarray(
+                [transition.advantage for transition in transitions], dtype=np.float64
+            ),
+            "returns": np.asarray(
+                [transition.return_value for transition in transitions], dtype=np.float64
+            ),
+            "old_log_probs": np.asarray(
+                [transition.old_log_prob for transition in transitions], dtype=np.float64
+            ),
+            "old_values": np.asarray(
+                [transition.old_value for transition in transitions], dtype=np.float64
+            ),
+        }
+        for name, values in raw_arrays.items():
+            if not bool(np.isfinite(values).all()):
+                bad_indices = np.flatnonzero(~np.isfinite(values))[:8].tolist()
+                raise FloatingPointError(
+                    f"non-finite PPO {name} at transition indices {bad_indices}"
+                )
+        for index, transition in enumerate(transitions):
+            state = np.asarray(transition.state_features)
+            signatures = np.asarray(transition.candidate_signatures)
+            if state.shape != (self.cfg.ppo_state_dim,):
+                raise ValueError(
+                    f"invalid PPO state shape at transition {index}: {state.shape}"
+                )
+            if not bool(np.isfinite(state).all()):
+                raise FloatingPointError(
+                    f"non-finite PPO state features at transition {index}"
+                )
+            if (
+                signatures.ndim != 2
+                or signatures.shape[0] == 0
+                or signatures.shape[1] != self.cfg.ppo_signature_dim
+            ):
+                raise ValueError(
+                    "invalid PPO candidate signature shape at transition "
+                    f"{index}: {signatures.shape}"
+                )
+            if not bool(np.isfinite(signatures).all()):
+                raise FloatingPointError(
+                    f"non-finite PPO candidate signatures at transition {index}"
+                )
+            if not 0 <= int(transition.action_index) < signatures.shape[0]:
+                raise IndexError(
+                    f"PPO action index is outside candidate set at transition {index}"
+                )
+        advantages64 = raw_arrays["advantages"]
+        advantage_scale = max(float(advantages64.std()), 1e-8)
+        advantages = (
+            (advantages64 - float(advantages64.mean())) / advantage_scale
+        ).astype(np.float32)
+        returns = raw_arrays["returns"].astype(np.float32)
+        old_log_probs = raw_arrays["old_log_probs"].astype(np.float32)
+        old_values = raw_arrays["old_values"].astype(np.float32)
+
+        bad_parameters = self._bad_parameter_names(self.network)
+        bad_optimizer_states = self._bad_optimizer_state_names()
+        if bad_parameters or bad_optimizer_states:
+            raise FloatingPointError(
+                "PPO update started from non-finite state: "
+                f"parameters={bad_parameters}, optimizer={bad_optimizer_states}"
+            )
 
         losses: list[tuple[float, ...]] = []
         total = len(transitions)
         epochs_completed = 0
         stopped_by_kl = False
-        for _ in range(self.cfg.ppo_update_epochs):
+        for epoch_index in range(self.cfg.ppo_update_epochs):
             epoch_kls: list[float] = []
             permutation = np.random.permutation(total)
             for start in range(0, total, self.cfg.ppo_batch_size):
@@ -364,8 +540,13 @@ class PPOAgent:
 
                 new_log = torch.stack(new_logs)
                 entropy_vector = torch.stack(entropies)
-                max_entropy_vector = torch.stack(max_entropies).clamp_min(1e-8)
-                normalized_entropy = (entropy_vector / max_entropy_vector).mean()
+                max_entropy_vector = torch.stack(max_entropies)
+                normalized_entropy_vector = torch.where(
+                    max_entropy_vector > 0.0,
+                    entropy_vector / max_entropy_vector.clamp_min(1e-8),
+                    torch.zeros_like(entropy_vector),
+                )
+                normalized_entropy = normalized_entropy_vector.mean()
                 entropy = entropy_vector.mean()
                 values_tensor = torch.stack(values)
                 old_log = torch.as_tensor(
@@ -377,7 +558,35 @@ class PPOAgent:
                 target_return = torch.as_tensor(
                     returns[indices], dtype=torch.float32, device=self.device
                 )
-                ratio = torch.exp(new_log - old_log)
+                tensors_to_check = {
+                    "new_log_probs": new_log,
+                    "entropy": entropy_vector,
+                    "max_entropy": max_entropy_vector,
+                    "values": values_tensor,
+                    "old_log_probs": old_log,
+                    "advantages": advantage,
+                    "returns": target_return,
+                }
+                for name, tensor in tensors_to_check.items():
+                    if not bool(torch.isfinite(tensor).all()):
+                        raise FloatingPointError(
+                            "non-finite PPO minibatch tensor "
+                            f"{name} at epoch={epoch_index + 1}, start={start}"
+                        )
+                log_ratio = new_log - old_log
+                if not bool(torch.isfinite(log_ratio).all()):
+                    raise FloatingPointError(
+                        "non-finite PPO log ratio at "
+                        f"epoch={epoch_index + 1}, start={start}"
+                    )
+                ratio = torch.exp(log_ratio)
+                if not bool(torch.isfinite(ratio).all()):
+                    raise FloatingPointError(
+                        "non-finite PPO probability ratio at "
+                        f"epoch={epoch_index + 1}, start={start}; "
+                        f"log_ratio_range=({float(log_ratio.min().item()):.6g}, "
+                        f"{float(log_ratio.max().item()):.6g})"
+                    )
                 clip_fraction = torch.mean(
                     (torch.abs(ratio - 1.0) > self.cfg.ppo_clip_ratio).float()
                 )
@@ -397,16 +606,43 @@ class PPOAgent:
                     - self.cfg.ppo_entropy_coef * normalized_entropy
                 )
                 if not torch.isfinite(loss):
-                    raise FloatingPointError("non-finite PPO loss")
+                    raise FloatingPointError(
+                        "non-finite PPO loss at "
+                        f"epoch={epoch_index + 1}, start={start}; "
+                        f"policy={float(policy_loss.detach().item()):.6g}, "
+                        f"value={float(value_loss.detach().item()):.6g}, "
+                        f"entropy={float(normalized_entropy.detach().item()):.6g}"
+                    )
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.network.parameters(), self.cfg.ppo_max_grad_norm
-                )
-                if not torch.isfinite(grad_norm):
-                    raise FloatingPointError("non-finite PPO gradient norm")
+                bad_gradients = self._bad_gradient_names(self.network)
+                if bad_gradients:
+                    raise FloatingPointError(
+                        "non-finite PPO gradients before clipping at "
+                        f"epoch={epoch_index + 1}, start={start}; "
+                        f"parameters={bad_gradients}"
+                    )
+                try:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.network.parameters(),
+                        self.cfg.ppo_max_grad_norm,
+                        error_if_nonfinite=True,
+                    )
+                except RuntimeError as error:
+                    raise FloatingPointError(
+                        "non-finite PPO gradient norm at "
+                        f"epoch={epoch_index + 1}, start={start}"
+                    ) from error
                 self.optimizer.step()
+                bad_parameters = self._bad_parameter_names(self.network)
+                bad_optimizer_states = self._bad_optimizer_state_names()
+                if bad_parameters or bad_optimizer_states:
+                    raise FloatingPointError(
+                        "PPO optimizer produced non-finite state at "
+                        f"epoch={epoch_index + 1}, start={start}; "
+                        f"parameters={bad_parameters}, optimizer={bad_optimizer_states}"
+                    )
                 approx_kl = torch.mean(old_log - new_log).detach()
                 epoch_kls.append(float(approx_kl.item()))
                 losses.append(
@@ -427,9 +663,6 @@ class PPOAgent:
                 break
 
         matrix = np.asarray(losses, dtype=np.float64)
-        old_values = np.asarray(
-            [transition.old_value for transition in transitions], dtype=np.float32
-        )
         return_variance = float(np.var(returns))
         explained_variance = (
             1.0 - float(np.var(returns - old_values)) / return_variance
@@ -452,6 +685,13 @@ class PPOAgent:
         }
 
     def save(self, path: Path, metadata: dict | None = None) -> None:
+        bad_parameters = self._bad_parameter_names(self.network)
+        bad_optimizer_states = self._bad_optimizer_state_names()
+        if bad_parameters or bad_optimizer_states:
+            raise FloatingPointError(
+                "refusing to save a non-finite PPO checkpoint: "
+                f"parameters={bad_parameters}, optimizer={bad_optimizer_states}"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         try:
@@ -484,4 +724,13 @@ class PPOAgent:
         self.network.load_state_dict(checkpoint["model_state_dict"])
         if load_optimizer and "optimizer_state_dict" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        bad_parameters = self._bad_parameter_names(self.network)
+        bad_optimizer_states = (
+            self._bad_optimizer_state_names() if load_optimizer else []
+        )
+        if bad_parameters or bad_optimizer_states:
+            raise FloatingPointError(
+                "loaded PPO checkpoint contains non-finite state: "
+                f"parameters={bad_parameters}, optimizer={bad_optimizer_states}"
+            )
         return dict(checkpoint.get("metadata", {}))
