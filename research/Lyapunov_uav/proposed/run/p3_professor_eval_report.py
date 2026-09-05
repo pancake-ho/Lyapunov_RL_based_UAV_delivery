@@ -28,6 +28,34 @@ PRIMARY_METRICS = (
 )
 
 
+RAW_TO_PAPER_POLICY = {
+    "dpp": "proposed",
+}
+PAPER_TO_RAW_POLICY = {
+    paper: raw for raw, paper in RAW_TO_PAPER_POLICY.items()
+}
+
+
+def paper_policy(policy: str) -> str:
+    """Paper-facing alias without changing the simulator's internal policy key."""
+    return RAW_TO_PAPER_POLICY.get(str(policy), str(policy))
+
+
+def raw_policy(policy: str) -> str:
+    """Map paper-facing policy name back to the raw artifact key."""
+    return PAPER_TO_RAW_POLICY.get(str(policy), str(policy))
+
+
+def relabel_policy_rows(rows: Sequence[dict]) -> list[dict]:
+    output: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        if "policy" in item:
+            item["policy"] = paper_policy(str(item["policy"]))
+        output.append(item)
+    return output
+
+
 def read_csv(path: Path) -> list[dict]:
     with path.open(newline="", encoding="utf-8") as stream:
         return list(csv.DictReader(stream))
@@ -79,9 +107,11 @@ def setup_matplotlib():
 
 
 def frame_path(root: Path, policy: str, seed: int) -> Path:
-    if policy in {"ppo_best", "ppo_latest"}:
-        return root / policy / f"frames_ppo_seed{seed}.csv"
-    return root / "baselines" / f"frames_{policy}_seed{seed}.csv"
+    paper_name = str(policy)
+    raw_name = raw_policy(paper_name)
+    if paper_name in {"ppo_best", "ppo_latest"}:
+        return root / paper_name / f"frames_ppo_seed{seed}.csv"
+    return root / "baselines" / f"frames_{raw_name}_seed{seed}.csv"
 
 
 def reconstruct_return_distances(
@@ -167,7 +197,8 @@ def build_seed_metrics(root: Path, experiment: dict) -> list[dict]:
 
     output: list[dict] = []
     for row in seed_rows:
-        policy = str(row["policy"])
+        raw_name = str(row["policy"])
+        policy = paper_policy(raw_name)
         seed = int(row["seed"])
         frames = read_csv(frame_path(root, policy, seed))
         return_distances, return_events = reconstruct_return_distances(
@@ -299,17 +330,14 @@ def aggregate_seed_metrics(seed_rows: Sequence[dict], policies: Sequence[str]) -
 
 
 def chosen_policies(experiment: dict, include_latest: bool) -> list[str]:
-    policies = [str(policy) for policy in experiment["policies"]]
+    policies = [paper_policy(str(policy)) for policy in experiment["policies"]]
     if not include_latest:
         policies = [policy for policy in policies if policy != "ppo_latest"]
     preferred = [
+        "proposed",
         "ppo_best",
-        "dpp",
         "rsu_only",
         "always_hire",
-        "fixed_rsu",
-        "nearest_hotspot",
-        "load_threshold",
         "ppo_latest",
     ]
     ordered = [policy for policy in preferred if policy in policies]
@@ -318,10 +346,14 @@ def chosen_policies(experiment: dict, include_latest: bool) -> list[str]:
 
 
 def label(policy: str) -> str:
+    if str(policy) in {"dpp", "proposed"}:
+        return "Proposed"
     return POLICY_LABELS.get(policy, policy)
 
 
 def color(policy: str):
+    if str(policy) == "proposed":
+        return POLICY_COLORS.get("dpp")
     return POLICY_COLORS.get(policy)
 
 
@@ -541,7 +573,7 @@ def write_readme(output_dir: Path, experiment: dict, aggregate: Sequence[dict]) 
         "",
         f"- seeds: {len(experiment['seeds'])}",
         f"- frames per seed: {experiment['frames']}",
-        f"- policies: {', '.join(str(p) for p in experiment['policies'])}",
+        f"- policies: {', '.join(paper_policy(str(p)) for p in experiment['policies'])}",
         "",
         "## Metric definitions",
         "",
@@ -619,8 +651,12 @@ def main() -> None:
     seed_metrics = build_seed_metrics(root, experiment)
     policies = chosen_policies(experiment, args.include_latest)
     aggregate = aggregate_seed_metrics(seed_metrics, policies)
-    quality_rows = read_csv(aggregate_dir / "quality_distribution.csv")
-    distance_rows = read_csv(aggregate_dir / "distance_by_policy.csv")
+    quality_rows = relabel_policy_rows(
+        read_csv(aggregate_dir / "quality_distribution.csv")
+    )
+    distance_rows = relabel_policy_rows(
+        read_csv(aggregate_dir / "distance_by_policy.csv")
+    )
 
     write_csv(output_dir / "professor_seed_metrics.csv", seed_metrics)
     write_csv(output_dir / "professor_aggregate_metrics.csv", aggregate)

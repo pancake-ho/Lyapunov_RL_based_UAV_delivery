@@ -10,14 +10,15 @@ readonly P3_RUN_DIR="${P3_RUN_DIR:?export P3_RUN_DIR to the accepted Stage-2 tra
 # one evaluation trajectory = one independent seed, each kept at the same
 # 400-frame horizon used by training/validation. 30 held-out seeds provide
 # 30 independent trajectory-level samples (960,000 user-slots per policy for
-# the current 8-user, 10-slot/frame config) without the 800-task cost of 100 seeds.
+# the current 8-user, 10-slot/frame config). Final rule baselines are reduced to
+# Proposed(DPP), Always-hire, and RSU-only; PPO best/latest are added by the shard runner.
 readonly EVAL_SEEDS="${EVAL_SEEDS:-120026:120027:120028:120029:120030:120031:120032:120033:120034:120035:120036:120037:120038:120039:120040:120041:120042:120043:120044:120045:120046:120047:120048:120049:120050:120051:120052:120053:120054:120055}"
 readonly EVAL_FRAMES="${EVAL_FRAMES:-400}"
 readonly EVAL_ROLLOUTS="${EVAL_ROLLOUTS:-4}"
-readonly EVAL_BASELINE_POLICIES="${EVAL_BASELINE_POLICIES:-dpp:load_threshold:always_hire:fixed_rsu:nearest_hotspot:rsu_only}"
-readonly EVAL_ROOT="${EVAL_ROOT:-$PROJECT_DIR/outputs/p3_eval_stage2_s30_f400}"
+readonly EVAL_BASELINE_POLICIES="${EVAL_BASELINE_POLICIES:-dpp:always_hire:rsu_only}"
+readonly EVAL_ROOT="${EVAL_ROOT:-$PROJECT_DIR/outputs/p3_eval_stage2_reduced_s30_f400}"
 readonly EVAL_DEVICE="${EVAL_DEVICE:-cpu}"
-readonly EVAL_SELECTION_WORKERS="${EVAL_SELECTION_WORKERS:-4}"
+readonly EVAL_SELECTION_WORKERS="${EVAL_SELECTION_WORKERS:-8}"
 readonly MAX_PARALLEL="${MAX_PARALLEL:-2}"
 
 cd "$PROJECT_DIR"
