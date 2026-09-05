@@ -42,4 +42,17 @@ if (( EVAL_JOB_WORKERS <= 0 || EVAL_JOB_WORKERS > 2 || EVAL_JOB_WORKERS > task_c
     exit 2
 fi
 python -m unittest discover -s tests -p 'test_p3_*.py' -v
+python - "$BEST_CHECKPOINT" "$LATEST_CHECKPOINT" <<'PY'
+import sys
+from pathlib import Path
+
+from agent.P3.ppo_agent import PPOAgent
+from config_p3 import P3Config
+
+agent = PPOAgent(P3Config(), device="cpu")
+for raw in sys.argv[1:]:
+    path = Path(raw).resolve()
+    metadata = agent.load(path)
+    print(f"[PREFLIGHT] checkpoint={path} episode={metadata.get('episode')}")
+PY
 echo "[PREFLIGHT-DONE]"

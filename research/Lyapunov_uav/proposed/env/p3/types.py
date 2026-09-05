@@ -44,6 +44,7 @@ class P3State:
     battery_j: np.ndarray
     uav_x: np.ndarray
     last_quality_index: np.ndarray
+    last_stalled: np.ndarray
 
     def copy(self) -> "P3State":
         return P3State(
@@ -53,6 +54,7 @@ class P3State:
             battery_j=self.battery_j.copy(),
             uav_x=self.uav_x.copy(),
             last_quality_index=self.last_quality_index.copy(),
+            last_stalled=self.last_stalled.copy(),
         )
 
 
@@ -68,9 +70,11 @@ class RegionFrameResult:
     original_cost: float
     queue_after: np.ndarray
     last_quality_after: np.ndarray
+    last_stalled_after: np.ndarray
     battery_after_j: float
     uav_x_after: float
     delivered_chunks: float
+    payload_bits: float
     quality_utility: float
     quality_level_sum: float
     quality_histogram: np.ndarray
@@ -81,6 +85,14 @@ class RegionFrameResult:
     served_user_slots: int
     large_queue_violation_user_slots: int
     queue_sum: float
+    queue_samples: np.ndarray
+    z_samples: np.ndarray
+    user_delivered_chunks: np.ndarray
+    user_quality_utility: np.ndarray
+    user_stall_slots: np.ndarray
+    user_served_slots: np.ndarray
+    user_stall_events: np.ndarray
+    user_queue_sum: np.ndarray
     energy_consumed_j: float
     energy_charged_j: float
     relocation_events: int
@@ -96,6 +108,7 @@ class RegionFrameResult:
     uav_total_power_peak_w: float
     uav_distance_sum_m: float
     uav_scheduled_user_slots: int
+    rsu_scheduled_user_slots: int
     distance_opportunities: np.ndarray
     distance_served_slots: np.ndarray
     distance_stall_slots: np.ndarray

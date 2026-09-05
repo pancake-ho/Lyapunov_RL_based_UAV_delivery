@@ -4,9 +4,10 @@ set -Eeuo pipefail
 
 readonly EXPECTED_BRANCH="feat/new-form-p3"
 readonly PROJECT_DIR="${PROJECT_DIR:-$PWD}"
-readonly P3_RUN_DIR="${P3_RUN_DIR:-$PROJECT_DIR/outputs/p3_formfix_seed2026_20260904_024036}"
+readonly P3_RUN_DIR="${P3_RUN_DIR:?export P3_RUN_DIR to the accepted training output}"
 readonly BEST_CHECKPOINT="${BEST_CHECKPOINT:-$P3_RUN_DIR/best.pt}"
 readonly LATEST_CHECKPOINT="${LATEST_CHECKPOINT:-$P3_RUN_DIR/latest.pt}"
+readonly ACCEPTANCE_JSON="${ACCEPTANCE_JSON:-$P3_RUN_DIR/acceptance.json}"
 readonly EVAL_ROOT="${EVAL_ROOT:-$PROJECT_DIR/outputs/p3_eval_formfix_seed2026}"
 readonly EVAL_SEEDS="${EVAL_SEEDS:-3026:3027:3028:3029:3030:3031:3032:3033:3034:3035}"
 readonly EVAL_BASELINE_POLICIES="${EVAL_BASELINE_POLICIES:-dpp:load_threshold:always_hire:fixed_rsu:nearest_hotspot:rsu_only}"
@@ -31,6 +32,19 @@ if [[ "$(git branch --show-current)" != "$EXPECTED_BRANCH" ]]; then
 fi
 if [[ ! -f "$BEST_CHECKPOINT" || ! -f "$LATEST_CHECKPOINT" ]]; then
     echo "Missing checkpoint(s): best=$BEST_CHECKPOINT latest=$LATEST_CHECKPOINT" >&2
+    exit 2
+fi
+if [[ ! -f "$ACCEPTANCE_JSON" ]] || ! python - "$ACCEPTANCE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+if payload.get("event") != "passed":
+    raise SystemExit(1)
+PY
+then
+    echo "Training acceptance gate did not pass: $ACCEPTANCE_JSON" >&2
     exit 2
 fi
 if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || (( MAX_PARALLEL > 2 )); then

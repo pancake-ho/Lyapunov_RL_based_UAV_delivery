@@ -52,10 +52,14 @@ class P3Config:
 
     quality_utility: tuple[float, ...] = (0.55, 0.72, 0.86, 1.0)
     chunk_size_bits: tuple[float, ...] = (0.5e6, 1e6, 2e6, 4e6)
-    max_chunks_per_slot: int = 1
+    # Changed_Form Table 10.1 recommends L_max in [3, 5]. Keeping L_max=b=1
+    # makes Q_t unable to grow above its initial value and turns the large-Q
+    # assumption check into a vacuous metric.
+    max_chunks_per_slot: int = 3
     playback_chunks_per_slot: float = 1.0
     initial_playback_queue: float = 3.0
     large_queue_level: float = 100.0
+    evaluation_warmup_frames: int = 5
 
     alpha_z: float = 1.0
     lyapunov_v: float = 10.0
@@ -131,6 +135,8 @@ class P3Config:
             raise ValueError("chunk sizes must be nondecreasing")
         if self.max_chunks_per_slot <= 0:
             raise ValueError("max_chunks_per_slot must be positive")
+        if self.evaluation_warmup_frames < 0:
+            raise ValueError("evaluation_warmup_frames cannot be negative")
         if not (0.0 <= self.reserve_battery_j < self.battery_capacity_j):
             raise ValueError("battery reserve is invalid")
         if self.relocation_energy_j < 0.0:
@@ -215,11 +221,22 @@ class P3Config:
 
     @property
     def ppo_state_dim(self) -> int:
-        return 7 + 6 * self.num_users
+        return self.ppo_global_feature_dim + self.ppo_user_feature_dim * self.num_users
 
     @property
-    def ppo_action_dim(self) -> int:
-        return 10
+    def ppo_global_feature_dim(self) -> int:
+        return 7
+
+    @property
+    def ppo_user_feature_dim(self) -> int:
+        # [present, Q, Z, position, velocity, predicted RSU link,
+        #  predicted UAV link at every candidate point]
+        return 6 + len(self.candidate_offsets_m)
+
+    @property
+    def ppo_signature_dim(self) -> int:
+        # [hire, point token, provider token for every global user]
+        return 2 + self.num_users
 
     def depot_x(self, region: int) -> float:
         self._validate_region(region)

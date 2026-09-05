@@ -46,13 +46,20 @@ def initialize_state(cfg: P3Config) -> P3State:
             dtype=np.float64,
         ),
         last_quality_index=np.full(cfg.num_users, -1, dtype=np.int32),
+        last_stalled=np.zeros(cfg.num_users, dtype=bool),
     )
 
 
 def validate_state(state: P3State, cfg: P3Config) -> None:
     user_shape = (cfg.num_users,)
     uav_shape = (cfg.num_uavs,)
-    for name in ("queue", "user_x", "user_speed", "last_quality_index"):
+    for name in (
+        "queue",
+        "user_x",
+        "user_speed",
+        "last_quality_index",
+        "last_stalled",
+    ):
         value = np.asarray(getattr(state, name))
         if value.shape != user_shape:
             raise ValueError(f"{name} shape must be {user_shape}, got {value.shape}")

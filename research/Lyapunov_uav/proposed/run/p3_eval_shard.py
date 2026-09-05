@@ -18,7 +18,7 @@ from config_p3 import P3Config
 from run.p3_common import PolicyRunResult, run_policy
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_SEEDS = tuple(range(3026, 3036))
 # Expensive policies first keeps the tail of a bounded Slurm array short.
 DEFAULT_BASELINE_POLICIES = (
@@ -184,6 +184,7 @@ def artifact_paths(group_dir: Path, task: EvalTask) -> dict[str, Path]:
         "distance": group_dir / f"distance_{suffix}.csv",
         "points": group_dir / f"points_{suffix}.csv",
         "quality": group_dir / f"quality_{suffix}.csv",
+        "users": group_dir / f"users_{suffix}.csv",
         "summary": group_dir / "summaries" / f"summary_{suffix}.json",
         "status": group_dir / "status" / f"status_{suffix}.json",
     }
@@ -209,7 +210,7 @@ def task_fingerprint(
 
 
 def is_complete(paths: dict[str, Path], fingerprint: dict) -> bool:
-    required = ("frames", "distance", "points", "quality", "summary")
+    required = ("frames", "distance", "points", "quality", "users", "summary")
     if not all(paths[name].is_file() and paths[name].stat().st_size > 0 for name in required):
         return False
     try:
@@ -228,6 +229,7 @@ def write_result_artifacts(
     atomic_write_csv(paths["distance"], result.distance_rows)
     atomic_write_csv(paths["points"], result.point_rows)
     atomic_write_csv(paths["quality"], result.quality_rows)
+    atomic_write_csv(paths["users"], result.user_rows)
 
 
 def checkpoint_for_task(

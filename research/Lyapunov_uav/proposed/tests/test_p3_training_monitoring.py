@@ -7,15 +7,31 @@ from pathlib import Path
 
 import numpy as np
 
-from agent.P3.ppo_agent import PPOAgent, PPOTransition, finish_trajectory
 from config_p3 import P3Config
-from run.p3_train_ppo import (
-    atomic_write_csv,
-    atomic_write_json,
-    build_episode_summary,
-    parse_seed_list,
-    plot_training_curve,
-)
+try:
+    import torch
+
+    from agent.P3.ppo_agent import PPOAgent, PPOTransition, finish_trajectory
+    from run.p3_train_ppo import (
+        atomic_write_csv,
+        atomic_write_json,
+        build_episode_summary,
+        parse_seed_list,
+        plot_training_curve,
+    )
+
+    TORCH_AVAILABLE = True
+except ModuleNotFoundError:
+    torch = None
+    PPOAgent = None
+    PPOTransition = None
+    finish_trajectory = None
+    atomic_write_csv = None
+    atomic_write_json = None
+    build_episode_summary = None
+    parse_seed_list = None
+    plot_training_curve = None
+    TORCH_AVAILABLE = False
 
 
 TOTAL_KEYS = (
@@ -30,6 +46,8 @@ TOTAL_KEYS = (
     "quality_switches",
     "quality_transitions",
     "queue_sum",
+    "z_sum",
+    "max_queue",
     "large_queue_violation_user_slots",
     "hired_uav_frames",
     "charging_slots",
@@ -44,9 +62,12 @@ TOTAL_KEYS = (
     "battery_reserve_violations",
     "power_violations",
     "provider_violations",
+    "hire_probability_sum",
+    "policy_decisions",
 )
 
 
+@unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is required for PPO monitoring tests")
 class P3TrainingMonitoringTests(unittest.TestCase):
     def test_seed_parser_and_extended_episode_metrics(self) -> None:
         self.assertEqual(parse_seed_list("92026, 92027,92028"), (92026, 92027, 92028))
@@ -88,13 +109,19 @@ class P3TrainingMonitoringTests(unittest.TestCase):
         for index in range(8):
             state = np.zeros(cfg.ppo_state_dim, dtype=np.float32)
             state[index % cfg.ppo_state_dim] = 1.0
-            candidates = np.zeros((3, cfg.ppo_action_dim), dtype=np.float32)
-            candidates[:, 0] = np.arange(3)
-            choice = agent.select(state, candidates)
+            signatures = np.zeros((3, cfg.ppo_signature_dim), dtype=np.int64)
+            signatures[0, 2] = 1
+            signatures[1, 0] = 1
+            signatures[1, 1] = 1
+            signatures[1, 2] = 2
+            signatures[2, 0] = 1
+            signatures[2, 1] = 2
+            signatures[2, 2] = 1
+            choice = agent.select(state, signatures)
             transitions.append(
                 PPOTransition(
                     state_features=state,
-                    candidate_features=candidates,
+                    candidate_signatures=signatures,
                     action_index=choice.action_index,
                     old_log_prob=choice.log_prob,
                     old_value=choice.value,

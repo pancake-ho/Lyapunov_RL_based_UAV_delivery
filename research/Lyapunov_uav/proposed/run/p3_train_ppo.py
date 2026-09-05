@@ -13,7 +13,7 @@ from typing import Callable
 
 import numpy as np
 
-from agent.P3.features import build_candidate_feature_matrix, build_state_features
+from agent.P3.features import build_candidate_signatures, build_state_features
 from agent.P3.ppo_agent import PPOAgent, PPOTransition, finish_trajectory
 from agent.P3.slow_rollout_controller import SlowRolloutController
 from config_p3 import P3Config
@@ -161,10 +161,15 @@ def build_episode_summary(
             totals["degradation"], totals["delivered_chunks"]
         ),
         "mean_queue": safe_ratio(totals["queue_sum"], total_user_slots),
+        "mean_z": safe_ratio(totals["z_sum"], total_user_slots),
+        "max_queue": float(totals["max_queue"]),
         "large_queue_violation_rate": safe_ratio(
             totals["large_queue_violation_user_slots"], total_user_slots
         ),
         "hire_rate": safe_ratio(totals["hired_uav_frames"], total_uav_frames),
+        "mean_hire_probability": safe_ratio(
+            totals["hire_probability_sum"], totals["policy_decisions"]
+        ),
         "charging_fraction": safe_ratio(totals["charging_slots"], total_uav_slots),
         "return_to_charge_events": int(totals["return_to_charge_events"]),
         "charging_need_events": int(totals["charging_need_events"]),
@@ -226,6 +231,8 @@ def train_episode(
             "quality_switches",
             "quality_transitions",
             "queue_sum",
+            "z_sum",
+            "max_queue",
             "large_queue_violation_user_slots",
             "hired_uav_frames",
             "charging_slots",
@@ -240,6 +247,8 @@ def train_episode(
             "battery_reserve_violations",
             "power_violations",
             "provider_violations",
+            "hire_probability_sum",
+            "policy_decisions",
         )
     }
     quality_histogram = np.zeros(cfg.num_quality_levels, dtype=np.float64)
@@ -260,12 +269,12 @@ def train_episode(
                 frame=frame,
             )
             state_features = build_state_features(state, region, users, cfg)
-            candidate_features = build_candidate_feature_matrix(
-                state, candidates.actions, cfg
+            candidate_signatures = build_candidate_signatures(
+                candidates.actions, cfg
             )
             choice = agent.select(
                 state_features,
-                candidate_features,
+                candidate_signatures,
                 deterministic=False,
             )
             action = candidates.actions[choice.action_index]
@@ -275,7 +284,7 @@ def train_episode(
                     "region": region,
                     "users": users,
                     "state_features": state_features,
-                    "candidate_features": candidate_features,
+                    "candidate_signatures": candidate_signatures,
                     "choice": choice,
                 }
             )
@@ -303,6 +312,10 @@ def train_episode(
             totals["quality_switches"] += result.quality_switches
             totals["quality_transitions"] += result.quality_transitions
             totals["queue_sum"] += result.queue_sum
+            totals["z_sum"] += float(np.sum(result.z_samples))
+            totals["max_queue"] = max(
+                totals["max_queue"], float(np.max(result.queue_samples))
+            )
             totals["large_queue_violation_user_slots"] += (
                 result.large_queue_violation_user_slots
             )
@@ -349,10 +362,12 @@ def train_episode(
             reward = -result.frame_dpp_cost * cfg.ppo_reward_scale
             totals["scaled_reward"] += reward
             choice = item["choice"]
+            totals["hire_probability_sum"] += choice.hire_probability
+            totals["policy_decisions"] += 1.0
             trajectories[region].append(
                 PPOTransition(
                     state_features=item["state_features"],
-                    candidate_features=item["candidate_features"],
+                    candidate_signatures=item["candidate_signatures"],
                     action_index=choice.action_index,
                     old_log_prob=choice.log_prob,
                     old_value=choice.value,
@@ -412,6 +427,16 @@ VALIDATION_MEAN_METRICS = {
     "validation_quality_p05_utility": "quality_p05_utility",
     "validation_quality_switch_rate": "quality_switch_rate",
     "validation_hire_rate": "hire_rate",
+    "validation_mean_z": "mean_z",
+    "validation_p95_z": "p95_z",
+    "validation_max_queue": "max_queue",
+    "validation_large_queue_violation_rate": "large_queue_violation_rate",
+    "validation_steady_state_stall_ratio": "steady_state_stall_ratio",
+    "validation_worst_user_stall_ratio": "worst_user_stall_ratio",
+    "validation_worst_user_quality_utility": "worst_user_quality_utility",
+    "validation_jain_service_fairness": "jain_service_fairness",
+    "validation_rsu_capacity_utilization": "rsu_capacity_utilization",
+    "validation_uav_capacity_utilization_given_hire": "uav_capacity_utilization_given_hire",
     "validation_min_final_battery_soc": "min_final_battery_soc",
     "validation_stranded_before_charge_rate": "stranded_before_charge_rate",
     "validation_precharge_depletion_rate": "precharge_depletion_rate",
@@ -428,6 +453,9 @@ def empty_validation_summary() -> dict:
             "validation_battery_reserve_violations": math.nan,
             "validation_power_violations": math.nan,
             "validation_provider_violations": math.nan,
+            "validation_rsu_only_stall_ratio": math.nan,
+            "validation_stall_improvement_vs_rsu": math.nan,
+            "validation_action_collapse": math.nan,
         }
     )
     return result
@@ -440,6 +468,7 @@ def validate_agent(
     episode: int,
     output_dir: Path,
     logger: EventLogger,
+    baseline_cache: dict[int, dict],
 ) -> dict:
     summaries: list[dict] = []
     validation_dir = output_dir / "validation" / f"episode_{episode + 1:04d}"
@@ -451,6 +480,13 @@ def validate_agent(
         )
         started = time.perf_counter()
         validation_cfg = replace(agent_cfg, seed=seed)
+        if seed not in baseline_cache:
+            baseline_cache[seed] = run_policy(
+                validation_cfg,
+                "rsu_only",
+                validation_dir,
+                write_outputs=False,
+            ).summary
         summary = run_policy(
             validation_cfg,
             "ppo",
@@ -503,6 +539,17 @@ def validate_agent(
     }
     aggregate["validation_dpp_std"] = float(
         np.std([row["dpp_cost_per_user_slot"] for row in summaries])
+    )
+    rsu_stall = float(
+        np.mean([baseline_cache[seed]["stall_ratio"] for seed in validation_seeds])
+    )
+    aggregate["validation_rsu_only_stall_ratio"] = rsu_stall
+    aggregate["validation_stall_improvement_vs_rsu"] = (
+        rsu_stall - aggregate["validation_stall_ratio"]
+    )
+    hire_rate = aggregate["validation_hire_rate"]
+    aggregate["validation_action_collapse"] = int(
+        not 0.01 <= hire_rate <= 0.99
     )
     for key in (
         "battery_reserve_violations",
@@ -707,7 +754,12 @@ def main() -> None:
         help="backward-compatible single-seed override",
     )
     parser.add_argument("--validation-interval", type=int, default=10)
-    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="0 disables early stopping; recommended for final learning curves",
+    )
     parser.add_argument("--min-delta", type=float, default=1e-4)
     parser.add_argument("--checkpoint-interval", type=int, default=10)
     parser.add_argument("--progress-interval-frames", type=int, default=20)
@@ -794,10 +846,15 @@ def main() -> None:
 
     rows: list[dict] = []
     best_validation_dpp = math.inf
+    best_selected_validation_dpp = math.inf
+    best_validation_stall = math.inf
+    best_validation_original_cost = math.inf
+    best_validation_deployable = False
     best_validation_episode = -1
     validations_without_improvement = 0
     started = time.perf_counter()
     termination_reason = "completed"
+    validation_baseline_cache: dict[int, dict] = {}
 
     try:
         for episode in range(args.episodes):
@@ -883,19 +940,80 @@ def main() -> None:
                     episode,
                     output_dir,
                     logger,
+                    validation_baseline_cache,
                 )
                 check_finite_metrics(validation, f"validation episode {episode}")
                 row.update(validation)
                 validation_dpp = float(row["validation_dpp_per_user_slot"])
-                improved = validation_dpp < best_validation_dpp - args.min_delta
-                if improved:
+                dpp_improved = validation_dpp < best_validation_dpp - args.min_delta
+                if dpp_improved:
                     best_validation_dpp = validation_dpp
+                    agent.save(
+                        output_dir / "best_dpp.pt",
+                        metadata={
+                            "episode": episode,
+                            "selector": "minimum_validation_dpp",
+                            "validation_seeds": validation_seeds,
+                            "validation_summary": validation,
+                        },
+                    )
+                validation_stall = float(row["validation_stall_ratio"])
+                validation_original = float(
+                    row["validation_original_cost_per_user_slot"]
+                )
+                validation_deployable = (
+                    int(row["validation_action_collapse"]) == 0
+                    and float(row["validation_stall_improvement_vs_rsu"]) >= 0.0
+                    and float(row["validation_large_queue_violation_rate"]) == 0.0
+                    and int(row["validation_battery_reserve_violations"]) == 0
+                    and int(row["validation_power_violations"]) == 0
+                    and int(row["validation_provider_violations"]) == 0
+                )
+                if validation_deployable:
+                    improved = (
+                        not best_validation_deployable
+                        or validation_original
+                        < best_validation_original_cost - args.min_delta
+                        or (
+                            abs(
+                                validation_original
+                                - best_validation_original_cost
+                            )
+                            <= args.min_delta
+                            and validation_dpp < best_selected_validation_dpp
+                        )
+                    )
+                else:
+                    improved = (
+                        not best_validation_deployable
+                        and (
+                            validation_stall
+                            < best_validation_stall - args.min_delta
+                            or (
+                                abs(validation_stall - best_validation_stall)
+                                <= args.min_delta
+                                and validation_original
+                                < best_validation_original_cost
+                            )
+                        )
+                    )
+                if improved:
+                    best_validation_stall = validation_stall
+                    best_validation_original_cost = validation_original
+                    best_selected_validation_dpp = validation_dpp
+                    best_validation_deployable = bool(validation_deployable)
                     best_validation_episode = episode
                     validations_without_improvement = 0
                     agent.save(
                         output_dir / "best.pt",
                         metadata={
                             "episode": episode,
+                            "selector": (
+                                "minimum_original_cost_with_stability_guardrails"
+                                if validation_deployable
+                                else "provisional_minimum_validation_stall"
+                            ),
+                            "deployable": bool(validation_deployable),
                             "validation_seeds": validation_seeds,
                             "validation_dpp_per_user_slot": validation_dpp,
                             "validation_dpp_std": row["validation_dpp_std"],
@@ -907,7 +1025,13 @@ def main() -> None:
                 print(
                     f"[VAL] ep={episode + 1:04d} "
                     f"dpp={validation_dpp:.6f}±{row['validation_dpp_std']:.6f} "
-                    f"best={best_validation_dpp:.6f}@{best_validation_episode + 1:04d} "
+                    f"stall={validation_stall:.4f} "
+                    f"vs-rsu={row['validation_stall_improvement_vs_rsu']:+.4f} "
+                    f"hire={row['validation_hire_rate']:.4f} "
+                    f"collapse={int(row['validation_action_collapse'])} "
+                    f"deployable={int(validation_deployable)} "
+                    f"best-stall={best_validation_stall:.4f}@"
+                    f"{best_validation_episode + 1:04d} "
                     f"bad-validations={validations_without_improvement}/"
                     f"{args.early_stopping_patience} improved={int(improved)}",
                     flush=True,
@@ -945,6 +1069,11 @@ def main() -> None:
                 else math.nan
             )
             row["best_validation_episode"] = best_validation_episode
+            row["best_validation_stall_ratio"] = (
+                best_validation_stall
+                if math.isfinite(best_validation_stall)
+                else math.nan
+            )
             row["validations_without_improvement"] = validations_without_improvement
             rows.append(row)
 
@@ -957,6 +1086,22 @@ def main() -> None:
                     if math.isfinite(best_validation_dpp)
                     else None
                 ),
+                "selected_validation_dpp_per_user_slot": (
+                    best_selected_validation_dpp
+                    if math.isfinite(best_selected_validation_dpp)
+                    else None
+                ),
+                "best_validation_stall_ratio": (
+                    best_validation_stall
+                    if math.isfinite(best_validation_stall)
+                    else None
+                ),
+                "best_validation_original_cost_per_user_slot": (
+                    best_validation_original_cost
+                    if math.isfinite(best_validation_original_cost)
+                    else None
+                ),
+                "best_validation_deployable": best_validation_deployable,
                 "validations_without_improvement": validations_without_improvement,
                 "elapsed_seconds": elapsed_seconds,
             }
@@ -1007,7 +1152,7 @@ def main() -> None:
                     f"{args.min_delta:g} for "
                     f"{validations_without_improvement} validations; "
                     f"best episode={best_validation_episode + 1}, "
-                    f"best DPP={best_validation_dpp:.6f}",
+                    f"best stall={best_validation_stall:.6f}",
                     flush=True,
                 )
                 break
@@ -1038,6 +1183,22 @@ def main() -> None:
         "best_validation_dpp_per_user_slot": (
             best_validation_dpp if math.isfinite(best_validation_dpp) else None
         ),
+        "selected_validation_dpp_per_user_slot": (
+            best_selected_validation_dpp
+            if math.isfinite(best_selected_validation_dpp)
+            else None
+        ),
+        "best_validation_stall_ratio": (
+            best_validation_stall
+            if math.isfinite(best_validation_stall)
+            else None
+        ),
+        "best_validation_original_cost_per_user_slot": (
+            best_validation_original_cost
+            if math.isfinite(best_validation_original_cost)
+            else None
+        ),
+        "best_validation_deployable": best_validation_deployable,
         "validation_seeds": validation_seeds,
         "runtime_seconds": total_seconds,
         "output_dir": str(output_dir),
@@ -1046,7 +1207,9 @@ def main() -> None:
     logger.emit({"event": "run_end", **final_summary}, echo_json=True)
     print(
         f"[DONE] reason={termination_reason} completed={len(rows)}/{args.episodes} "
-        f"best={best_validation_dpp:.6f}@{best_validation_episode + 1:04d} "
+        f"best-stall={best_validation_stall:.6f}@"
+        f"{best_validation_episode + 1:04d} "
+        f"best-dpp={best_validation_dpp:.6f} "
         f"runtime={format_duration(total_seconds)} output={output_dir}",
         flush=True,
     )

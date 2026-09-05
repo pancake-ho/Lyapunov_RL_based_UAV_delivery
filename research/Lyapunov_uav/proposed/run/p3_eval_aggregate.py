@@ -90,7 +90,7 @@ def completed_payloads(
     incomplete = []
     for task in tasks:
         paths = artifact_paths(root / task.group, task)
-        required = ("frames", "distance", "points", "quality", "summary")
+        required = ("frames", "distance", "points", "quality", "users", "summary")
         if not all(paths[name].is_file() for name in required):
             incomplete.append(task)
             continue
@@ -150,10 +150,18 @@ def aggregate_marker_matches(
 def load_completed_task(
     root: Path,
     task: EvalTask,
-) -> tuple[dict, list[dict], list[dict], list[dict], list[dict], dict]:
+) -> tuple[
+    dict,
+    list[dict],
+    list[dict],
+    list[dict],
+    list[dict],
+    list[dict],
+    dict,
+]:
     group_dir = root / task.group
     paths = artifact_paths(group_dir, task)
-    required = ("frames", "distance", "points", "quality", "summary")
+    required = ("frames", "distance", "points", "quality", "users", "summary")
     missing = [name for name in required if not paths[name].is_file()]
     if missing:
         raise FileNotFoundError(
@@ -182,6 +190,7 @@ def load_completed_task(
         relabel(read_csv(paths["distance"]), display_policy),
         relabel(read_csv(paths["points"]), display_policy),
         relabel(read_csv(paths["quality"]), display_policy),
+        relabel(read_csv(paths["users"]), display_policy),
         payload,
     )
 
@@ -243,13 +252,14 @@ def main() -> None:
     distance_rows: list[dict] = []
     point_rows: list[dict] = []
     quality_rows: list[dict] = []
+    user_rows: list[dict] = []
     frame_map: dict[tuple[str, int], list[dict]] = {}
     runtime_rows: list[dict] = []
     fingerprints: list[dict] = []
     configs: list[dict] = []
 
     for task in tasks:
-        summary, frames, distance, points, quality, payload = load_completed_task(
+        summary, frames, distance, points, quality, users, payload = load_completed_task(
             input_root,
             task,
         )
@@ -258,6 +268,7 @@ def main() -> None:
         distance_rows.extend(distance)
         point_rows.extend(points)
         quality_rows.extend(quality)
+        user_rows.extend(users)
         frame_map[(display_policy, task.seed)] = frames
         runtime_rows.append(
             {
@@ -311,6 +322,7 @@ def main() -> None:
     write_csv(output_dir / "distance_by_policy.csv", distance_aggregate)
     write_csv(output_dir / "hover_point_by_policy.csv", point_aggregate)
     write_csv(output_dir / "quality_distribution.csv", quality_aggregate)
+    write_csv(output_dir / "per_user_metrics.csv", user_rows)
     write_csv(output_dir / "task_runtimes.csv", runtime_rows)
     plot_overview(aggregate, output_dir / "p3_overview.png")
     plot_location_distance(

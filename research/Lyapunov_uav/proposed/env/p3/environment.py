@@ -111,6 +111,7 @@ def simulate_region_frame(
     users = tuple(sorted(int(user) for user in region_users))
     queue = state.queue.copy()
     last_quality = state.last_quality_index.copy()
+    last_stalled = state.last_stalled.copy()
     battery = float(state.battery_j[action.region])
     previous_x = float(state.uav_x[action.region])
     target_x = action.target_x(cfg)
@@ -132,6 +133,7 @@ def simulate_region_frame(
     dpp_sum = 0.0
     degradation_sum = 0.0
     delivered_sum = 0.0
+    payload_bits_sum = 0.0
     utility_sum = 0.0
     quality_level_sum = 0.0
     quality_hist = np.zeros(cfg.num_quality_levels, dtype=np.float64)
@@ -141,6 +143,15 @@ def simulate_region_frame(
     served_slots = 0
     q_violation_slots = 0
     queue_sum = 0.0
+    queue_samples: list[float] = []
+    z_samples: list[float] = []
+    user_index = {user: index for index, user in enumerate(users)}
+    user_delivered = np.zeros(len(users), dtype=np.float64)
+    user_utility = np.zeros(len(users), dtype=np.float64)
+    user_stall_slots = np.zeros(len(users), dtype=np.int64)
+    user_served_slots = np.zeros(len(users), dtype=np.int64)
+    user_stall_events = np.zeros(len(users), dtype=np.int64)
+    user_queue_sum = np.zeros(len(users), dtype=np.float64)
     consumed_energy = relocation.consumed_j
     charged_energy = 0.0
     reserve_violations = 0
@@ -149,6 +160,7 @@ def simulate_region_frame(
     peak_uav_power = 0.0
     uav_distance_sum = 0.0
     uav_scheduled_slots = 0
+    rsu_scheduled_slots = 0
 
     distance_opportunities = np.zeros(cfg.num_distance_bins, dtype=np.float64)
     distance_served = np.zeros_like(distance_opportunities)
@@ -174,6 +186,7 @@ def simulate_region_frame(
                 fading=float(trace.rsu_fading[slot, action.region, user]),
             )
             provider_count[user] += 1
+        rsu_scheduled_slots += len(action.rsu_users)
 
         uav_distances: dict[int, float] = {}
         if action.hired:
@@ -241,11 +254,22 @@ def simulate_region_frame(
             )
             degradation_sum += degradation
             delivered_sum += delivered
+            payload_bits_sum += option.payload_bits
             utility_sum += option.utility
             stall_slots += stalled
             served_slots += int(delivered > 0.0)
             q_violation_slots += int(q_before > cfg.large_queue_level)
             queue_sum += q_before
+            queue_samples.append(q_before)
+            z_samples.append(z_before)
+            local_index = user_index[user]
+            user_delivered[local_index] += delivered
+            user_utility[local_index] += option.utility
+            user_stall_slots[local_index] += stalled
+            user_served_slots[local_index] += int(delivered > 0.0)
+            user_stall_events[local_index] += int(stalled and not last_stalled[user])
+            user_queue_sum[local_index] += q_before
+            last_stalled[user] = bool(stalled)
 
             if option.chunks > 0 and option.quality_index >= 0:
                 quality_hist[option.quality_index] += option.chunks
@@ -292,9 +316,11 @@ def simulate_region_frame(
         original_cost=float(degradation_sum + hiring_cost),
         queue_after=queue[local].copy(),
         last_quality_after=last_quality[local].copy(),
+        last_stalled_after=last_stalled[local].copy(),
         battery_after_j=float(battery),
         uav_x_after=float(target_x),
         delivered_chunks=float(delivered_sum),
+        payload_bits=float(payload_bits_sum),
         quality_utility=float(utility_sum),
         quality_level_sum=float(quality_level_sum),
         quality_histogram=quality_hist,
@@ -305,6 +331,14 @@ def simulate_region_frame(
         served_user_slots=int(served_slots),
         large_queue_violation_user_slots=int(q_violation_slots),
         queue_sum=float(queue_sum),
+        queue_samples=np.asarray(queue_samples, dtype=np.float64),
+        z_samples=np.asarray(z_samples, dtype=np.float64),
+        user_delivered_chunks=user_delivered,
+        user_quality_utility=user_utility,
+        user_stall_slots=user_stall_slots,
+        user_served_slots=user_served_slots,
+        user_stall_events=user_stall_events,
+        user_queue_sum=user_queue_sum,
         energy_consumed_j=float(consumed_energy),
         energy_charged_j=float(charged_energy),
         relocation_events=int(relocation.consumed_j > 0.0),
@@ -320,6 +354,7 @@ def simulate_region_frame(
         uav_total_power_peak_w=float(peak_uav_power),
         uav_distance_sum_m=float(uav_distance_sum),
         uav_scheduled_user_slots=int(uav_scheduled_slots),
+        rsu_scheduled_user_slots=int(rsu_scheduled_slots),
         distance_opportunities=distance_opportunities,
         distance_served_slots=distance_served,
         distance_stall_slots=distance_stall,
@@ -340,9 +375,12 @@ def apply_region_result(
         raise ValueError("queue result shape does not match region users")
     if result.last_quality_after.shape != users.shape:
         raise ValueError("quality result shape does not match region users")
+    if result.last_stalled_after.shape != users.shape:
+        raise ValueError("stall-state result shape does not match region users")
     if users.size:
         state.queue[users] = result.queue_after
         state.last_quality_index[users] = result.last_quality_after
+        state.last_stalled[users] = result.last_stalled_after
     state.battery_j[region] = result.battery_after_j
     state.uav_x[region] = result.uav_x_after
 

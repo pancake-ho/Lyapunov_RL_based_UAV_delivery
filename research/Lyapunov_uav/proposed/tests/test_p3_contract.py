@@ -23,7 +23,7 @@ except ModuleNotFoundError:
     TORCH_AVAILABLE = False
 
 from agent.P3.exact_fast_controller import ExactFastController
-from agent.P3.features import build_candidate_feature_matrix, build_state_features
+from agent.P3.features import build_candidate_signatures, build_state_features
 from agent.P3.slow_rollout_controller import SlowRolloutController
 from config_p3 import P3Config
 from env.p3.battery import (
@@ -265,6 +265,24 @@ class P3ContractTests(unittest.TestCase):
         self.assertEqual(first.action, second.action)
         self.assertAlmostEqual(first.estimated_dpp_cost, second.estimated_dpp_cost)
 
+    def test_factorized_state_and_signatures_preserve_global_user_ids(self) -> None:
+        membership = region_membership(self.state, self.cfg)
+        users = np.flatnonzero(membership == 1).tolist()
+        controller = SlowRolloutController(self.cfg)
+        candidates = controller.candidate_actions(
+            self.state, 1, users, policy="ppo", frame=0
+        )
+        signatures = build_candidate_signatures(candidates.actions, self.cfg)
+        self.assertEqual(signatures.shape[1], self.cfg.ppo_signature_dim)
+        self.assertEqual(np.unique(signatures, axis=0).shape[0], len(candidates.actions))
+
+        features = build_state_features(self.state, 1, users, self.cfg)
+        user_matrix = features[self.cfg.ppo_global_feature_dim :].reshape(
+            self.cfg.num_users, self.cfg.ppo_user_feature_dim
+        )
+        present = set(np.flatnonzero(user_matrix[:, 0] > 0.5).tolist())
+        self.assertEqual(present, set(users))
+
     @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is required for PPO tests")
     def test_ppo_features_and_choice_are_feasible(self) -> None:
         users = self.users(0)
@@ -273,11 +291,9 @@ class P3ContractTests(unittest.TestCase):
             self.state, 0, users, policy="ppo", frame=0
         )
         state_features = build_state_features(self.state, 0, users, self.cfg)
-        action_features = build_candidate_feature_matrix(
-            self.state, candidates.actions, self.cfg
-        )
+        action_signatures = build_candidate_signatures(candidates.actions, self.cfg)
         agent = PPOAgent(self.cfg, device="cpu")
-        choice = agent.select(state_features, action_features)
+        choice = agent.select(state_features, action_signatures)
         self.assertTrue(0 <= choice.action_index < len(candidates.actions))
         validate_region_action(candidates.actions[choice.action_index], users, self.cfg)
 
@@ -310,6 +326,21 @@ class P3ContractTests(unittest.TestCase):
         self.assertEqual(summary["provider_violations"], 0)
         self.assertEqual(len(result.distance_rows), self.cfg.num_distance_bins)
         self.assertEqual(len(result.point_rows), len(self.cfg.candidate_offsets_m))
+        self.assertEqual(len(result.user_rows), self.cfg.num_users)
+        self.assertGreaterEqual(summary["p95_queue"], summary["mean_queue"])
+        self.assertGreaterEqual(summary["jain_service_fairness"], 0.0)
+
+    def test_default_queue_has_nonvacuous_prefetch_range(self) -> None:
+        self.assertGreater(
+            self.cfg.max_chunks_per_slot,
+            self.cfg.playback_chunks_per_slot,
+        )
+        queue_after, _, _, _ = update_playback_queue(
+            self.cfg.initial_playback_queue,
+            self.cfg.max_chunks_per_slot,
+            self.cfg,
+        )
+        self.assertGreater(queue_after, self.cfg.initial_playback_queue)
 
     def test_long_baseline_returns_to_charge_without_dead_end(self) -> None:
         cfg = replace(self.cfg, num_frames=100, seed=3026)

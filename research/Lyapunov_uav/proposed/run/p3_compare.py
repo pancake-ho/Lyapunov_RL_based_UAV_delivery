@@ -57,16 +57,25 @@ def mean_ci95(values: Sequence[float]) -> tuple[float, float]:
 def aggregate_summaries(summaries: Sequence[dict], policies: Sequence[str]) -> list[dict]:
     metrics = (
         "stall_ratio",
+        "startup_stall_ratio",
+        "steady_state_stall_ratio",
+        "mean_stall_duration_slots",
         "served_user_ratio",
         "hire_rate",
         "charging_fraction",
         "delivered_chunks_per_user_slot",
+        "throughput_mbps",
         "average_quality_utility",
         "average_quality_level",
         "quality_p05_utility",
         "quality_switch_rate",
         "degradation_per_chunk",
         "mean_queue",
+        "p95_queue",
+        "max_queue",
+        "mean_z",
+        "p95_z",
+        "min_z",
         "large_queue_violation_rate",
         "original_cost_per_user_slot",
         "dpp_cost_per_user_slot",
@@ -77,6 +86,11 @@ def aggregate_summaries(summaries: Sequence[dict], policies: Sequence[str]) -> l
         "stranded_before_charge_rate",
         "mean_uav_user_distance_m",
         "peak_uav_total_power_w",
+        "rsu_capacity_utilization",
+        "uav_capacity_utilization_given_hire",
+        "jain_service_fairness",
+        "worst_user_stall_ratio",
+        "worst_user_quality_utility",
         "runtime_seconds",
     )
     result: list[dict] = []
@@ -398,6 +412,7 @@ def main() -> None:
     all_distance: list[dict] = []
     all_points: list[dict] = []
     all_quality: list[dict] = []
+    all_users: list[dict] = []
     frame_map: dict[tuple[str, int], list[dict]] = {}
 
     for seed in seeds:
@@ -419,6 +434,7 @@ def main() -> None:
             all_distance.extend(result.distance_rows)
             all_points.extend(result.point_rows)
             all_quality.extend(result.quality_rows)
+            all_users.extend(result.user_rows)
             frame_map[(policy, seed)] = result.frame_rows
             print(json.dumps(result.summary, ensure_ascii=False, sort_keys=True))
 
@@ -431,6 +447,7 @@ def main() -> None:
     write_csv(output_dir / "distance_by_policy.csv", distance_aggregate)
     write_csv(output_dir / "hover_point_by_policy.csv", point_aggregate)
     write_csv(output_dir / "quality_distribution.csv", quality_aggregate)
+    write_csv(output_dir / "per_user_metrics.csv", all_users)
     plot_overview(aggregate, output_dir / "p3_overview.png")
     plot_location_distance(
         point_aggregate,

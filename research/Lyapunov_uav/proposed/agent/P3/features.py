@@ -6,6 +6,7 @@ import numpy as np
 
 from config_p3 import P3Config
 from env.p3.battery import activation_energy_required_j
+from env.p3.radio import required_uav_power_w, rsu_link_capacity_bps
 from env.p3.types import P3State, RegionAction
 
 
@@ -39,21 +40,44 @@ def build_state_features(
         ),
     ]
 
-    user_features = np.zeros((cfg.num_users, 6), dtype=np.float32)
+    user_features = np.zeros(
+        (cfg.num_users, cfg.ppo_user_feature_dim), dtype=np.float32
+    )
     speed_span = max(cfg.vehicle_speed_max_mps - cfg.vehicle_speed_min_mps, 1e-9)
-    for row, user in enumerate(users[: cfg.num_users]):
+    for user in users:
         q = float(state.queue[user])
         z = cfg.large_queue_level - q
         relative_x = (float(state.user_x[user]) - center) / cfg.region_length_m
         speed = (float(state.user_speed[user]) - cfg.vehicle_speed_min_mps) / speed_span
-        rsu_distance = abs(float(state.user_x[user]) - center) / cfg.region_length_m
-        user_features[row] = (
-            1.0,
-            np.clip(q / cfg.large_queue_level, 0.0, 2.0),
-            np.clip(z / cfg.large_queue_level, -1.0, 1.0),
-            np.clip(relative_x, -2.0, 2.0),
-            np.clip(speed, 0.0, 1.0),
-            np.clip(rsu_distance, 0.0, 2.0),
+        rsu_capacity = rsu_link_capacity_bps(
+            abs(float(state.user_x[user]) - center), 1.0, cfg
+        )
+        rsu_score = np.log1p(
+            rsu_capacity * cfg.slot_duration_s / cfg.chunk_size_bits[0]
+        ) / np.log1p(100.0)
+        uav_scores = []
+        nominal_user_cap = cfg.uav_max_total_power_w / cfg.uav_capacity
+        for point in cfg.candidate_points(region):
+            required = required_uav_power_w(
+                1,
+                0,
+                abs(point - float(state.user_x[user])),
+                1.0,
+                cfg,
+            )
+            ratio = nominal_user_cap / max(required, 1e-12)
+            uav_scores.append(np.log1p(ratio) / np.log1p(1e6))
+        user_features[user] = np.asarray(
+            (
+                1.0,
+                np.clip(q / cfg.large_queue_level, 0.0, 2.0),
+                np.clip(z / cfg.large_queue_level, -1.0, 1.0),
+                np.clip(relative_x, -2.0, 2.0),
+                np.clip(speed, 0.0, 1.0),
+                np.clip(rsu_score, 0.0, 2.0),
+                *(np.clip(score, 0.0, 2.0) for score in uav_scores),
+            ),
+            dtype=np.float32,
         )
     result = np.concatenate(
         [np.asarray(global_features, dtype=np.float32), user_features.reshape(-1)]
@@ -63,55 +87,26 @@ def build_state_features(
     return result
 
 
-def build_action_features(
-    state: P3State,
-    action: RegionAction,
-    cfg: P3Config,
-) -> np.ndarray:
-    """Candidate-conditioned features used by the masked categorical actor."""
-
-    center = cfg.rsu_x(action.region)
-    target = action.target_x(cfg)
-    rsu_z = [
-        cfg.large_queue_level - float(state.queue[user]) for user in action.rsu_users
-    ]
-    uav_z = [
-        cfg.large_queue_level - float(state.queue[user]) for user in action.uav_users
-    ]
-    rsu_distance = [
-        abs(center - float(state.user_x[user])) / cfg.region_length_m
-        for user in action.rsu_users
-    ]
-    uav_distance = [
-        abs(target - float(state.user_x[user])) / cfg.region_length_m
-        for user in action.uav_users
-    ]
-    return np.asarray(
-        [
-            float(action.hired),
-            (target - center) / cfg.region_length_m,
-            abs(target - float(state.uav_x[action.region]))
-            / max(cfg.reachable_distance_m, 1e-9),
-            len(action.rsu_users) / cfg.rsu_capacity,
-            len(action.uav_users) / cfg.uav_capacity,
-            _mean(rsu_z) / cfg.large_queue_level,
-            _mean(uav_z) / cfg.large_queue_level,
-            _mean(rsu_distance),
-            _mean(uav_distance),
-            float(action.hired == 0 and abs(float(state.uav_x[action.region]) - center) > 1e-9),
-        ],
-        dtype=np.float32,
-    )
-
-
-def build_candidate_feature_matrix(
-    state: P3State,
+def build_candidate_signatures(
     actions: Sequence[RegionAction],
     cfg: P3Config,
 ) -> np.ndarray:
+    """Encode feasible joint actions for sequential hard masking.
+
+    PPO is factorized as hire, hovering point, and one provider token per
+    user. Enumeration is retained only as the exact feasibility oracle.
+    """
+
     if not actions:
         raise ValueError("at least one feasible action is required")
-    matrix = np.stack([build_action_features(state, action, cfg) for action in actions])
-    if matrix.shape[1] != cfg.ppo_action_dim:
-        raise RuntimeError(f"unexpected PPO action feature shape: {matrix.shape}")
-    return matrix.astype(np.float32, copy=False)
+    signatures = np.zeros(
+        (len(actions), cfg.ppo_signature_dim), dtype=np.int64
+    )
+    for row, action in enumerate(actions):
+        signatures[row, 0] = int(action.hired)
+        signatures[row, 1] = 0 if action.hired == 0 else action.point_index + 1
+        signatures[row, 2 + np.asarray(action.rsu_users, dtype=np.int64)] = 1
+        signatures[row, 2 + np.asarray(action.uav_users, dtype=np.int64)] = 2
+    if np.unique(signatures, axis=0).shape[0] != len(actions):
+        raise RuntimeError("feasible action enumeration contains duplicate signatures")
+    return signatures

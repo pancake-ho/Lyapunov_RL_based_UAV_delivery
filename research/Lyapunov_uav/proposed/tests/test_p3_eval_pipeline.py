@@ -114,7 +114,7 @@ class P3EvalPipelineTests(unittest.TestCase):
         fingerprint = task_fingerprint(task, frames=400, rollouts=4, checkpoint_sha256=None)
         with tempfile.TemporaryDirectory() as directory:
             paths = artifact_paths(Path(directory), task)
-            for name in ("frames", "distance", "points", "quality"):
+            for name in ("frames", "distance", "points", "quality", "users"):
                 paths[name].parent.mkdir(parents=True, exist_ok=True)
                 paths[name].write_text("header\nvalue\n", encoding="utf-8")
             paths["summary"].parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +125,7 @@ class P3EvalPipelineTests(unittest.TestCase):
             self.assertTrue(is_complete(paths, fingerprint))
             changed = dict(fingerprint, source_sha256="changed")
             self.assertFalse(is_complete(paths, changed))
-            paths["quality"].unlink()
+            paths["users"].unlink()
             self.assertFalse(is_complete(paths, fingerprint))
 
     def test_aggregate_completion_probe_is_non_destructive(self) -> None:

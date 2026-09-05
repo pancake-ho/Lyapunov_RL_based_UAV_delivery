@@ -12,6 +12,7 @@
 
 set -Eeuo pipefail
 
+readonly EXPECTED_BRANCH="feat/new-form-p3"
 readonly PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 readonly CONDA_SH="${CONDA_SH:-/data/$USER/anaconda3/etc/profile.d/conda.sh}"
 readonly CONDA_ENV="${CONDA_ENV:-lab}"
@@ -21,12 +22,15 @@ readonly FRAMES="${FRAMES:-400}"
 readonly SEED="${SEED:-2026}"
 readonly VALIDATION_SEEDS="${VALIDATION_SEEDS:-92026,92027,92028}"
 readonly VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-10}"
-readonly EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-5}"
+readonly EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-0}"
 readonly MIN_DELTA="${MIN_DELTA:-0.0001}"
 readonly CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-10}"
 readonly PROGRESS_INTERVAL_FRAMES="${PROGRESS_INTERVAL_FRAMES:-20}"
 readonly PLOT_INTERVAL="${PLOT_INTERVAL:-5}"
 readonly ROLLING_WINDOW="${ROLLING_WINDOW:-10}"
+readonly ACCEPTANCE_SEEDS="${ACCEPTANCE_SEEDS:-93026,93027,93028}"
+readonly ACCEPTANCE_FRAMES="${ACCEPTANCE_FRAMES:-100}"
+readonly RUN_ACCEPTANCE="${RUN_ACCEPTANCE:-1}"
 
 # The first run showed a deterministic-policy regime shift.  Use a smaller
 # learning rate and a KL guard while keeping the formulation and reward intact.
@@ -61,6 +65,15 @@ if [[ ! -f "$CONDA_SH" ]]; then
 fi
 
 cd "$PROJECT_DIR"
+if [[ "$(git branch --show-current)" != "$EXPECTED_BRANCH" ]]; then
+    echo "Expected branch $EXPECTED_BRANCH, got $(git branch --show-current)" >&2
+    exit 2
+fi
+if [[ -n "$(git status --short)" ]]; then
+    echo "Refusing a non-reproducible dirty worktree" >&2
+    git status --short >&2
+    exit 2
+fi
 mkdir -p logs "$OUTPUT_DIR"
 source "$CONDA_SH"
 conda activate "$CONDA_ENV"
@@ -78,6 +91,7 @@ export MKL_NUM_THREADS="$OMP_NUM_THREADS"
     echo "[SBATCH-START] dirty_files=$(git status --short 2>/dev/null | wc -l)"
     echo "[SBATCH-START] episodes=$EPISODES frames=$FRAMES seed=$SEED"
     echo "[SBATCH-START] validation_seeds=$VALIDATION_SEEDS interval=$VALIDATION_INTERVAL patience=$EARLY_STOPPING_PATIENCE"
+    echo "[SBATCH-START] run_acceptance=$RUN_ACCEPTANCE acceptance_seeds=$ACCEPTANCE_SEEDS acceptance_frames=$ACCEPTANCE_FRAMES"
     echo "[SBATCH-START] lr=$LEARNING_RATE entropy_coef=$ENTROPY_COEF target_kl=$TARGET_KL"
 } | tee -a "$CONSOLE_LOG"
 
@@ -113,3 +127,16 @@ python -u -m run.p3_train_ppo \
     --device cuda \
     --output "$OUTPUT_DIR" 2>&1 \
     | tee -a "$CONSOLE_LOG"
+
+if [[ "$RUN_ACCEPTANCE" == "1" ]]; then
+    python -u -m run.p3_acceptance \
+        --checkpoint "$OUTPUT_DIR/best.pt" \
+        --seeds "$ACCEPTANCE_SEEDS" \
+        --frames "$ACCEPTANCE_FRAMES" \
+        --device cuda \
+        --output "$OUTPUT_DIR/acceptance.json" 2>&1 \
+        | tee -a "$CONSOLE_LOG"
+elif [[ "$RUN_ACCEPTANCE" != "0" ]]; then
+    echo "RUN_ACCEPTANCE must be 0 or 1, got: $RUN_ACCEPTANCE" >&2
+    exit 2
+fi
