@@ -28,6 +28,7 @@ POLICY_LABELS = {
     "always_hire": "Always Hire",
 }
 
+# Paper-style: compact markers + clearly distinguishable line styles.
 POLICY_MARKERS = {
     "proposed": "o",
     "slow_ppo": "s",
@@ -35,14 +36,14 @@ POLICY_MARKERS = {
     "always_hire": "x",
 }
 
-# The sweep contains discrete SNR operating points rather than a continuously
-# sampled curve.  We therefore draw one mean marker (+ 95% CI) per
-# policy/SNR pair and do NOT connect adjacent SNR values with lines.
-#
-# A small symmetric horizontal dodge prevents policies with similar values
-# (especially stall≈0) from covering each other.  The actual SNR is still the
-# tick-center value; the dodge is visualization-only.
-DEFAULT_POINT_DODGE_SPAN_DB = 0.9
+POLICY_LINESTYLES = {
+    "proposed": "-",
+    "slow_ppo": "--",
+    "rsu_only": ":",
+    "always_hire": "-.",
+}
+
+DEFAULT_SHOW_CI = False
 
 _T95 = {
     1: 12.706,
@@ -87,11 +88,15 @@ def t95(n: int) -> float:
 def mean_ci95(values: Iterable[float]) -> tuple[float, float, int]:
     array = np.asarray(list(values), dtype=np.float64)
     array = array[np.isfinite(array)]
+
     if array.size == 0:
         return math.nan, math.nan, 0
+
     mean = float(np.mean(array))
+
     if array.size == 1:
         return mean, 0.0, 1
+
     se = float(np.std(array, ddof=1)) / math.sqrt(array.size)
     return mean, t95(int(array.size)) * se, int(array.size)
 
@@ -99,14 +104,21 @@ def mean_ci95(values: Iterable[float]) -> tuple[float, float, int]:
 def atomic_write_csv(path: Path, rows: Sequence[dict]) -> None:
     if not rows:
         raise ValueError(f"refusing empty CSV: {path}")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+
     try:
         with temporary.open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=list(rows[0].keys()))
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=list(rows[0].keys()),
+            )
             writer.writeheader()
             writer.writerows(rows)
+
         os.replace(temporary, path)
+
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -119,21 +131,30 @@ def setup_matplotlib():
 
     import matplotlib.pyplot as plt
 
+    # Keep the style close to a conventional IEEE/Elsevier paper figure:
+    # compact serif text, thin axes, no decorative grid, small markers.
     plt.rcParams.update(
         {
             "font.family": "serif",
-            "font.size": 11,
-            "axes.titlesize": 15,
-            "axes.labelsize": 12,
-            "axes.spines.top": True,
-            "axes.spines.right": True,
-            "axes.linewidth": 1.0,
-            "xtick.labelsize": 11,
-            "ytick.labelsize": 11,
-            "legend.fontsize": 10,
+            "mathtext.fontset": "stix",
+            "font.size": 9.5,
+            "axes.titlesize": 10.5,
+            "axes.labelsize": 10.5,
+            "axes.linewidth": 0.8,
+            "xtick.labelsize": 9.0,
+            "ytick.labelsize": 9.0,
+            "xtick.direction": "in",
+            "ytick.direction": "in",
+            "xtick.major.size": 3.5,
+            "ytick.major.size": 3.5,
+            "legend.fontsize": 8.5,
             "legend.frameon": False,
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
         }
     )
+
     return plt
 
 
@@ -146,8 +167,18 @@ def load_rows(
     rows: list[dict] = []
     missing: list[Path] = []
 
-    for snr_db, policy, seed in build_tasks(snrs, seeds, policies):
-        path = result_path(root, snr_db, policy, seed)
+    for snr_db, policy, seed in build_tasks(
+        snrs,
+        seeds,
+        policies,
+    ):
+        path = result_path(
+            root,
+            snr_db,
+            policy,
+            seed,
+        )
+
         if not path.is_file():
             missing.append(path)
             continue
@@ -164,7 +195,9 @@ def load_rows(
                 "snr_db": float(payload["snr_db"]),
                 "policy": str(payload["policy"]),
                 "seed": int(payload["seed"]),
-                "runtime_seconds": float(payload["runtime_seconds"]),
+                "runtime_seconds": float(
+                    payload["runtime_seconds"]
+                ),
                 **{
                     key: float(value)
                     for key, value in payload["metrics"].items()
@@ -205,8 +238,11 @@ def aggregate_rows(
                 row
                 for row in rows
                 if row["policy"] == policy
-                and abs(float(row["snr_db"]) - float(snr_db)) <= 1e-9
+                and abs(
+                    float(row["snr_db"]) - float(snr_db)
+                ) <= 1e-9
             ]
+
             if not selected:
                 continue
 
@@ -218,7 +254,8 @@ def aggregate_rows(
 
             for metric in metrics:
                 mean, ci, n = mean_ci95(
-                    float(row[metric]) for row in selected
+                    float(row[metric])
+                    for row in selected
                 )
                 item[f"{metric}_mean"] = mean
                 item[f"{metric}_ci95"] = ci
@@ -230,7 +267,8 @@ def aggregate_rows(
                 "provider_violations",
             ):
                 item[f"{violation}_total"] = sum(
-                    int(row[violation]) for row in selected
+                    int(row[violation])
+                    for row in selected
                 )
 
             output.append(item)
@@ -244,122 +282,141 @@ def _series(
     metric: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     selected = [
-        row for row in aggregate if str(row["policy"]) == str(policy)
+        row
+        for row in aggregate
+        if str(row["policy"]) == str(policy)
     ]
-    selected.sort(key=lambda row: float(row["snr_db"]))
+
+    selected.sort(
+        key=lambda row: float(row["snr_db"])
+    )
 
     x = np.asarray(
-        [float(row["snr_db"]) for row in selected],
+        [
+            float(row["snr_db"])
+            for row in selected
+        ],
         dtype=np.float64,
     )
+
     y = np.asarray(
-        [float(row[f"{metric}_mean"]) for row in selected],
+        [
+            float(row[f"{metric}_mean"])
+            for row in selected
+        ],
         dtype=np.float64,
     )
+
     ci = np.asarray(
-        [float(row[f"{metric}_ci95"]) for row in selected],
+        [
+            float(row[f"{metric}_ci95"])
+            for row in selected
+        ],
         dtype=np.float64,
     )
+
     return x, y, ci
 
 
-def policy_point_offsets(
-    policies: Sequence[str],
-    span_db: float = DEFAULT_POINT_DODGE_SPAN_DB,
-) -> dict[str, float]:
-    """Return symmetric visualization-only horizontal offsets."""
-    ordered = tuple(str(policy) for policy in policies)
-
-    if not ordered:
-        return {}
-
-    if span_db < 0.0:
-        raise ValueError("point dodge span must be non-negative")
-
-    if len(ordered) == 1 or span_db == 0.0:
-        return {policy: 0.0 for policy in ordered}
-
-    offsets = np.linspace(
-        -float(span_db) / 2.0,
-        float(span_db) / 2.0,
-        len(ordered),
+def configure_axis(
+    axis,
+    snrs: Sequence[float],
+    *,
+    xlabel: str = "Nominal SNR (dB)",
+) -> None:
+    snr_values = np.asarray(
+        tuple(float(value) for value in snrs),
+        dtype=np.float64,
     )
 
-    return {
-        policy: float(offset)
-        for policy, offset in zip(ordered, offsets)
-    }
+    axis.set_xticks(snr_values)
+    axis.set_xticklabels(
+        [
+            f"{int(value)}"
+            if abs(value - round(value)) <= 1e-9
+            else f"{value:g}"
+            for value in snr_values
+        ]
+    )
+
+    if snr_values.size > 0:
+        left = float(np.min(snr_values))
+        right = float(np.max(snr_values))
+        margin = max(
+            0.65,
+            0.035 * max(right - left, 1.0),
+        )
+        axis.set_xlim(
+            left - margin,
+            right + margin,
+        )
+
+    axis.set_xlabel(xlabel)
+
+    # The reference paper style does not use a strong background grid.
+    axis.grid(False)
+
+    axis.tick_params(
+        axis="both",
+        which="both",
+        top=False,
+        right=False,
+    )
 
 
-def draw_point_series(
+def draw_paper_lines(
     axis,
     aggregate: Sequence[dict],
     policies: Sequence[str],
     *,
     metric: str,
     multiplier: float,
-    point_dodge_span_db: float,
-    markersize: float,
-    capsize: float,
+    show_ci: bool,
 ) -> None:
-    offsets = policy_point_offsets(
-        policies,
-        span_db=point_dodge_span_db,
-    )
-
     for policy in policies:
-        x, y, ci = _series(aggregate, policy, metric)
-        x_display = x + offsets[str(policy)]
+        x, y, ci = _series(
+            aggregate,
+            policy,
+            metric,
+        )
 
-        # Key change from the previous version:
-        #   * no lines between adjacent SNRs
-        #   * one marker per SNR operating point
-        #   * vertical 95% CI remains visible
-        axis.errorbar(
-            x_display,
+        # Important: points stay exactly at the evaluated SNR values.
+        # No visualization-only horizontal dodge is applied.
+        axis.plot(
+            x,
             y * multiplier,
-            yerr=ci * multiplier,
-            fmt=POLICY_MARKERS.get(policy, "o"),
-            linestyle="none",
-            markersize=markersize,
-            markeredgewidth=1.2,
-            elinewidth=1.15,
-            capsize=capsize,
-            capthick=1.1,
-            label=POLICY_LABELS.get(policy, policy),
+            marker=POLICY_MARKERS.get(
+                policy,
+                "o",
+            ),
+            linestyle=POLICY_LINESTYLES.get(
+                policy,
+                "-",
+            ),
+            linewidth=1.25,
+            markersize=4.2,
+            markeredgewidth=0.8,
+            label=POLICY_LABELS.get(
+                policy,
+                policy,
+            ),
             zorder=3,
         )
 
-
-def configure_snr_axis(
-    axis,
-    snrs: Sequence[float],
-    *,
-    point_dodge_span_db: float,
-) -> None:
-    snr_values = np.asarray(tuple(float(value) for value in snrs))
-    axis.set_xticks(snr_values)
-    axis.set_xticklabels(
-        [
-            f"{int(value)}" if abs(value - round(value)) <= 1e-9
-            else f"{value:g}"
-            for value in snr_values
-        ]
-    )
-
-    # Add a little margin for the visualization-only horizontal dodge.
-    left = float(np.min(snr_values))
-    right = float(np.max(snr_values))
-    margin = max(
-        1.0,
-        float(point_dodge_span_db) / 2.0 + 0.35,
-    )
-    axis.set_xlim(left - margin, right + margin)
-
-    # Only vertical grid guides are used so the eye can immediately associate
-    # the dodged policy markers with the underlying SNR tick center.
-    axis.grid(axis="x", alpha=0.16, linewidth=0.8)
-    axis.grid(axis="y", alpha=0.10, linewidth=0.7)
+        # The paper-style default intentionally omits error bars.
+        # CI values are still preserved in snr_aggregate_metrics.csv.
+        if show_ci:
+            axis.errorbar(
+                x,
+                y * multiplier,
+                yerr=ci * multiplier,
+                fmt="none",
+                elinewidth=0.75,
+                capsize=2.0,
+                capthick=0.75,
+                alpha=0.55,
+                zorder=2,
+            )
 
 
 def plot_metric(
@@ -369,84 +426,89 @@ def plot_metric(
     *,
     metric: str,
     ylabel: str,
-    title: str,
     output: Path,
     multiplier: float = 1.0,
     ylim: tuple[float, float] | None = None,
     note: str | None = None,
-    point_dodge_span_db: float = DEFAULT_POINT_DODGE_SPAN_DB,
+    show_ci: bool = DEFAULT_SHOW_CI,
 ) -> None:
     plt = setup_matplotlib()
+
     fig, axis = plt.subplots(
-        figsize=(7.0, 5.1),
+        figsize=(4.3, 3.35),
         constrained_layout=True,
     )
 
-    draw_point_series(
+    draw_paper_lines(
         axis,
         aggregate,
         policies,
         metric=metric,
         multiplier=multiplier,
-        point_dodge_span_db=point_dodge_span_db,
-        markersize=7.5,
-        capsize=3.5,
+        show_ci=show_ci,
     )
 
-    axis.set_title(title, pad=10)
-    axis.set_xlabel("Nominal SNR (dB)")
-    axis.set_ylabel(ylabel)
-
-    configure_snr_axis(
+    configure_axis(
         axis,
         snrs,
-        point_dodge_span_db=point_dodge_span_db,
     )
+
+    axis.set_ylabel(ylabel)
 
     if ylim is not None:
         axis.set_ylim(*ylim)
 
-    # Point-only rendering is sparse enough that automatic placement is
-    # clearer than forcing the legend over the title or one fixed data region.
+    # Reference-like: compact legend above the axes, no large subplot title.
     axis.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.015),
         ncol=2,
-        loc="best",
+        columnspacing=1.1,
+        handlelength=2.0,
+        handletextpad=0.45,
+        borderaxespad=0.0,
     )
 
     if note:
         axis.text(
             0.5,
-            -0.20,
+            -0.28,
             note,
             transform=axis.transAxes,
             ha="center",
             va="top",
-            fontsize=8,
+            fontsize=7.2,
         )
 
-    output.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     fig.savefig(
         output,
-        dpi=220,
+        dpi=240,
         bbox_inches="tight",
     )
+
     plt.close(fig)
 
 
-def plot_main_panel(
+def plot_paper_panel(
     aggregate: Sequence[dict],
     policies: Sequence[str],
     snrs: Sequence[float],
     output: Path,
     *,
-    point_dodge_span_db: float = DEFAULT_POINT_DODGE_SPAN_DB,
+    show_ci: bool = DEFAULT_SHOW_CI,
 ) -> None:
+    """Create one compact multi-panel figure close to the reference paper."""
     plt = setup_matplotlib()
 
     fig, axes = plt.subplots(
         2,
-        2,
-        figsize=(11.7, 8.6),
+        3,
+        figsize=(10.8, 6.0),
         constrained_layout=True,
     )
 
@@ -454,68 +516,100 @@ def plot_main_panel(
         (
             "stall_ratio",
             "Stall Rate (%)",
-            "Stall Rate",
             100.0,
+            None,
         ),
         (
             "average_video_bitrate_mbps",
             "Average Video Bitrate (Mbps)",
-            "Average Video Bitrate",
             1.0,
+            None,
         ),
         (
             "average_quality_utility",
-            "Average Quality Utility u(q)",
-            "Quality Utility",
+            "Quality Utility $u(q)$",
             1.0,
+            (0.5, 1.02),
+        ),
+        (
+            "average_quality_level",
+            "Average Quality Level",
+            1.0,
+            (1.0, 4.05),
         ),
         (
             "hire_rate",
             "UAV Hiring Rate (%)",
-            "UAV Hiring Rate",
             100.0,
+            (0.0, 100.0),
+        ),
+        (
+            "original_cost_per_user_slot",
+            "Original Cost / User-Slot",
+            1.0,
+            None,
         ),
     )
 
-    for axis, (metric, ylabel, title, multiplier) in zip(
-        axes.flat,
-        panels,
-    ):
-        draw_point_series(
+    for axis, (
+        metric,
+        ylabel,
+        multiplier,
+        ylim,
+    ) in zip(axes.flat, panels):
+        draw_paper_lines(
             axis,
             aggregate,
             policies,
             metric=metric,
             multiplier=multiplier,
-            point_dodge_span_db=point_dodge_span_db,
-            markersize=6.5,
-            capsize=3.0,
-        )
-        axis.set_title(title)
-        axis.set_xlabel("Nominal SNR (dB)")
-        axis.set_ylabel(ylabel)
-        configure_snr_axis(
-            axis,
-            snrs,
-            point_dodge_span_db=point_dodge_span_db,
+            show_ci=show_ci,
         )
 
+        configure_axis(
+            axis,
+            snrs,
+            xlabel="Nominal SNR (dB)",
+        )
+
+        axis.set_ylabel(ylabel)
+
+        if ylim is not None:
+            axis.set_ylim(*ylim)
+
+    # One shared legend, as in the reference multi-panel figure.
     handles, labels = axes[0, 0].get_legend_handles_labels()
+
     fig.legend(
         handles,
         labels,
         loc="upper center",
-        ncol=min(4, len(labels)),
         bbox_to_anchor=(0.5, 1.015),
+        ncol=min(4, len(labels)),
+        columnspacing=1.35,
+        handlelength=2.1,
+        handletextpad=0.45,
         frameon=False,
     )
 
-    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.suptitle(
+        "[Nominal SNR]",
+        y=1.055,
+        fontsize=12.5,
+        fontweight="semibold",
+    )
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     fig.savefig(
         output,
-        dpi=220,
+        dpi=240,
         bbox_inches="tight",
     )
+
     plt.close(fig)
 
 
@@ -524,22 +618,34 @@ def write_readme(
     snrs: Sequence[float],
     seeds: Sequence[int],
     policies: Sequence[str],
-    point_dodge_span_db: float,
+    *,
+    show_ci: bool,
 ) -> None:
     lines = [
         "# P3 SNR sweep",
         "",
         f"- SNR points: {', '.join(f'{value:g}' for value in snrs)} dB",
         f"- seeds: {', '.join(str(seed) for seed in seeds)}",
-        f"- policies: {', '.join(POLICY_LABELS.get(p, p) for p in policies)}",
+        (
+            "- policies: "
+            + ", ".join(
+                POLICY_LABELS.get(policy, policy)
+                for policy in policies
+            )
+        ),
         "",
         "## Plot convention",
         "",
-        "- Adjacent SNR operating points are NOT connected by lines.",
-        "- Each marker is the seed mean at one discrete SNR operating point.",
-        "- Vertical error bars are seed-level Student-t 95% confidence intervals.",
-        f"- Policy markers are horizontally dodged within ±{point_dodge_span_db / 2.0:g} dB for visibility only.",
-        "- The actual evaluated SNR is always the labeled tick-center value.",
+        "- Mean values at 20/25/30/35/40 dB are connected with paper-style lines.",
+        "- Markers are placed exactly at the evaluated SNR values; no horizontal dodge is used.",
+        "- Individual plots omit large titles and place a compact legend above the axis.",
+        "- The multi-panel figure uses one shared legend and a group heading `[Nominal SNR]`.",
+        (
+            "- Error bars are shown."
+            if show_ci
+            else "- Error bars are hidden by default for paper-style readability."
+        ),
+        "- Student-t 95% CI values remain available in `snr_aggregate_metrics.csv`.",
         "",
         "## SNR definition",
         "",
@@ -547,18 +653,17 @@ def write_readme(
         "Instantaneous SNR is derived from transmit power, path loss/distance,",
         "fading, bandwidth, Shannon gap, and noise PSD.",
         "",
-        "This experiment defines 30 dB as the nominal operating point",
+        "The experiment defines 30 dB as the nominal operating point",
         "of the original trained channel and shifts all instantaneous link SNRs",
-        "by changing the common noise PSD:",
+        "through the common noise PSD:",
         "",
         "- 20 dB -> baseline -10 dB",
         "- 25 dB -> baseline -5 dB",
-        "- 30 dB -> exactly the original trained channel",
+        "- 30 dB -> original trained/evaluated channel",
         "- 35 dB -> baseline +5 dB",
         "- 40 dB -> baseline +10 dB",
         "",
-        "Geometry, fading, transmit-power decisions and battery constraints remain active.",
-        "For this reason the x-axis is `Nominal SNR (dB)`, not a fixed per-link `Transmit SNR`.",
+        "Geometry, fading, power decisions and battery constraints remain active.",
         "",
         "## Quality utility",
         "",
@@ -567,8 +672,7 @@ def write_readme(
         "- Q3: u=0.86, 2 Mbit/chunk",
         "- Q4: u=1.00, 4 Mbit/chunk",
         "",
-        "`Slow-PPO` means the validation-selected `best.pt` checkpoint.",
-        "95% confidence intervals are seed-level Student-t intervals.",
+        "`Slow-PPO` is the validation-selected `best.pt` checkpoint.",
     ]
 
     (out / "README.md").write_text(
@@ -579,45 +683,60 @@ def write_readme(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Aggregate and point-plot P3 SNR sweep"
+        description=(
+            "Aggregate and render paper-style P3 SNR sweep figures"
+        )
     )
+
     parser.add_argument(
         "--input",
         type=Path,
         required=True,
     )
+
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
     )
+
     parser.add_argument(
         "--snrs-db",
         default=":".join(
-            str(int(value)) for value in DEFAULT_SNRS_DB
+            str(int(value))
+            for value in DEFAULT_SNRS_DB
         ),
     )
+
     parser.add_argument(
         "--seeds",
-        default=":".join(map(str, DEFAULT_SEEDS)),
-    )
-    parser.add_argument(
-        "--policies",
-        default=":".join(DEFAULT_POLICIES),
-    )
-    parser.add_argument(
-        "--point-dodge-span-db",
-        type=float,
-        default=DEFAULT_POINT_DODGE_SPAN_DB,
-        help=(
-            "total horizontal visualization span used to separate policy "
-            "markers around each SNR tick; 0 disables the dodge"
+        default=":".join(
+            map(str, DEFAULT_SEEDS)
         ),
     )
+
+    parser.add_argument(
+        "--policies",
+        default=":".join(
+            DEFAULT_POLICIES
+        ),
+    )
+
+    parser.add_argument(
+        "--show-ci",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_SHOW_CI,
+        help=(
+            "optionally overlay thin 95% Student-t CI bars; "
+            "default is no CI bars to match the reference paper style"
+        ),
+    )
+
     parser.add_argument(
         "--if-complete",
         action="store_true",
     )
+
     return parser
 
 
@@ -625,14 +744,23 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.point_dodge_span_db < 0.0:
-        parser.error("--point-dodge-span-db must be non-negative")
+    snrs = parse_list(
+        args.snrs_db,
+        float,
+    )
 
-    snrs = parse_list(args.snrs_db, float)
-    seeds = parse_list(args.seeds, int)
-    policies = parse_list(args.policies, str)
+    seeds = parse_list(
+        args.seeds,
+        int,
+    )
+
+    policies = parse_list(
+        args.policies,
+        str,
+    )
 
     root = args.input.resolve()
+
     out = (
         args.output.resolve()
         if args.output is not None
@@ -658,10 +786,13 @@ def main() -> None:
             return
 
         preview = "\n".join(
-            str(path) for path in missing[:10]
+            str(path)
+            for path in missing[:10]
         )
+
         raise RuntimeError(
-            f"SNR sweep incomplete; missing {len(missing)} runs:\n"
+            f"SNR sweep incomplete; "
+            f"missing {len(missing)} runs:\n"
             f"{preview}"
         )
 
@@ -671,23 +802,38 @@ def main() -> None:
         policies,
     )
 
-    out.mkdir(parents=True, exist_ok=True)
+    out.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     atomic_write_csv(
         out / "snr_seed_metrics.csv",
         rows,
     )
+
     atomic_write_csv(
         out / "snr_aggregate_metrics.csv",
         aggregate,
     )
 
-    plot_main_panel(
+    # Main paper-like 2x3 multi-panel figure.
+    plot_paper_panel(
+        aggregate,
+        policies,
+        snrs,
+        out / "p3_snr_sweep_paper.png",
+        show_ci=args.show_ci,
+    )
+
+    # Keep the old main filename for compatibility, but render it with the
+    # exact same paper-style panel.
+    plot_paper_panel(
         aggregate,
         policies,
         snrs,
         out / "p3_snr_sweep_main.png",
-        point_dodge_span_db=args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     plot_metric(
@@ -696,10 +842,9 @@ def main() -> None:
         snrs,
         metric="stall_ratio",
         ylabel="Stall Rate (%)",
-        title="Stall Rate vs. Nominal SNR",
         output=out / "01_stall_vs_snr.png",
         multiplier=100.0,
-        point_dodge_span_db=args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     plot_metric(
@@ -708,9 +853,8 @@ def main() -> None:
         snrs,
         metric="average_video_bitrate_mbps",
         ylabel="Average Video Bitrate (Mbps)",
-        title="Average Video Bitrate vs. Nominal SNR",
         output=out / "02_bitrate_vs_snr.png",
-        point_dodge_span_db=args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     plot_metric(
@@ -718,15 +862,14 @@ def main() -> None:
         policies,
         snrs,
         metric="average_quality_utility",
-        ylabel="Average Quality Utility u(q)",
-        title="Quality Utility vs. Nominal SNR",
+        ylabel="Quality Utility $u(q)$",
         output=out / "03_quality_utility_vs_snr.png",
         ylim=(0.5, 1.02),
         note=(
-            "Q1: u=0.55 | Q2: u=0.72 | "
-            "Q3: u=0.86 | Q4: u=1.00"
+            "Q1: 0.55 | Q2: 0.72 | "
+            "Q3: 0.86 | Q4: 1.00"
         ),
-        point_dodge_span_db=args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     plot_metric(
@@ -735,14 +878,13 @@ def main() -> None:
         snrs,
         metric="average_quality_level",
         ylabel="Average Quality Level",
-        title="Average Quality Level vs. Nominal SNR",
         output=out / "04_quality_level_vs_snr.png",
         ylim=(1.0, 4.05),
         note=(
             "Q1/Q2/Q3/Q4 chunk sizes: "
             "0.5 / 1 / 2 / 4 Mbit"
         ),
-        point_dodge_span_db=args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     plot_metric(
@@ -751,11 +893,10 @@ def main() -> None:
         snrs,
         metric="hire_rate",
         ylabel="UAV Hiring Rate (%)",
-        title="UAV Hiring Rate vs. Nominal SNR",
         output=out / "05_hiring_vs_snr.png",
         multiplier=100.0,
         ylim=(0.0, 100.0),
-        point_dodge_span_db=args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     plot_metric(
@@ -763,10 +904,9 @@ def main() -> None:
         policies,
         snrs,
         metric="original_cost_per_user_slot",
-        ylabel="Original Objective Cost / User-Slot",
-        title="Original Cost vs. Nominal SNR",
+        ylabel="Original Cost / User-Slot",
         output=out / "06_original_cost_vs_snr.png",
-        point_dodge_span_db=args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     write_readme(
@@ -774,7 +914,7 @@ def main() -> None:
         snrs,
         seeds,
         policies,
-        args.point_dodge_span_db,
+        show_ci=args.show_ci,
     )
 
     print(
@@ -783,8 +923,8 @@ def main() -> None:
         f"snrs={len(snrs)} "
         f"seeds={len(seeds)} "
         f"policies={len(policies)} "
-        f"style=point-only "
-        f"dodge_span_db={args.point_dodge_span_db:g} "
+        f"style=paper-lines "
+        f"show_ci={args.show_ci} "
         f"output={out}",
         flush=True,
     )
