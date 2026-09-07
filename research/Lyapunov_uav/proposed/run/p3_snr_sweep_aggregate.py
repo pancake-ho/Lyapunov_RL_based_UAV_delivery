@@ -22,8 +22,8 @@ from run.p3_snr_sweep import (
 
 
 POLICY_LABELS = {
-    "proposed": "Proposed",
-    "slow_ppo": "Slow-PPO",
+    "proposed": "Proposed-NoRL",
+    "slow_ppo": "Proposed-RL",
     "rsu_only": "RSU Only",
     "always_hire": "Always Hire",
 }
@@ -545,7 +545,7 @@ def plot_paper_panel(
         ),
         (
             "original_cost_per_user_slot",
-            "Original Cost / User-Slot",
+            "Quality Degradation + Hiring Cost / User-Slot",
             1.0,
             None,
         ),
@@ -672,7 +672,17 @@ def write_readme(
         "- Q3: u=0.86, 2 Mbit/chunk",
         "- Q4: u=1.00, 4 Mbit/chunk",
         "",
-        "`Slow-PPO` is the validation-selected `best.pt` checkpoint.",
+        "## Policy display names",
+        "",
+        "- `Proposed-NoRL` = raw policy key `proposed`: slow-timescale structured rollout / DPP, no RL.",
+        "- `Proposed-RL` = raw policy key `slow_ppo`: slow-timescale PPO using the validation-selected `best.pt` checkpoint.",
+        "",
+        "## Degradation + hiring objective",
+        "",
+        "`original_cost_per_user_slot` is kept as the internal CSV key for backward compatibility.",
+        "Its plotted meaning is made explicit as:",
+        "",
+        "`quality degradation + weighted UAV hiring cost`, normalized by user-slots.",
     ]
 
     (out / "README.md").write_text(
@@ -904,8 +914,8 @@ def main() -> None:
         policies,
         snrs,
         metric="original_cost_per_user_slot",
-        ylabel="Original Cost / User-Slot",
-        output=out / "06_original_cost_vs_snr.png",
+        ylabel="Quality Degradation + Hiring Cost / User-Slot",
+        output=out / "06_degradation_hiring_cost_vs_snr.png",
         show_ci=args.show_ci,
     )
 

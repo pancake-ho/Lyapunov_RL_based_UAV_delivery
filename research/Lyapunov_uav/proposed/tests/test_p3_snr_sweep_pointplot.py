@@ -6,6 +6,7 @@ import numpy as np
 
 from run.p3_snr_sweep_aggregate import (
     DEFAULT_SHOW_CI,
+    POLICY_LABELS,
     POLICY_LINESTYLES,
     _series,
     mean_ci95,
@@ -13,6 +14,12 @@ from run.p3_snr_sweep_aggregate import (
 
 
 class P3SNRSweepPaperStyleTests(unittest.TestCase):
+    def test_publication_policy_labels_are_unambiguous(self) -> None:
+        self.assertEqual(POLICY_LABELS["proposed"], "Proposed-NoRL")
+        self.assertEqual(POLICY_LABELS["slow_ppo"], "Proposed-RL")
+        self.assertEqual(POLICY_LABELS["rsu_only"], "RSU Only")
+        self.assertEqual(POLICY_LABELS["always_hire"], "Always Hire")
+
     def test_default_paper_style_hides_error_bars(self) -> None:
         self.assertFalse(DEFAULT_SHOW_CI)
 
