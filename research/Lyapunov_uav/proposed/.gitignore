@@ -5,6 +5,7 @@
 outputs/
 /.runtime-cache/
 /matplotlib-*/
+/baseline/NDTVS/runs/
 
 __pycache__/
 *.py[cod]
