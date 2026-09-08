@@ -1,0 +1,37 @@
+{
+  "num_regions": 2,
+  "users_per_region": 4,
+  "num_frames": 30,
+  "frame_slots": 10,
+  "slot_duration_s": 1.0,
+  "region_length_m": 400.0,
+  "rsu_height_m": 8.0,
+  "user_height_m": 1.5,
+  "vehicle_speed_min_mps": 5.0,
+  "vehicle_speed_max_mps": 20.0,
+  "rsu_capacity": 3,
+  "rsu_total_bandwidth_hz": 20000000.0,
+  "rsu_total_power_w": 40.0,
+  "noise_psd_w_hz": 2e-20,
+  "shannon_gap": 2.0,
+  "rsu_beta0": 1e-07,
+  "rsu_pathloss_exp": 3.0,
+  "fading_min": 0.05,
+  "fading_max": 10.0,
+  "quality_utility": [
+    0.55,
+    0.72,
+    0.86,
+    1.0
+  ],
+  "chunk_size_bits": [
+    500000.0,
+    1000000.0,
+    2000000.0,
+    4000000.0
+  ],
+  "max_chunks_per_slot": 3,
+  "playback_chunks_per_slot": 1.0,
+  "initial_playback_queue": 3.0,
+  "large_queue_level": 100.0
+}
