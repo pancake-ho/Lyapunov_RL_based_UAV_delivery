@@ -1,0 +1,134 @@
+[SBATCH-START] job=141239 host=moana-u2 cwd=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed mode=train
+[RESOURCES] GPU=1 CPUs_per_GPU=16 host_RAM=29696 torch_threads=1
+[PYTHON] /data/surt321/anaconda3/envs/lab/bin/python
+[CUDA-OK] 3.10.20 2.4.1+cu121 12.1 NVIDIA RTX A2000 12GB
+[DEPENDENCIES] numpy= 2.1.3 matplotlib= 3.10.9
+[RUN-METADATA] /data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/batch_141239.json
+--- P3 scheduling-only hierarchical PPO ---
+regions=10 users=50 J^R=3 J^U=2 frames=2 slots/frame=10 points=5
+frame obs dim=558 heads=50 | slot obs dim=558 heads=150
+reward mode=dpp (CSI hidden from both agents); logs -> /data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke
+ep=0000 frame=000 slot=09 J_F=    73.90 meanZ=96.98 SoC=0.9937
+ep=0000 frame=001 slot=09 J_F=  -285.60 meanZ=97.32 SoC=0.9894
+EP 0000 DPP/us=   3.946 orig/us=0.2428 stall=0.365 served=0.329 hire=0.750 Zcost=0.972 proj=0 dual=1.000 [12s]
+ep=0001 frame=000 slot=09 J_F=  -678.80 meanZ=97.88 SoC=0.9932
+ep=0001 frame=001 slot=09 J_F=   353.60 meanZ=97.12 SoC=0.9877
+EP 0001 DPP/us=   2.915 orig/us=0.2411 stall=0.379 served=0.344 hire=0.850 Zcost=0.977 proj=0 dual=1.000 [21s]
+ep=0002 frame=000 slot=09 J_F= -1174.90 meanZ=97.48 SoC=0.9935
+ep=0002 frame=001 slot=09 J_F=   346.50 meanZ=97.80 SoC=0.9889
+EP 0002 DPP/us=   5.897 orig/us=0.2218 stall=0.406 served=0.324 hire=0.750 Zcost=0.978 proj=0 dual=1.000 [29s]
+done in 29.0s; trace=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke/trace.jsonl debug=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke/debug.log
+trace verification for /data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke
+check     passed    failed
+A1            60         0
+A2          1800         0
+B1           940         0
+B2           130         0
+B3           690         0
+D1          3600         0
+D2            66         0
+F1           180         0
+F2           154         0
+F3           120         0
+M1          6000         0
+P1          2033         0
+P2           600         0
+Q1          6300         0
+Q2          3000         0
+Q3          3060         0
+R1          5439         0
+R2          1442         0
+R3           534         0
+R4          4070         0
+S0          2323         0
+S1           180         0
+S2          1272         0
+S3           663         0
+TOTAL  passed=44656 failed=0
+loaded frame checkpoint: {'episode': 2, 'dual_lambda_z': 1.0, 'pair_id': '1789317791415419190-ep2-f2-s3'}
+loaded slot checkpoint: {'episode': 2, 'dual_lambda_z': 1.0, 'pair_id': '1789317791415419190-ep2-f2-s3'}
+--- P3 scheduling-only hierarchical PPO ---
+regions=10 users=50 J^R=3 J^U=2 frames=2 slots/frame=10 points=5
+frame obs dim=558 heads=50 | slot obs dim=558 heads=150
+reward mode=dpp (CSI hidden from both agents); logs -> /data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke_eval
+ep=1000000 frame=000 slot=09 J_F= -1554.20 meanZ=95.54 SoC=0.9951
+ep=1000000 frame=001 slot=09 J_F=  -701.10 meanZ=91.72 SoC=0.9919
+EVAL 000 DPP/us= -18.225 orig/us=0.3131 stall=0.458 hire=0.500 Q>Qe=0.0000 viol(reserve,power)=(0,0)
+mean dpp_cost_per_user_slot: -18.2250 (std 0.0000)
+mean original_cost_per_user_slot: 0.3131 (std 0.0000)
+mean stall_ratio: 0.4580 (std 0.0000)
+mean hire_rate: 0.5000 (std 0.0000)
+done in 9.5s; trace=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke_eval/trace.jsonl debug=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke_eval/debug.log
+trace verification for /data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke_eval
+check     passed    failed
+A1            20         0
+A2           600         0
+B1           200         0
+B2           100         0
+B3           230         0
+D1          1200         0
+D2            22         0
+F1            60         0
+F2            40         0
+F3            40         0
+M1          2000         0
+P1           510         0
+P2           200         0
+Q1          2100         0
+Q2          1000         0
+Q3          1020         0
+R1          1881         0
+R2           490         0
+R3           164         0
+R4          1400         0
+S0           777         0
+S1            60         0
+S2           430         0
+S3           221         0
+TOTAL  passed=14765 failed=0
+/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke/plots
+/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke_eval/plots
+[GPU-SMOKE-PASS] /data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239_smoke
+--- P3 scheduling-only hierarchical PPO ---
+regions=10 users=50 J^R=3 J^U=2 frames=30 slots/frame=10 points=5
+frame obs dim=558 heads=50 | slot obs dim=558 heads=150
+reward mode=dpp (CSI hidden from both agents); logs -> /data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/outputs/hppo/hrl50_seed2026_job141239
+ep=0000 frame=000 slot=09 J_F=    73.90 meanZ=96.98 SoC=0.9937
+ep=0000 frame=001 slot=09 J_F=  -285.60 meanZ=97.32 SoC=0.9894
+ep=0000 frame=002 slot=09 J_F=  -151.70 meanZ=96.80 SoC=0.9852
+ep=0000 frame=003 slot=09 J_F=  1631.80 meanZ=97.46 SoC=0.9794
+ep=0000 frame=004 slot=09 J_F=   917.60 meanZ=97.54 SoC=0.9750
+ep=0000 frame=005 slot=09 J_F=  -142.60 meanZ=98.42 SoC=0.9695
+ep=0000 frame=006 slot=09 J_F=  -386.10 meanZ=98.22 SoC=0.9648
+ep=0000 frame=007 slot=09 J_F=  -120.40 meanZ=97.56 SoC=0.9616
+ep=0000 frame=008 slot=09 J_F=   339.50 meanZ=97.58 SoC=0.9575
+ep=0000 frame=009 slot=09 J_F=   -50.20 meanZ=97.26 SoC=0.9552
+ep=0000 frame=010 slot=09 J_F=   916.80 meanZ=96.80 SoC=0.9511
+ep=0000 frame=011 slot=09 J_F=   514.30 meanZ=97.70 SoC=0.9471
+ep=0000 frame=012 slot=09 J_F=  -153.00 meanZ=97.20 SoC=0.9409
+ep=0000 frame=013 slot=09 J_F=   794.80 meanZ=96.70 SoC=0.9369
+ep=0000 frame=014 slot=09 J_F=   500.10 meanZ=97.76 SoC=0.9325
+ep=0000 frame=015 slot=09 J_F=   235.70 meanZ=98.12 SoC=0.9288
+ep=0000 frame=016 slot=09 J_F=   434.70 meanZ=98.24 SoC=0.9273
+ep=0000 frame=017 slot=09 J_F=  -126.10 meanZ=97.32 SoC=0.9231
+ep=0000 frame=018 slot=09 J_F=   136.40 meanZ=96.56 SoC=0.9164
+ep=0000 frame=019 slot=09 J_F=   -78.40 meanZ=97.42 SoC=0.9106
+ep=0000 frame=020 slot=09 J_F=  -312.80 meanZ=96.94 SoC=0.9084
+ep=0000 frame=021 slot=09 J_F=   490.90 meanZ=97.22 SoC=0.9031
+ep=0000 frame=022 slot=09 J_F=   587.10 meanZ=97.76 SoC=0.8968
+ep=0000 frame=023 slot=09 J_F=   605.10 meanZ=98.08 SoC=0.8921
+ep=0000 frame=024 slot=09 J_F=  -685.00 meanZ=97.56 SoC=0.8893
+ep=0000 frame=025 slot=09 J_F=   -52.10 meanZ=96.80 SoC=0.8855
+ep=0000 frame=026 slot=09 J_F=   825.40 meanZ=97.36 SoC=0.8810
+ep=0000 frame=027 slot=09 J_F=  1145.50 meanZ=97.52 SoC=0.8785
+ep=0000 frame=028 slot=09 J_F=  -200.80 meanZ=96.48 SoC=0.8738
+ep=0000 frame=029 slot=09 J_F=  -235.90 meanZ=95.68 SoC=0.8736
+EP 0000 DPP/us=   1.287 orig/us=0.2036 stall=0.487 served=0.285 hire=0.720 Zcost=0.971 proj=0 dual=1.000 [124s]
+ep=0001 frame=000 slot=09 J_F=  -228.80 meanZ=98.00 SoC=0.9962
+ep=0001 frame=001 slot=09 J_F=  -294.50 meanZ=97.22 SoC=0.9910
+ep=0001 frame=002 slot=09 J_F=   -31.20 meanZ=96.82 SoC=0.9860
+ep=0001 frame=003 slot=09 J_F=  -140.60 meanZ=96.94 SoC=0.9821
+ep=0001 frame=004 slot=09 J_F=    -9.10 meanZ=97.20 SoC=0.9787
+ep=0001 frame=005 slot=09 J_F=  -113.30 meanZ=97.58 SoC=0.9738
+ep=0001 frame=006 slot=09 J_F=  -803.40 meanZ=97.18 SoC=0.9710
+ep=0001 frame=007 slot=09 J_F=   160.40 meanZ=97.44 SoC=0.9669

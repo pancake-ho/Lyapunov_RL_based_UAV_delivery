@@ -1,0 +1,14 @@
+test_invalid_proposals_fail_instead_of_projection (tests.test_hppo_env.EnvironmentTests) ... ok
+test_local_rollout_matches_full_environment (tests.test_hppo_env.EnvironmentTests) ... ok
+test_low_battery_and_empty_region (tests.test_hppo_env.EnvironmentTests) ... ok
+test_original_claude_state_reward_and_physics_fixture (tests.test_hppo_env.EnvironmentTests) ... ok
+test_unhired_candidates_are_not_reassigned (tests.test_hppo_env.EnvironmentTests) ... ok
+test_completion_isolation_and_real_future_is_unused (tests.test_hppo_env.PolicyTests) ... ok
+test_fast_vectorization_matches_independent_heads (tests.test_hppo_env.PolicyTests) ... ok
+test_joint_probability_normalizes_and_likelihood_replays (tests.test_hppo_env.PolicyTests) ... ok
+test_train_save_load_eval_and_incomplete_trace_rejection (tests.test_hppo_env.PolicyTests) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 1.921s
+
+OK
