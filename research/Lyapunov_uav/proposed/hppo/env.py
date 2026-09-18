@@ -488,7 +488,13 @@ class P3HierarchicalEnv:
         for u in range(self.N):  # chunks
             m = np.zeros(cfg.max_chunks_per_slot + 1, dtype=bool)
             if u in scheduled:
-                m[:] = True
+                cap = cfg.max_chunks_per_slot
+                if cfg.mask_queue_actions and cfg.enforce_queue_admissibility:
+                    cap = self.guard.max_queue_admissible_chunks(
+                        cfg.large_queue_level - float(self.state.queue[u]))
+                # PPO samples directly from this support and stores the same
+                # mask for its likelihood replay. No post-sampling clipping.
+                m[:cap + 1] = True
             else:
                 m[0] = True
             masks.append(m)
@@ -538,7 +544,7 @@ class P3HierarchicalEnv:
         for m in self.regions:
             raw = integer_action(raw_actions[m], cfg.slot_action_nvec, "slot action")
             if any(not mask[token] for mask, token in zip(self.slot_action_masks(m), raw)):
-                raise ValueError("slot action violates scheduling mask")
+                raise ValueError("slot action violates scheduling/queue mask")
         x_before_all = self.state.user_x.copy()
 
         for m in self.regions:
@@ -582,6 +588,8 @@ class P3HierarchicalEnv:
                     "fading": None, "gain": None, "capacity_bps": 0.0,
                     "rsu_horizontal_distance_m": abs(cfg.rsu_x(m) - x),
                     "uav_horizontal_distance_m": abs(uav_x - x) if action.hired else None,
+                    "rsu_link_distance_m": math.hypot(cfg.rsu_x(m) - x, cfg.rsu_height_m - cfg.user_height_m),
+                    "uav_link_distance_m": math.hypot(uav_x - x, cfg.uav_height_m - cfg.user_height_m) if action.hired else None,
                     "feasible_by_rate": 0, "queue_admissible_cap": 0,
                     "feasible_chunks": 0, "delivered": 0, "min_required_power_w": 0.0,
                 }
@@ -605,7 +613,13 @@ class P3HierarchicalEnv:
                 elif u in uav_scheduled:
                     rec.update(req_power_w=0.0, exec_power_w=0.0)
                 feasible = int(min(cfg.max_chunks_per_slot, queue_cap, feasible_rate)) if req_l > 0 else 0
-                delivered = int(min(req_l, feasible))
+                delivered = (req_l if req_l <= feasible else 0) if cfg.delivery_mode == "all_or_nothing" else int(min(req_l, feasible))
+                rec["transmission_failed"] = bool(req_l > 0 and delivered == 0)
+                rec["delivery_mode"] = cfg.delivery_mode
+                rec["chunk_action_cap"] = int(queue_cap if cfg.mask_queue_actions else cfg.max_chunks_per_slot) if prov else 0
+                rec["failure_reason"] = ("not_scheduled" if not prov else "no_request" if req_l == 0 else
+                                         "rate_insufficient" if feasible_rate < req_l else
+                                         "queue_insufficient" if queue_cap < req_l else "success")
                 if delivered > 0 and delivered * chunk_bits > capacity * cfg.slot_duration_s + 1e-6:
                     raise RuntimeError("rate feasibility (3.1)/(3.2) violated")
                 if u in uav_scheduled and delivered > 0:
@@ -618,6 +632,8 @@ class P3HierarchicalEnv:
                 dpp = cfg.alpha_z * z_before * (departure - delivered) + cfg.lyapunov_v * degradation  # Eq. (6.12)
 
                 rec.update(
+                    queue_drift_term=cfg.alpha_z * z_before * (departure - delivered),
+                    quality_dpp_term=cfg.lyapunov_v * degradation,
                     feasible_by_rate=feasible_rate, feasible_chunks=feasible, delivered=delivered,
                     utility=utility, degradation=degradation, departure=departure,
                     q_after=q_after, z_after=z_after, stall=stalled,

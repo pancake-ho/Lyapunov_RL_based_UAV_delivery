@@ -7,7 +7,8 @@ from __future__ import annotations
         relocate during control-preparation interval (battery, reachability)
         for slot t in frame:
             slot PPO (per region, shared weights) -> l, k, p        (masked)
-            environment realizes hidden fading, clips to feasible rate,
+            environment realizes hidden fading and applies the configured
+            full-request success/failure rule (legacy partial is optional),
             updates Q, Z, battery, mobility
         frame reward, slot rewards -> PPO buffers (per-region trajectories)
 
@@ -223,7 +224,7 @@ def main(argv=None) -> None:
     save_resolved_config(cfg, args, root)
     runtime = {"python": sys.version, "platform": platform.platform(), "numpy": np.__version__,
                "mode": args.mode, "argv": list(argv) if argv is not None else sys.argv[1:],
-               "base_commit": "71e36b29423354970b6571790cb7de566e7a434f",
+               "base_commit": "a63b1da63addcb94e0f2e0bbe8b92dab5a9df318",
                "checkpoint_usage": "warm-start" if loaded and args.mode == "train" else args.mode,
                "checkpoint_sha256": {k: hashlib.sha256(Path(v).read_bytes()).hexdigest()
                     for k, v in {"frame": args.frame_checkpoint, "slot": args.slot_checkpoint}.items() if v}}

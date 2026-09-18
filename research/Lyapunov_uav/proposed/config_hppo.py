@@ -10,7 +10,8 @@ learning-algorithm fields that ``uav_hierarchical_ppo`` introduced are added
 here, so the P3 model and the HRL solver are configured in one object and a
 checkpoint stores the full configuration.
 
-Nothing in this file redefines a P3 physical quantity.
+The HRL-specific RSU bandwidth override is calibrated separately; P3 baselines
+retain their original configuration. New runs use queue-masked, atomic delivery.
 """
 
 import argparse
@@ -25,6 +26,11 @@ REWARD_MODES = ("dpp", "objective_lagrangian", "objective_only")
 
 @dataclass(frozen=True)
 class HPPOConfig(P3Config):
+    # Paired distance/fading calibration: keep UAV 5 MHz; constrain RSU.
+    # Legacy P3 defaults remain in config_p3.py.
+    rsu_total_bandwidth_hz: float = 3e6
+    mask_queue_actions: bool = True
+    delivery_mode: str = "all_or_nothing"
     # ---------------- hierarchical-PPO action encoding ----------------
     # Slot PPO chooses a discrete UAV power level per UAV user:
     #   p_n = level / (uav_power_levels - 1) * P^U_max  (level = 0 ... levels-1)
@@ -51,9 +57,10 @@ class HPPOConfig(P3Config):
     stall_training_penalty: float = 0.0
     # Reward scale for the objective_* modes (ppo_reward_scale is used for "dpp").
     objective_reward_scale: float = 1.0
-    # Operating condition 0 <= Q <= Q^e of the large-Q^e derivation, enforced by
-    # the environment exactly as ExactFastController does (delivery is capped so
-    # that Q(t+1) <= Q^e). Set False to let Q exceed Q^e and only record it.
+    # Operating condition 0 <= Q <= Q^e: queue-aware categorical support is
+    # passed to PPO before sampling; step_slot rejects an invalid request.
+    # The environment also validates delivery feasibility. Legacy runs can
+    # explicitly disable the action mask and select partial delivery.
     enforce_queue_admissibility: bool = True
 
     # ---------------- PPO (shared by both levels) ----------------
@@ -64,7 +71,7 @@ class HPPOConfig(P3Config):
     frame_update_every_episodes: int = 2
 
     # ---------------- episodes / run ----------------
-    train_episodes: int = 100
+    train_episodes: int = 200
     eval_episodes: int = 5
     save_every_episodes: int = 25
     deterministic_eval: bool = True
@@ -82,6 +89,8 @@ class HPPOConfig(P3Config):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.delivery_mode not in ("partial", "all_or_nothing"):
+            raise ValueError("delivery_mode must be partial or all_or_nothing")
         for name in ("train_episodes", "eval_episodes", "save_every_episodes", "torch_num_threads"):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")

@@ -15,8 +15,12 @@ import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+try:
+    from hppo.completion_audit import candidate_lines
+except ModuleNotFoundError:  # Preserve python hppo/explain_trace.py invocation.
+    from completion_audit import candidate_lines
 
-BASE_COMMIT = "0f4088e6d165e4bc7235921449900bb44bec94f8"
+BASE_COMMIT = "a63b1da63addcb94e0f2e0bbe8b92dab5a9df318"
 MAX_LINE = 64 * 1024 * 1024
 LABELS = {
     "ORDER": "이벤트/슬롯 순서", "SETS": "집합 구성/고정 유지",
@@ -199,6 +203,8 @@ class Narrator:
                 self.check("CHOICE", row["rsu_users"] == rg["proposal_rsu_users"] and row["uav_users"] == (rg["proposal_uav_candidates"] if row["hired"] else []), "후보 비교 중 scheduling 변경")
                 self.check("CHOICE", len(row["sample_dpp"]) == c["rollout_scenarios"] and close(sum(row["sample_dpp"])/len(row["sample_dpp"]), row["mean_dpp"]), "후보 평균/표본 개수 불일치")
                 self.emit(f"  후보 {i}: hire={row['hired']} point={row['point']} -> 예상 DPP {number(row['mean_dpp'])}" + (" [선택]" if i==selected else ""))
+            for line in candidate_lines(choice):
+                self.emit(line)
             self.check("CHOICE", (rg["executed_hire"], rg["executed_point"], rsu, uav) == (rows[selected]["hired"], rows[selected]["point"], rows[selected]["rsu_users"], rows[selected]["uav_users"]), "선택된 후보와 실제 frame 동작 불일치")
             self.check("SETS", rg["executed_hire"] in (0,1) and len(rsu)==len(set(rsu)) and len(uav)==len(set(uav)) and not set(rsu)&set(uav) and set(rsu+uav)<=set(members) and len(rsu)<=c["rsu_capacity"] and len(uav)<=c["uav_capacity"] and (rg["executed_hire"]==1 or not uav), "집합 중복/용량/소속/고용 불일치")
             self.check("SETS", set(rg["unserved_users"]) == set(members)-set(rsu+uav), "미배정 집합 불일치")
@@ -306,7 +312,10 @@ class Narrator:
                 room=max(0,min(c["max_chunks_per_slot"],math.floor(c["large_queue_level"]-(u["q_before"]-dep)+1e-9))) if c["enforce_queue_admissibility"] else c["max_chunks_per_slot"]
                 rate=math.floor(u["capacity_bps"]*c["slot_duration_s"]/c["chunk_size_bits"][k]+1e-9) if p and l>0 else 0
                 feasible=min(c["max_chunks_per_slot"],room,rate) if l>0 else 0
-                self.check("DELIVERY", 0<=l<=c["max_chunks_per_slot"] and u["capacity_bps"]>=0 and u["queue_admissible_cap"]==room and u["feasible_by_rate"]==rate and u["feasible_chunks"]==feasible and d==min(l,feasible), f"u{uid} 요청/링크 cap/버퍼 cap/실제 수신 불일치")
+                expected_delivery = (l if l <= feasible else 0) if c.get('delivery_mode', 'partial') == 'all_or_nothing' else min(l, feasible)
+                self.check("DELIVERY", 0<=l<=c["max_chunks_per_slot"] and u["capacity_bps"]>=0 and u["queue_admissible_cap"]==room and u["feasible_by_rate"]==rate and u["feasible_chunks"]==feasible and d==expected_delivery, f"u{uid} 요청/링크 cap/버퍼 cap/실제 수신 불일치")
+                if c.get('mask_queue_actions', False) and c['enforce_queue_admissibility']:
+                    self.check('DELIVERY', l <= room, f'u{uid} PPO queue mask 위반')
                 if p==0:
                     self.check("DELIVERY", l==d==0 and u["exec_power_w"]==0, f"미배정 u{uid}가 송수신함")
                 if p==2:
@@ -331,6 +340,15 @@ class Narrator:
                 verdict="PASS" if sum(self.failed.values())==uf else "FAIL"
                 quality=f"k={k}({k+1}단계)" if l>0 else "quality 미사용(요청 0)"
                 self.emit(f"  {source} -> u{uid}: 요청 {l}개, {quality} -> 실제 {d}개 [{reason}]")
+                if c.get('delivery_mode') == 'all_or_nothing' and l > 0 and d == 0:
+                    self.emit('    요청 전체 실패: 부분 chunk는 수신량에 반영하지 않음. UAV 송신 에너지는 소모.')
+                self.emit(f"    거리: RSU 수평 {number(u['rsu_horizontal_distance_m'])} m; "
+                          + (f"UAV 수평 {number(u['uav_horizontal_distance_m'])} m" if u.get('uav_horizontal_distance_m') is not None else 'UAV 미고용'))
+                if 'rsu_link_distance_m' in u:
+                    self.emit(f"    3D 링크거리: RSU {number(u['rsu_link_distance_m'])} m; "
+                              + (f"UAV {number(u['uav_link_distance_m'])} m" if u.get('uav_link_distance_m') is not None else 'UAV 미고용'))
+                if 'chunk_action_cap' in u:
+                    self.emit(f"    PPO chunk 선택 범위: 0..{u['chunk_action_cap']} (slot 내 재생 후 여유 반영)")
                 if l>0:
                     self.emit(f"    링크 {number(u['capacity_bps']/1e6)} Mbps / chunk {number(c['chunk_size_bits'][k]/1e6)} Mbit -> 링크 최대 {u['feasible_by_rate']}개; 버퍼 허용 {u['queue_admissible_cap']}개")
                 else:

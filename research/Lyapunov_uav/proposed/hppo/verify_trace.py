@@ -79,6 +79,9 @@ def load_config(run_dir: Path) -> HPPOConfig:
             elif k == "hidden_dims":
                 v = tuple(int(x) for x in v)
         cleaned[k] = v
+    # Old logs record physical BW but predate the new action/delivery fields.
+    cleaned.setdefault("mask_queue_actions", False)
+    cleaned.setdefault("delivery_mode", "partial")
     return HPPOConfig(**cleaned)
 
 
@@ -185,6 +188,21 @@ def _verify_physics(run_dir: Path, max_report: int = 20) -> tuple[Counter, Count
                         k = u["req_quality"]
                         S = cfg.chunk_size_bits[k]
                         d = u["delivered"]
+                        room = max(0, min(cfg.max_chunks_per_slot, math.floor(Qe - (u['q_before'] - dep) + 1e-9))) if cfg.enforce_queue_admissibility else cfg.max_chunks_per_slot
+                        rate = math.floor(u['capacity_bps'] * cfg.slot_duration_s / S + 1e-9) if prov and u['req_chunks'] > 0 else 0
+                        feasible = min(cfg.max_chunks_per_slot, room, rate) if u['req_chunks'] > 0 else 0
+                        expected = (u['req_chunks'] if u['req_chunks'] <= feasible else 0) if cfg.delivery_mode == 'all_or_nothing' else min(u['req_chunks'], feasible)
+                        V.check('R5', d == expected and u['queue_admissible_cap'] == room and u['feasible_chunks'] == feasible,
+                                uw, 'delivery semantics or queue bound')
+                        if cfg.mask_queue_actions and cfg.enforce_queue_admissibility:
+                            V.check('R5', u['req_chunks'] <= room, uw, 'agent queue action mask')
+                        if 'rsu_link_distance_m' in u:
+                            x = u['x_m']
+                            V.check('R6', V.close(u['rsu_horizontal_distance_m'], abs(cfg.rsu_x(m)-x)) and
+                                    V.close(u['rsu_link_distance_m'], math.hypot(cfg.rsu_x(m)-x, cfg.rsu_height_m-cfg.user_height_m)), uw, 'RSU distances')
+                            if rg['hired']:
+                                V.check('R6', V.close(u['uav_horizontal_distance_m'], abs(rg['uav_x']-x)) and
+                                        V.close(u['uav_link_distance_m'], math.hypot(rg['uav_x']-x, cfg.uav_height_m-cfg.user_height_m)), uw, 'UAV distances')
                         V.check("R1", 0 <= d <= u["req_chunks"] <= cfg.max_chunks_per_slot and d <= u["feasible_chunks"]
                                 and d <= u["queue_admissible_cap"], uw, f"d={d} req={u['req_chunks']} feas={u['feasible_chunks']}")
                         if d > 0:

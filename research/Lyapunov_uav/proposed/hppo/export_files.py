@@ -51,7 +51,7 @@ from hppo.trace_contract import check_structure
 from hppo.verify_trace import load_config, _verify_physics
 
 
-BASE_COMMIT = "019f474a761e8a3d2e7e1add0c4841c41fe91692"
+BASE_COMMIT = "a63b1da63addcb94e0f2e0bbe8b92dab5a9df318"
 MAX_LINE_BYTES = 16 * 1024 * 1024
 
 # Exact final-completion diagnostic in the verified baseline source.
@@ -157,8 +157,8 @@ class FileExporter:
                 "compatible_commit": BASE_COMMIT,
                 "source_schema": "scheduling-hppo-v2",
                 "mode": "file_only_observer",
-                "frame_image_phase": "end_of_completed_frame",
-                "geometry": "actual_x_with_display_only_y",
+                "frame_image_phase": "last_slot_decision_positions_and_outcomes",
+                "geometry": "physical_ground_projection_y0_with_labels",
             },
         )
 
@@ -278,6 +278,10 @@ class FileExporter:
                             "mean_dpp": candidate["mean_dpp"],
                             "sample_dpp": candidate["sample_dpp"],
                             "hiring_dpp": candidate["hiring_dpp"],
+                            "mean_queue_drift": candidate.get("mean_queue_drift"),
+                            "mean_quality_dpp": candidate.get("mean_quality_dpp"),
+                            "delta_from_no_hire": candidate.get("delta_from_no_hire"),
+                            "sample_components": candidate.get("sample_components"),
                         },
                     )
 
@@ -305,6 +309,14 @@ class FileExporter:
                             "user": user["user"],
                             "provider": user["provider"],
                             "req_chunks": user["req_chunks"],
+                            "rsu_horizontal_distance_m": user["rsu_horizontal_distance_m"],
+                            "uav_horizontal_distance_m": user["uav_horizontal_distance_m"],
+                            "rsu_link_distance_m": user.get("rsu_link_distance_m"),
+                            "uav_link_distance_m": user.get("uav_link_distance_m"),
+                            "chunk_action_cap": user.get("chunk_action_cap"),
+                            "transmission_failed": user.get("transmission_failed"),
+                            "failure_reason": user.get("failure_reason"),
+                            "delivery_mode": user.get("delivery_mode", "partial"),
                             "req_quality": user["req_quality"],
                             "req_power_level":
                                 user["req_power_level"],
@@ -646,186 +658,8 @@ class FileExporter:
         slot = self.read_at(metadata["last_slot_position"])
         cfg = self.cfg
 
-        fig, ax = plt.subplots(
-            figsize=(14, 5),
-            layout="constrained",
-        )
-
-        for region in range(cfg.num_regions):
-            left = region * cfg.region_length_m
-            background = "#f1f5f8" if region % 2 else "#fafcfd"
-
-            ax.add_patch(
-                Rectangle(
-                    (left, 0.3),
-                    cfg.region_length_m,
-                    4.0,
-                    facecolor=background,
-                    edgecolor="#ccd8e2",
-                    linewidth=0.7,
-                    zorder=0,
-                )
-            )
-
-            ax.text(
-                left + cfg.region_length_m / 2,
-                4.45,
-                f"Region {region}",
-                ha="center",
-                fontsize=8,
-            )
-
-            rg = slot["regions"][str(region)]
-            initial = start["regions"][str(region)]
-
-            rsu_x = cfg.rsu_x(region)
-            uav_x = rg["uav_x"]
-
-            ax.scatter(
-                cfg.candidate_points(region),
-                [3.6] * cfg.num_candidate_points,
-                marker="d",
-                s=15,
-                color="#c9d2da",
-                zorder=2,
-            )
-
-            ax.plot(
-                [initial["uav_x_before"], uav_x],
-                [3.6, 3.6],
-                linestyle=":",
-                linewidth=1,
-                color="#d17b17",
-                zorder=2,
-            )
-
-            ax.scatter(
-                rsu_x,
-                2.6,
-                marker="^",
-                s=70,
-                color=PROVIDER_COLORS[1],
-                zorder=4,
-            )
-            ax.text(
-                rsu_x,
-                2.83,
-                f"R{region}",
-                ha="center",
-                fontsize=8,
-            )
-
-            ax.scatter(
-                uav_x,
-                3.6,
-                marker="s",
-                s=65,
-                color=(
-                    PROVIDER_COLORS[2]
-                    if rg["hired"]
-                    else "#aeb7be"
-                ),
-                zorder=4,
-            )
-
-            soc = rg["battery_after_j"] / cfg.battery_capacity_j
-            ax.text(
-                uav_x,
-                3.87,
-                f"U{region}\n{100 * soc:.1f}%",
-                ha="center",
-                fontsize=7,
-            )
-
-            for user in rg["users"]:
-                uid = user["user"]
-                x = slot["mobility"]["x_after"][uid]
-                y = 0.75 + (uid % 5) * 0.24
-
-                ax.scatter(
-                    x,
-                    y,
-                    marker="o",
-                    s=24,
-                    color=PROVIDER_COLORS[user["provider"]],
-                    edgecolors="white",
-                    linewidths=0.5,
-                    zorder=5,
-                )
-                ax.text(
-                    x,
-                    y + 0.13,
-                    str(uid),
-                    ha="center",
-                    fontsize=6,
-                )
-
-        legend = [
-            Line2D(
-                [], [],
-                marker="o",
-                linestyle="",
-                color=PROVIDER_COLORS[0],
-                label="User: unserved",
-            ),
-            Line2D(
-                [], [],
-                marker="o",
-                linestyle="",
-                color=PROVIDER_COLORS[1],
-                label="User: RSU",
-            ),
-            Line2D(
-                [], [],
-                marker="o",
-                linestyle="",
-                color=PROVIDER_COLORS[2],
-                label="User: UAV",
-            ),
-            Line2D(
-                [], [],
-                marker="^",
-                linestyle="",
-                color=PROVIDER_COLORS[1],
-                label="RSU",
-            ),
-            Line2D(
-                [], [],
-                marker="s",
-                linestyle="",
-                color=PROVIDER_COLORS[2],
-                label="UAV: hired",
-            ),
-            Line2D(
-                [], [],
-                marker="s",
-                linestyle="",
-                color="#aeb7be",
-                label="UAV: inactive",
-            ),
-        ]
-
-        ax.legend(
-            handles=legend,
-            loc="upper center",
-            ncol=6,
-            fontsize=8,
-        )
-        ax.set_xlim(
-            -0.01 * cfg.road_length_m,
-            1.01 * cfg.road_length_m,
-        )
-        ax.set_ylim(0.2, 5.1)
-        ax.set_yticks([])
-        ax.set_xlabel(
-            "Actual x (m), periodic road; vertical positions are "
-            "display-only"
-        )
-        ax.set_title(
-            f"{self.run_dir.name} | episode {episode} | "
-            f"frame {frame_index} END | "
-            f"after slot {slot['slot_in_frame']}"
-        )
+        from hppo.topdown import frame_figure
+        fig = frame_figure(start, slot, cfg, self.run_dir.name)
 
         save_figure(fig, output, dpi)
         return output

@@ -19,7 +19,8 @@ def small(**kw):
 class EnvironmentTests(unittest.TestCase):
     def test_original_claude_state_reward_and_physics_fixture(self):
         fixture=json.loads(Path(__file__).with_name('claude_physics_fixture.json').read_text())
-        cfg=small(num_regions=2,num_frames=1)
+        cfg=small(num_regions=2,num_frames=1,rsu_total_bandwidth_hz=20e6,
+                  mask_queue_actions=False,delivery_mode="partial")
         e=P3HierarchicalEnv(cfg);e.reset();obs=e.prepare_frame();raw={};completed={}
         for m in e.regions:
             np.testing.assert_array_equal(obs[m],fixture['frame_observations'][str(m)])

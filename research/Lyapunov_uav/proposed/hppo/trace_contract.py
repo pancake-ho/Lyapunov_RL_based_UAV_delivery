@@ -81,6 +81,21 @@ def check_structure(run_dir: Path, cfg, max_report=20):
                                   "candidate resampled scheduling", "S2")
                             check(math.isclose(c["hiring_dpp"], cfg.lyapunov_v * cfg.lambda_h * cfg.hiring_cost_per_frame * c["hired"]),
                                   "candidate hiring cost", "S2")
+                            if 'sample_components' in c:
+                                terms = c['sample_components']
+                                check(len(terms) == cfg.rollout_scenarios, 'candidate component count', 'S4')
+                                for j, term in enumerate(terms):
+                                    check(term['scenario'] == j and len(term['slots']) == cfg.frame_slots and
+                                          [s['slot'] for s in term['slots']] == list(range(cfg.frame_slots)), 'candidate slot coverage', 'S4')
+                                    check(sorted(u['user'] for u in term['users']) == sorted(rg['members']), 'candidate user coverage', 'S4')
+                                    for field in ('queue_drift', 'quality_dpp'):
+                                        check(math.isclose(sum(s[field] for s in term['slots']), term[field], abs_tol=1e-7) and
+                                              math.isclose(sum(u[field] for u in term['users']), term[field], abs_tol=1e-7), 'candidate component sums', 'S4')
+                                    check(all(math.isclose(s['queue_drift']+s['quality_dpp'], s['dpp'], abs_tol=1e-7) for s in term['slots']), 'candidate slot DPP sum', 'S4')
+                                    check(math.isclose(term['queue_drift']+term['quality_dpp']+c['hiring_dpp'], samples[j], abs_tol=1e-7) and
+                                          math.isclose(term['frame_dpp'], samples[j], abs_tol=1e-7) and
+                                          math.isclose(term['hiring_dpp'], c['hiring_dpp'], abs_tol=1e-7), 'candidate DPP arithmetic', 'S4')
+                                check(math.isclose(c['mean_queue_drift']+c['mean_quality_dpp']+c['hiring_dpp'], c['mean_dpp'], abs_tol=1e-7), 'candidate mean components', 'S4')
                         for j, item in enumerate(d["seed_domains"]):
                             domain = [cfg.seed, cfg.completion_seed_offset, rec["episode"], rec["frame"], int(m), j]
                             seed = int(np.random.SeedSequence(domain).spawn(2)[0].generate_state(1, dtype=np.uint64)[0])

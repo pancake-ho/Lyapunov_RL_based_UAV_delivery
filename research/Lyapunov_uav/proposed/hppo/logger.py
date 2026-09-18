@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 
 from config_hppo import HPPOConfig
+from hppo.completion_audit import candidate_lines
 
 
 PROVIDER_NAME = {0: "---", 1: "RSU", 2: "UAV"}
@@ -121,6 +122,7 @@ class HistoryLogger:
             assoc = {u: rg["raw_assoc"][u] for u in rg["members"]}
             lines.append(f"  PPO proposal   : assoc={assoc} UAV_candidates={rg['proposal_uav_candidates']}")
             detail = rg.get("completion")
+            lines.extend(candidate_lines(detail))
             if detail:
                 lines.append(f"  completion     : fast_update={detail['fast_update_count']} scenarios={detail['scenarios']} "
                              f"time={detail['runtime_s']:.4f}s selected={detail['selected_index']}")
@@ -173,6 +175,13 @@ class HistoryLogger:
                     f"<= P_eff {rg['p_eff_w']:.3f} -> {'OK' if rg['total_executed_power_w'] <= rg['p_eff_w'] + 1e-9 else 'VIOLATION'}")
             for u in rg["users"]:
                 prov = PROVIDER_NAME[u["provider"]]
+                du = u.get('uav_horizontal_distance_m')
+                du3 = u.get('uav_link_distance_m')
+                lines.append(f"  u{u['user']} distances: RSU horizontal={u['rsu_horizontal_distance_m']:.2f}m "
+                             f"3D={u.get('rsu_link_distance_m', 0):.2f}m; "
+                             f"UAV horizontal={du}m 3D={du3}m; "
+                             f"chunk support=0..{u.get('chunk_action_cap', self.cfg.max_chunks_per_slot)}; "
+                             f"delivery={u.get('failure_reason', 'legacy')} ({u.get('delivery_mode', 'partial')})")
                 ok_all &= bool(u["identity_ok"])
                 if u["provider"] == 0:
                     lines.append(
