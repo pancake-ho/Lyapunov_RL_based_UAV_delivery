@@ -13,7 +13,7 @@ def check_structure(run_dir: Path, cfg, max_report=20):
         (passed if ok else failed)[code] += 1
         if not ok and len(reports) < max_report:
             reports.append(f"{code} FAIL: {detail}")
-    started = ended = False
+    started = ended = paused = False
     active = False
     completed_episodes = next_frame = next_slot = 0
     expected = offset = None
@@ -145,10 +145,18 @@ def check_structure(run_dir: Path, cfg, max_report=20):
                     check(not active and next_frame == 0 and completed_episodes == expected
                           and rec["status"] == "complete", "incomplete run")
                     ended = True
+                elif ev == "run_pause":
+                    check(not active and next_frame == 0 and completed_episodes < expected
+                          and rec["status"] == "paused"
+                          and rec["completed_episodes"] == completed_episodes
+                          and rec["next_episode"] == offset + completed_episodes,
+                          "invalid pause boundary")
+                    ended = paused = True
                 elif ev not in ("run_start", "frame_ppo_update", "slot_ppo_update"):
                     check(False, f"unknown event {ev}")
     except (ValueError, KeyError, TypeError, IndexError, ZeroDivisionError, OSError) as exc:
         check(False, f"malformed/missing trace: {exc}")
-    check(started and ended and completed_episodes > 0 and completed_episodes == expected
+    check(started and ended and ((paused and completed_episodes < expected)
+                                or (completed_episodes > 0 and completed_episodes == expected))
           and not active and next_frame == 0, "empty or unfinished run")
     return passed, failed, reports
