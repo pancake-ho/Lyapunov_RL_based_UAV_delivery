@@ -1,0 +1,16 @@
+ndtvs 1/200 QoE=-0.90397 stall=0.5797 18.54s
+ndtvs 2/200 QoE=-1.02469 stall=0.6263 13.05s
+ndtvs 3/200 QoE=-0.90973 stall=0.5841 13.13s
+ndtvs 4/200 QoE=-0.94366 stall=0.5945 13.14s
+{
+  "valid": true,
+  "physics_checks_passed": 234930,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "checkpoint_completed_episodes": 4,
+  "traced_episodes_checked": 1
+}
+[PAUSED] Checkpoint saved. Training target is NOT complete. Submit the same command with --resume.

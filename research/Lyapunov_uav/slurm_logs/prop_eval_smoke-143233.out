@@ -1,0 +1,36 @@
+ep=2400000 frame=000 slot=09 J_F= -4290.20 meanZ=85.12 SoC=0.9919
+ep=2400000 frame=001 slot=09 J_F= -1611.20 meanZ=75.06 SoC=0.9853
+ep=2400000 frame=002 slot=09 J_F= -1759.60 meanZ=66.20 SoC=0.9803
+ep=2400000 frame=003 slot=09 J_F= -1524.70 meanZ=55.10 SoC=0.9741
+ep=2400000 frame=004 slot=09 J_F=   125.60 meanZ=44.82 SoC=0.9690
+ep=2400000 frame=005 slot=09 J_F=  -416.30 meanZ=38.80 SoC=0.9625
+ep=2400000 frame=006 slot=09 J_F=  -973.30 meanZ=31.48 SoC=0.9567
+ep=2400000 frame=007 slot=09 J_F=  -188.30 meanZ=26.26 SoC=0.9518
+ep=2400000 frame=008 slot=09 J_F=   304.60 meanZ=23.48 SoC=0.9463
+ep=2400000 frame=009 slot=09 J_F=    -1.30 meanZ=23.08 SoC=0.9416
+ep=2400000 frame=010 slot=09 J_F=  -143.60 meanZ=22.80 SoC=0.9383
+ep=2400000 frame=011 slot=09 J_F=   467.70 meanZ=22.60 SoC=0.9338
+ep=2400000 frame=012 slot=09 J_F=    77.50 meanZ=21.24 SoC=0.9283
+ep=2400000 frame=013 slot=09 J_F=   221.80 meanZ=21.20 SoC=0.9224
+ep=2400000 frame=014 slot=09 J_F=   309.90 meanZ=20.96 SoC=0.9190
+ep=2400000 frame=015 slot=09 J_F=   450.60 meanZ=22.72 SoC=0.9133
+ep=2400000 frame=016 slot=09 J_F=   516.10 meanZ=23.58 SoC=0.9094
+ep=2400000 frame=017 slot=09 J_F=   638.20 meanZ=26.24 SoC=0.9077
+ep=2400000 frame=018 slot=09 J_F=   -84.80 meanZ=25.16 SoC=0.9030
+ep=2400000 frame=019 slot=09 J_F=   397.60 meanZ=25.50 SoC=0.9018
+ep=2400000 frame=020 slot=09 J_F=   119.40 meanZ=24.60 SoC=0.8990
+ep=2400000 frame=021 slot=09 J_F=   240.20 meanZ=24.24 SoC=0.8971
+ep=2400000 frame=022 slot=09 J_F=   442.90 meanZ=24.14 SoC=0.8969
+ep=2400000 frame=023 slot=09 J_F=   349.10 meanZ=24.24 SoC=0.8946
+ep=2400000 frame=024 slot=09 J_F=   404.00 meanZ=25.46 SoC=0.8920
+ep=2400000 frame=025 slot=09 J_F=   258.60 meanZ=25.06 SoC=0.8878
+ep=2400000 frame=026 slot=09 J_F=    -4.40 meanZ=24.64 SoC=0.8850
+ep=2400000 frame=027 slot=09 J_F=   622.00 meanZ=26.06 SoC=0.8821
+ep=2400000 frame=028 slot=09 J_F=   340.00 meanZ=26.04 SoC=0.8790
+ep=2400000 frame=029 slot=09 J_F=   246.30 meanZ=25.28 SoC=0.8767
+{
+  "qoe_surrogate_per_user_slot": 0.5816473333333225,
+  "stall_ratio": 0.050866666666666664,
+  "average_quality_utility": 0.5791791505358246,
+  "hire_rate": 0.7133333333333334
+}

@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 660, in <module>
+    raise SystemExit(main())
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 656, in main
+    return run_train(a) if a.mode == "train" else run_eval(a)
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 469, in run_train
+    agents = make_agents(cfg, args.algorithm)
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 364, in make_agents
+    return [ndt_agent(cfg)]
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 271, in ndt_agent
+    agent = PPOAgent(4 + 10 * cfg.num_users, nvec, learning, "ndtvs_ppo")
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed/hppo/ppo.py", line 192, in __init__
+    raise RuntimeError("CUDA was requested but is unavailable; no CPU fallback")
+RuntimeError: CUDA was requested but is unavailable; no CPU fallback
