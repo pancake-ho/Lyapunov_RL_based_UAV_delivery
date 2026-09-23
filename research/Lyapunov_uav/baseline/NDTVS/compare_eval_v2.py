@@ -29,8 +29,10 @@ ROOT = Path(__file__).resolve().parents[2]
 BASE = ROOT / "baseline/NDTVS/runs/common_gpu"
 TRAIN = ROOT / "proposed/outputs/hppo/hrl_revision_train_seed2026_job142434"
 RESUMED = ROOT / "proposed/outputs/hppo/hrl_resume_job142596"
-OUTPUT = BASE / "comparison_v2_seed2026_offset5000000_n30"
+OUTPUT = BASE / "comparison_v2_hashfix_seed2026_offset5000000_n30"
 CORE_HASH = "604db64d4148ef9a07c72f947fe16095b5b25f66cf58cbb43df7bafbccf6d4f8"
+# The earlier snr_sweep_6201893.zip ships the same code without one final blank line.
+DELIVERED_CORE_HASH = "7dc59ce06e0c531c5e8c82a449570d2791efd0c365e03a85e763f111676d6874"
 SCOPE = "Pointwise paired scenario bootstrap, conditional on one training seed and fixed checkpoints; not training-seed uncertainty or simultaneous coverage."
 
 
@@ -50,7 +52,9 @@ def check_rows(rows, cfg, name, ids, fingerprints):
 def load(args, c):
     source = c.source_hashes()
     s.require(s.digest(source) == s.AUDITED_SOURCE_DIGEST, "Training/evaluator source changed")
-    s.require(s.sha256(Path(s.__file__)) == CORE_HASH, "SNR core changed")
+    core_hash = s.sha256(Path(s.__file__))
+    s.require(core_hash in (CORE_HASH, DELIVERED_CORE_HASH),
+              f"SNR core changed: found {core_hash}; inspect the server file before continuing")
     s.require(s.sha256(Path(c.__file__).with_name("ndtvs_analysis.py")) == s.AUDITED_ANALYSIS_DIGEST, "Trace auditor changed")
     valid = s.read_json(args.validation)
     s.require(valid["spec"]["source_sha256"] == source and valid["spec"]["qoe_weights"] == list(c.QOE_WEIGHTS), "Validation source/metric mismatch")
@@ -120,7 +124,7 @@ def run(args):
     root = args.out/args.mode
     spec = {"mode": args.mode, "selection": selection, "policy_order": list(POLICIES), "scenario_seed": 2026,
             "scenario_ids": ids, "snr_offsets_db": list(levels), "runner_sha256": s.sha256(__file__),
-            "snr_core_sha256": CORE_HASH, "metric_window": "All 30 frames / 300 slots; no warmup exclusion",
+            "snr_core_sha256": s.sha256(Path(s.__file__)), "metric_window": "All 30 frames / 300 slots; no warmup exclusion",
             "radio_sanity": s.radio_sanity(configs["proposed_124"])}
     state_file = root/"state.json"
     if state_file.exists():
