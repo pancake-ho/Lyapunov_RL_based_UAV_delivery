@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 660, in <module>
-    raise SystemExit(main())
-  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 656, in main
-    return run_train(a) if a.mode == "train" else run_eval(a)
-  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 465, in run_train
-    raise FileExistsError("Nonempty output directory; use --resume or another --out")
-FileExistsError: Nonempty output directory; use --resume or another --out
