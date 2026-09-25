@@ -1,0 +1,53 @@
+{
+  "per_episode": [
+    {
+      "avg_qoe_per_user_slot": 1.3099805555555564,
+      "stall_ratio": 0.004166666666666667,
+      "stall_events_per_user_slot": 0.0020833333333333333,
+      "scheduled_ratio": 0.675,
+      "service_rate": 0.55625,
+      "chunks_per_user_slot": 1.5420833333333333,
+      "quality_utility_per_chunk": 0.8556119967576337,
+      "degradation_per_chunk": 0.14438800324236703,
+      "avg_quality_level_per_chunk": 2.968657119697379,
+      "switch_user_slot_rate": 0.006666666666666667,
+      "avg_switch_magnitude_per_user_slot": 0.002222222222222222,
+      "avg_playback_queue": 84.72333333333333,
+      "large_Q_exceed_rate": 0.345,
+      "max_playback_queue": 248.0
+    }
+  ],
+  "mean": {
+    "avg_qoe_per_user_slot": 1.3099805555555564,
+    "stall_ratio": 0.004166666666666667,
+    "stall_events_per_user_slot": 0.0020833333333333333,
+    "scheduled_ratio": 0.675,
+    "service_rate": 0.55625,
+    "chunks_per_user_slot": 1.5420833333333333,
+    "quality_utility_per_chunk": 0.8556119967576337,
+    "degradation_per_chunk": 0.14438800324236703,
+    "avg_quality_level_per_chunk": 2.968657119697379,
+    "switch_user_slot_rate": 0.006666666666666667,
+    "avg_switch_magnitude_per_user_slot": 0.002222222222222222,
+    "avg_playback_queue": 84.72333333333333,
+    "large_Q_exceed_rate": 0.345,
+    "max_playback_queue": 248.0
+  },
+  "std": {
+    "avg_qoe_per_user_slot": 0.0,
+    "stall_ratio": 0.0,
+    "stall_events_per_user_slot": 0.0,
+    "scheduled_ratio": 0.0,
+    "service_rate": 0.0,
+    "chunks_per_user_slot": 0.0,
+    "quality_utility_per_chunk": 0.0,
+    "degradation_per_chunk": 0.0,
+    "avg_quality_level_per_chunk": 0.0,
+    "switch_user_slot_rate": 0.0,
+    "avg_switch_magnitude_per_user_slot": 0.0,
+    "avg_playback_queue": 0.0,
+    "large_Q_exceed_rate": 0.0,
+    "max_playback_queue": 0.0
+  },
+  "eval_seed_base": 1002026
+}

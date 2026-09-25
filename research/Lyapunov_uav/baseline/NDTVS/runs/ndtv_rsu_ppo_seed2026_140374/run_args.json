@@ -1,0 +1,14 @@
+{
+  "episodes": 5000,
+  "eval_episodes": 3,
+  "seed": 2026,
+  "device": "cpu",
+  "out_dir": "runs/ndtv_rsu_ppo_seed2026_140374",
+  "log_slots": "eval",
+  "log_text": true,
+  "checkpoint": "",
+  "eval_only": false,
+  "print_every": 10,
+  "plot_every": 25,
+  "reward_ma_window": 50
+}

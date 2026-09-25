@@ -1,0 +1,12 @@
+{
+  "episodes": 5,
+  "eval_episodes": 1,
+  "seed": 2026,
+  "device": "cpu",
+  "out_dir": "runs/ndtv_rsu_smoke_seed2026_140350",
+  "log_slots": "eval",
+  "log_text": true,
+  "checkpoint": "",
+  "eval_only": false,
+  "print_every": 1
+}
