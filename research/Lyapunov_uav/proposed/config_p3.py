@@ -62,7 +62,7 @@ class P3Config:
     evaluation_warmup_frames: int = 5
 
     alpha_z: float = 1.0
-    lyapunov_v: float = 40.0
+    lyapunov_v: float = 50.0
     lambda_h: float = 1.0
     hiring_cost_per_frame: float = 5.0
 
