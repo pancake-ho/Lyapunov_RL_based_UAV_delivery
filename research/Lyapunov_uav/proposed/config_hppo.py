@@ -71,11 +71,11 @@ class HPPOConfig(P3Config):
     frame_update_every_episodes: int = 2
 
     # ---------------- episodes / run ----------------
-    train_episodes: int = 200
+    train_episodes: int = 150
     eval_episodes: int = 5
     save_every_episodes: int = 25
     deterministic_eval: bool = True
-    device: str = "cpu"
+    device: str = "cuda"
     # Set explicitly to use disjoint evaluation episodes; default preserves Claude.
     episode_offset: int = 0
     torch_num_threads: int = 1
