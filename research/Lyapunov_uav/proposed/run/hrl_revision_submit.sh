@@ -17,7 +17,7 @@ mkdir -p "$project_root/slurm_logs"
 export HPPO_PROJECT_ROOT="$project_root" HPPO_MODE="$mode"
 limit=1-00:00:00
 if [[ "$mode" == smoke ]]; then limit=01:00:00; fi
-sbatch --job-name="hrl_revision_$mode" --partition="$HPPO_PARTITION" \
+sbatch --job-name="V_40_test" --partition="$HPPO_PARTITION" \
     --nodes=1 --ntasks=1 --gres=gpu:1 \
     --cpus-per-gpu="${HPPO_CPUS:-16}" --mem-per-gpu="${HPPO_MEM:-29G}" \
     --time="${HPPO_TIME:-$limit}" --no-requeue --chdir="$project_root" \
