@@ -9,12 +9,13 @@ EPISODES_PER_SEED = 30
 TEST_EPISODE_OFFSET = 7_000_000
 SMOKE_EPISODE_OFFSET = 8_000_000
 
-# A scientific choice is needed. No answer was supplied to the SNR question.
+# Confirmed: adapt the SNR sweep to our trained scenario, using relative offsets.
+# Keep the axis as an offset; do not relabel these values as absolute 25..45 dB.
 # 'transmit': Gamma = RSU per-user transmit power / (N0 * per-user BW).
 # 'received': RSU reference-link SNR, at REFERENCE_DISTANCE_M and fading=1.
 # 'offset': exact -10..+10 dB relative to the trained noise PSD; axis says offset.
-SNR_MODE = None
-SNR_DB = (25, 30, 35, 40, 45)
+SNR_MODE = "offset"
+SNR_DB = (25, 30, 35, 40, 45)  # Inactive in the selected offset mode.
 SNR_OFFSETS_DB = (-10, -5, 0, 5, 10)
 REFERENCE_DISTANCE_M = None  # Required only for 'received'; not chosen silently.
 
@@ -38,17 +39,16 @@ MODELS = [
 #     config=RUN/"resolved_config.json", runtime=RUN/"runtime.json",
 #     frame_checkpoint=RUN/"checkpoints/frame_latest.pt",
 #     slot_checkpoint=RUN/"checkpoints/slot_latest.pt", selection="user-selected"))
-# Optional existing RSU ablation: MODELS.append(dict(name='hppo_rsu',
-#     algorithm='hppo_rsu', checkpoint=Path('<validation-selected best.pt>')))
+# NDTVS is the only baseline in this experiment; proposed V models remain.
 
 # Common reporting utility is received PSNR / 41.64. Training utility is retained.
 # Common QoE uses the existing NDTVS observer, not the proposed DPP reward.
-# A COST-AUGMENTED reporting objective is distinct from the original paper QoE.
-# No cost/PSNR conversion coefficient or cost list was approved in this turn.
-COST_MODE = None  # None: no cost sweep; 'reevaluate' or 'accounting'.
-HIRING_COSTS = None  # Suggested pending confirmation: (0., 5., 10., 20.).
-QOE_COST_WEIGHT = None  # Suggested pending confirmation: 1.0.
-COST_SNR_DB = None  # Choose a value on your selected SNR axis for the cost sweep.
+# Confirmed: no proposed hiring-cost experiment or cost-augmented QoE.
+# Existing hiring parameters in each trained scenario are retained unchanged.
+COST_MODE = None
+HIRING_COSTS = None
+QOE_COST_WEIGHT = None
+COST_SNR_DB = None
 
 # Trace/audit the first scenario of EVERY method/SNR/seed/cost cell.
 TRACE_ALL = False
