@@ -415,3 +415,635 @@ ep=8000000 frame=017 slot=09 J_F=   610.00 meanZ=27.52 SoC=0.9635
 ep=8000000 frame=018 slot=09 J_F=   396.50 meanZ=26.54 SoC=0.9641
 ep=8000000 frame=019 slot=09 J_F=   623.50 meanZ=26.20 SoC=0.9647
 ep=8000000 frame=020 slot=09 J_F=  1206.00 meanZ=26.90 SoC=0.9641
+ep=8000000 frame=021 slot=09 J_F=   512.50 meanZ=25.48 SoC=0.9624
+ep=8000000 frame=022 slot=09 J_F=  1102.50 meanZ=27.22 SoC=0.9617
+ep=8000000 frame=023 slot=09 J_F=  1233.00 meanZ=27.26 SoC=0.9602
+ep=8000000 frame=024 slot=09 J_F=   773.50 meanZ=26.60 SoC=0.9585
+ep=8000000 frame=025 slot=09 J_F=  1072.00 meanZ=28.82 SoC=0.9569
+ep=8000000 frame=026 slot=09 J_F=   651.50 meanZ=27.16 SoC=0.9528
+ep=8000000 frame=027 slot=09 J_F=   983.00 meanZ=28.48 SoC=0.9511
+ep=8000000 frame=028 slot=09 J_F=  1080.00 meanZ=29.88 SoC=0.9509
+ep=8000000 frame=029 slot=09 J_F=   934.50 meanZ=29.72 SoC=0.9493
+{
+  "valid": true,
+  "physics_checks_passed": 260653,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: proposed_V50 offset=5 seed=2026 1/1 stall=0.0598 coverage=0.9800
+{
+  "valid": true,
+  "physics_checks_passed": 243656,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: ndtvs offset=5 seed=2026 1/1 stall=0.0141 coverage=1.0000
+ep=8000000 frame=000 slot=09 J_F= -1953.50 meanZ=84.82 SoC=0.9935
+ep=8000000 frame=001 slot=09 J_F=  -470.50 meanZ=75.42 SoC=0.9885
+ep=8000000 frame=002 slot=09 J_F= -1021.50 meanZ=64.06 SoC=0.9854
+ep=8000000 frame=003 slot=09 J_F=  -164.50 meanZ=53.82 SoC=0.9804
+ep=8000000 frame=004 slot=09 J_F=   728.00 meanZ=45.14 SoC=0.9765
+ep=8000000 frame=005 slot=09 J_F=   534.50 meanZ=38.42 SoC=0.9710
+ep=8000000 frame=006 slot=09 J_F=   448.00 meanZ=34.12 SoC=0.9698
+ep=8000000 frame=007 slot=09 J_F=   499.00 meanZ=31.04 SoC=0.9696
+ep=8000000 frame=008 slot=09 J_F=   766.00 meanZ=29.04 SoC=0.9707
+ep=8000000 frame=009 slot=09 J_F=   657.00 meanZ=28.32 SoC=0.9697
+ep=8000000 frame=010 slot=09 J_F=   728.00 meanZ=26.86 SoC=0.9677
+ep=8000000 frame=011 slot=09 J_F=   667.00 meanZ=25.72 SoC=0.9659
+ep=8000000 frame=012 slot=09 J_F=  1071.50 meanZ=25.28 SoC=0.9641
+ep=8000000 frame=013 slot=09 J_F=   821.00 meanZ=25.14 SoC=0.9647
+ep=8000000 frame=014 slot=09 J_F=   758.00 meanZ=24.78 SoC=0.9614
+ep=8000000 frame=015 slot=09 J_F=   446.50 meanZ=23.52 SoC=0.9594
+ep=8000000 frame=016 slot=09 J_F=  1061.00 meanZ=25.84 SoC=0.9600
+ep=8000000 frame=017 slot=09 J_F=  1020.00 meanZ=27.28 SoC=0.9604
+ep=8000000 frame=018 slot=09 J_F=   243.00 meanZ=23.26 SoC=0.9549
+ep=8000000 frame=019 slot=09 J_F=   563.50 meanZ=24.16 SoC=0.9532
+ep=8000000 frame=020 slot=09 J_F=   340.50 meanZ=23.36 SoC=0.9532
+ep=8000000 frame=021 slot=09 J_F=  1133.50 meanZ=23.94 SoC=0.9533
+ep=8000000 frame=022 slot=09 J_F=   474.00 meanZ=22.30 SoC=0.9510
+ep=8000000 frame=023 slot=09 J_F=   669.50 meanZ=21.44 SoC=0.9502
+ep=8000000 frame=024 slot=09 J_F=  1142.00 meanZ=20.82 SoC=0.9482
+ep=8000000 frame=025 slot=09 J_F=   344.00 meanZ=21.94 SoC=0.9465
+ep=8000000 frame=026 slot=09 J_F=  1120.50 meanZ=22.70 SoC=0.9463
+ep=8000000 frame=027 slot=09 J_F=   978.00 meanZ=25.56 SoC=0.9472
+ep=8000000 frame=028 slot=09 J_F=   956.00 meanZ=26.74 SoC=0.9462
+ep=8000000 frame=029 slot=09 J_F=   755.00 meanZ=27.00 SoC=0.9466
+{
+  "valid": true,
+  "physics_checks_passed": 262054,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: proposed_V50 offset=5 seed=2027 1/1 stall=0.0568 coverage=0.9800
+{
+  "valid": true,
+  "physics_checks_passed": 243929,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: ndtvs offset=5 seed=2027 1/1 stall=0.0125 coverage=1.0000
+ep=8000000 frame=000 slot=09 J_F= -2683.50 meanZ=85.20 SoC=0.9940
+ep=8000000 frame=001 slot=09 J_F= -1690.50 meanZ=72.20 SoC=0.9875
+ep=8000000 frame=002 slot=09 J_F=  -934.50 meanZ=62.14 SoC=0.9839
+ep=8000000 frame=003 slot=09 J_F=  -295.00 meanZ=53.46 SoC=0.9792
+ep=8000000 frame=004 slot=09 J_F=    -5.00 meanZ=44.04 SoC=0.9764
+ep=8000000 frame=005 slot=09 J_F=   349.50 meanZ=36.94 SoC=0.9725
+ep=8000000 frame=006 slot=09 J_F=   940.00 meanZ=33.20 SoC=0.9713
+ep=8000000 frame=007 slot=09 J_F=   475.50 meanZ=32.74 SoC=0.9713
+ep=8000000 frame=008 slot=09 J_F=   587.50 meanZ=31.88 SoC=0.9711
+ep=8000000 frame=009 slot=09 J_F=  1025.50 meanZ=31.88 SoC=0.9683
+ep=8000000 frame=010 slot=09 J_F=   413.00 meanZ=29.06 SoC=0.9628
+ep=8000000 frame=011 slot=09 J_F=   893.00 meanZ=29.94 SoC=0.9601
+ep=8000000 frame=012 slot=09 J_F=   628.50 meanZ=28.96 SoC=0.9569
+ep=8000000 frame=013 slot=09 J_F=   818.00 meanZ=30.48 SoC=0.9547
+ep=8000000 frame=014 slot=09 J_F=   706.50 meanZ=29.98 SoC=0.9535
+ep=8000000 frame=015 slot=09 J_F=   854.50 meanZ=31.00 SoC=0.9520
+ep=8000000 frame=016 slot=09 J_F=   521.00 meanZ=29.98 SoC=0.9507
+ep=8000000 frame=017 slot=09 J_F=   489.50 meanZ=29.84 SoC=0.9514
+ep=8000000 frame=018 slot=09 J_F=   734.50 meanZ=30.34 SoC=0.9515
+ep=8000000 frame=019 slot=09 J_F=   175.50 meanZ=28.40 SoC=0.9504
+ep=8000000 frame=020 slot=09 J_F=   827.00 meanZ=27.92 SoC=0.9500
+ep=8000000 frame=021 slot=09 J_F=   391.00 meanZ=27.08 SoC=0.9488
+ep=8000000 frame=022 slot=09 J_F=   661.50 meanZ=26.60 SoC=0.9489
+ep=8000000 frame=023 slot=09 J_F=   730.50 meanZ=25.48 SoC=0.9450
+ep=8000000 frame=024 slot=09 J_F=   861.50 meanZ=27.46 SoC=0.9451
+ep=8000000 frame=025 slot=09 J_F=  1015.00 meanZ=28.26 SoC=0.9444
+ep=8000000 frame=026 slot=09 J_F=   662.00 meanZ=27.46 SoC=0.9432
+ep=8000000 frame=027 slot=09 J_F=   883.00 meanZ=27.26 SoC=0.9430
+ep=8000000 frame=028 slot=09 J_F=   917.50 meanZ=27.96 SoC=0.9396
+ep=8000000 frame=029 slot=09 J_F=   220.50 meanZ=27.08 SoC=0.9355
+{
+  "valid": true,
+  "physics_checks_passed": 260843,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: proposed_V50 offset=5 seed=2028 1/1 stall=0.0785 coverage=0.9800
+{
+  "valid": true,
+  "physics_checks_passed": 243693,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: ndtvs offset=5 seed=2028 1/1 stall=0.0119 coverage=1.0000
+ep=8000000 frame=000 slot=09 J_F= -4115.50 meanZ=82.70 SoC=0.9935
+ep=8000000 frame=001 slot=09 J_F= -1725.00 meanZ=70.60 SoC=0.9897
+ep=8000000 frame=002 slot=09 J_F= -1381.50 meanZ=57.06 SoC=0.9842
+ep=8000000 frame=003 slot=09 J_F=   193.50 meanZ=47.14 SoC=0.9787
+ep=8000000 frame=004 slot=09 J_F=   453.00 meanZ=38.60 SoC=0.9778
+ep=8000000 frame=005 slot=09 J_F=   218.00 meanZ=32.58 SoC=0.9768
+ep=8000000 frame=006 slot=09 J_F=   563.00 meanZ=31.12 SoC=0.9772
+ep=8000000 frame=007 slot=09 J_F=   895.00 meanZ=28.66 SoC=0.9770
+ep=8000000 frame=008 slot=09 J_F=   598.00 meanZ=25.04 SoC=0.9742
+ep=8000000 frame=009 slot=09 J_F=   599.50 meanZ=25.34 SoC=0.9724
+ep=8000000 frame=010 slot=09 J_F=   842.00 meanZ=24.26 SoC=0.9714
+ep=8000000 frame=011 slot=09 J_F=   334.00 meanZ=25.20 SoC=0.9715
+ep=8000000 frame=012 slot=09 J_F=   658.00 meanZ=25.68 SoC=0.9724
+ep=8000000 frame=013 slot=09 J_F=  1029.50 meanZ=25.10 SoC=0.9731
+ep=8000000 frame=014 slot=09 J_F=   622.50 meanZ=22.92 SoC=0.9714
+ep=8000000 frame=015 slot=09 J_F=   745.50 meanZ=24.10 SoC=0.9720
+ep=8000000 frame=016 slot=09 J_F=  1030.50 meanZ=23.66 SoC=0.9703
+ep=8000000 frame=017 slot=09 J_F=   728.50 meanZ=23.42 SoC=0.9712
+ep=8000000 frame=018 slot=09 J_F=   521.50 meanZ=22.48 SoC=0.9713
+ep=8000000 frame=019 slot=09 J_F=   796.00 meanZ=22.22 SoC=0.9701
+ep=8000000 frame=020 slot=09 J_F=   782.50 meanZ=22.20 SoC=0.9674
+ep=8000000 frame=021 slot=09 J_F=   560.50 meanZ=21.52 SoC=0.9680
+ep=8000000 frame=022 slot=09 J_F=  1011.00 meanZ=23.10 SoC=0.9680
+ep=8000000 frame=023 slot=09 J_F=   914.00 meanZ=23.60 SoC=0.9694
+ep=8000000 frame=024 slot=09 J_F=   753.50 meanZ=23.78 SoC=0.9692
+ep=8000000 frame=025 slot=09 J_F=  1026.00 meanZ=25.08 SoC=0.9680
+ep=8000000 frame=026 slot=09 J_F=   897.50 meanZ=24.86 SoC=0.9668
+ep=8000000 frame=027 slot=09 J_F=   710.50 meanZ=25.22 SoC=0.9645
+ep=8000000 frame=028 slot=09 J_F=   838.00 meanZ=26.48 SoC=0.9638
+ep=8000000 frame=029 slot=09 J_F=   418.50 meanZ=25.46 SoC=0.9633
+{
+  "valid": true,
+  "physics_checks_passed": 258487,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: proposed_V50 offset=10 seed=2026 1/1 stall=0.0553 coverage=0.9800
+{
+  "valid": true,
+  "physics_checks_passed": 243840,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: ndtvs offset=10 seed=2026 1/1 stall=0.0136 coverage=1.0000
+ep=8000000 frame=000 slot=09 J_F= -3262.00 meanZ=82.22 SoC=0.9935
+ep=8000000 frame=001 slot=09 J_F= -1461.50 meanZ=70.12 SoC=0.9880
+ep=8000000 frame=002 slot=09 J_F= -1411.50 meanZ=56.06 SoC=0.9849
+ep=8000000 frame=003 slot=09 J_F=  -271.50 meanZ=44.60 SoC=0.9784
+ep=8000000 frame=004 slot=09 J_F=   656.50 meanZ=35.44 SoC=0.9746
+ep=8000000 frame=005 slot=09 J_F=   489.50 meanZ=30.34 SoC=0.9720
+ep=8000000 frame=006 slot=09 J_F=   257.50 meanZ=25.66 SoC=0.9682
+ep=8000000 frame=007 slot=09 J_F=   730.50 meanZ=23.72 SoC=0.9665
+ep=8000000 frame=008 slot=09 J_F=   855.00 meanZ=23.18 SoC=0.9676
+ep=8000000 frame=009 slot=09 J_F=   681.50 meanZ=21.54 SoC=0.9639
+ep=8000000 frame=010 slot=09 J_F=   711.50 meanZ=21.22 SoC=0.9639
+ep=8000000 frame=011 slot=09 J_F=   719.50 meanZ=18.92 SoC=0.9629
+ep=8000000 frame=012 slot=09 J_F=   803.50 meanZ=19.30 SoC=0.9630
+ep=8000000 frame=013 slot=09 J_F=   618.50 meanZ=19.08 SoC=0.9618
+ep=8000000 frame=014 slot=09 J_F=   839.00 meanZ=20.10 SoC=0.9619
+ep=8000000 frame=015 slot=09 J_F=   559.00 meanZ=19.02 SoC=0.9607
+ep=8000000 frame=016 slot=09 J_F=   778.00 meanZ=19.32 SoC=0.9581
+ep=8000000 frame=017 slot=09 J_F=   826.00 meanZ=21.52 SoC=0.9597
+ep=8000000 frame=018 slot=09 J_F=   221.50 meanZ=18.80 SoC=0.9563
+ep=8000000 frame=019 slot=09 J_F=   506.50 meanZ=19.00 SoC=0.9546
+ep=8000000 frame=020 slot=09 J_F=   499.00 meanZ=17.56 SoC=0.9526
+ep=8000000 frame=021 slot=09 J_F=   614.00 meanZ=18.38 SoC=0.9536
+ep=8000000 frame=022 slot=09 J_F=   685.50 meanZ=17.48 SoC=0.9511
+ep=8000000 frame=023 slot=09 J_F=   826.00 meanZ=17.06 SoC=0.9498
+ep=8000000 frame=024 slot=09 J_F=   881.50 meanZ=17.68 SoC=0.9499
+ep=8000000 frame=025 slot=09 J_F=   610.00 meanZ=17.54 SoC=0.9479
+ep=8000000 frame=026 slot=09 J_F=   609.00 meanZ=18.08 SoC=0.9470
+ep=8000000 frame=027 slot=09 J_F=   977.50 meanZ=21.44 SoC=0.9474
+ep=8000000 frame=028 slot=09 J_F=   878.00 meanZ=23.76 SoC=0.9470
+ep=8000000 frame=029 slot=09 J_F=   884.50 meanZ=22.48 SoC=0.9450
+{
+  "valid": true,
+  "physics_checks_passed": 261106,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: proposed_V50 offset=10 seed=2027 1/1 stall=0.0547 coverage=0.9800
+{
+  "valid": true,
+  "physics_checks_passed": 244085,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: ndtvs offset=10 seed=2027 1/1 stall=0.0122 coverage=1.0000
+ep=8000000 frame=000 slot=09 J_F= -3904.00 meanZ=82.52 SoC=0.9940
+ep=8000000 frame=001 slot=09 J_F= -2497.00 meanZ=68.08 SoC=0.9885
+ep=8000000 frame=002 slot=09 J_F= -1079.00 meanZ=55.92 SoC=0.9839
+ep=8000000 frame=003 slot=09 J_F=   -66.50 meanZ=45.46 SoC=0.9794
+ep=8000000 frame=004 slot=09 J_F=   310.50 meanZ=35.26 SoC=0.9769
+ep=8000000 frame=005 slot=09 J_F=   610.00 meanZ=30.22 SoC=0.9752
+ep=8000000 frame=006 slot=09 J_F=   707.00 meanZ=28.72 SoC=0.9763
+ep=8000000 frame=007 slot=09 J_F=   825.00 meanZ=27.62 SoC=0.9753
+ep=8000000 frame=008 slot=09 J_F=   691.50 meanZ=26.70 SoC=0.9736
+ep=8000000 frame=009 slot=09 J_F=   644.50 meanZ=26.12 SoC=0.9713
+ep=8000000 frame=010 slot=09 J_F=   576.50 meanZ=24.36 SoC=0.9685
+ep=8000000 frame=011 slot=09 J_F=   941.00 meanZ=25.66 SoC=0.9692
+ep=8000000 frame=012 slot=09 J_F=   877.50 meanZ=24.44 SoC=0.9645
+ep=8000000 frame=013 slot=09 J_F=   812.00 meanZ=26.40 SoC=0.9631
+ep=8000000 frame=014 slot=09 J_F=   728.00 meanZ=24.58 SoC=0.9626
+ep=8000000 frame=015 slot=09 J_F=   621.00 meanZ=25.90 SoC=0.9624
+ep=8000000 frame=016 slot=09 J_F=   715.50 meanZ=25.36 SoC=0.9633
+ep=8000000 frame=017 slot=09 J_F=   705.00 meanZ=24.30 SoC=0.9628
+ep=8000000 frame=018 slot=09 J_F=   681.00 meanZ=25.02 SoC=0.9647
+ep=8000000 frame=019 slot=09 J_F=   560.50 meanZ=23.28 SoC=0.9670
+ep=8000000 frame=020 slot=09 J_F=   809.50 meanZ=23.38 SoC=0.9702
+ep=8000000 frame=021 slot=09 J_F=   638.50 meanZ=23.38 SoC=0.9700
+ep=8000000 frame=022 slot=09 J_F=   204.50 meanZ=22.94 SoC=0.9706
+ep=8000000 frame=023 slot=09 J_F=   617.50 meanZ=22.58 SoC=0.9686
+ep=8000000 frame=024 slot=09 J_F=   722.50 meanZ=23.54 SoC=0.9678
+ep=8000000 frame=025 slot=09 J_F=   651.50 meanZ=24.40 SoC=0.9666
+ep=8000000 frame=026 slot=09 J_F=   833.50 meanZ=23.36 SoC=0.9648
+ep=8000000 frame=027 slot=09 J_F=   788.00 meanZ=24.24 SoC=0.9660
+ep=8000000 frame=028 slot=09 J_F=   960.00 meanZ=23.44 SoC=0.9649
+ep=8000000 frame=029 slot=09 J_F=   716.50 meanZ=23.00 SoC=0.9606
+{
+  "valid": true,
+  "physics_checks_passed": 259400,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: proposed_V50 offset=10 seed=2028 1/1 stall=0.0663 coverage=0.9800
+{
+  "valid": true,
+  "physics_checks_passed": 243856,
+  "physics_checks_failed": {},
+  "errors": []
+}
+smoke: ndtvs offset=10 seed=2028 1/1 stall=0.0124 coverage=1.0000
+ep=7000000 frame=000 slot=09 J_F=   149.50 meanZ=95.10 SoC=0.9989
+ep=7000000 frame=001 slot=09 J_F=  -263.50 meanZ=92.24 SoC=0.9984
+ep=7000000 frame=002 slot=09 J_F=   679.50 meanZ=90.82 SoC=0.9965
+ep=7000000 frame=003 slot=09 J_F=   514.00 meanZ=90.64 SoC=0.9948
+ep=7000000 frame=004 slot=09 J_F=   138.50 meanZ=88.40 SoC=0.9955
+ep=7000000 frame=005 slot=09 J_F=   917.50 meanZ=88.42 SoC=0.9960
+ep=7000000 frame=006 slot=09 J_F=  -935.00 meanZ=87.18 SoC=0.9941
+ep=7000000 frame=007 slot=09 J_F=   936.50 meanZ=87.74 SoC=0.9919
+ep=7000000 frame=008 slot=09 J_F=   643.50 meanZ=88.72 SoC=0.9919
+ep=7000000 frame=009 slot=09 J_F=   112.00 meanZ=86.88 SoC=0.9939
+ep=7000000 frame=010 slot=09 J_F=   732.00 meanZ=86.38 SoC=0.9930
+ep=7000000 frame=011 slot=09 J_F=   938.00 meanZ=87.38 SoC=0.9930
+ep=7000000 frame=012 slot=09 J_F=    49.50 meanZ=86.50 SoC=0.9932
+ep=7000000 frame=013 slot=09 J_F=   664.50 meanZ=86.38 SoC=0.9941
+ep=7000000 frame=014 slot=09 J_F=   981.50 meanZ=88.22 SoC=0.9946
+ep=7000000 frame=015 slot=09 J_F=  -413.50 meanZ=86.90 SoC=0.9952
+ep=7000000 frame=016 slot=09 J_F=   872.50 meanZ=87.36 SoC=0.9956
+ep=7000000 frame=017 slot=09 J_F=  -418.00 meanZ=86.24 SoC=0.9963
+ep=7000000 frame=018 slot=09 J_F=   437.00 meanZ=85.04 SoC=0.9956
+ep=7000000 frame=019 slot=09 J_F=   677.50 meanZ=85.62 SoC=0.9942
+ep=7000000 frame=020 slot=09 J_F=  -110.50 meanZ=84.26 SoC=0.9950
+ep=7000000 frame=021 slot=09 J_F=   858.50 meanZ=82.22 SoC=0.9945
+ep=7000000 frame=022 slot=09 J_F=   857.00 meanZ=83.84 SoC=0.9926
+ep=7000000 frame=023 slot=09 J_F=  -524.00 meanZ=83.16 SoC=0.9926
+ep=7000000 frame=024 slot=09 J_F=   554.00 meanZ=81.84 SoC=0.9930
+ep=7000000 frame=025 slot=09 J_F=  1353.50 meanZ=82.52 SoC=0.9948
+ep=7000000 frame=026 slot=09 J_F=   740.00 meanZ=83.96 SoC=0.9965
+ep=7000000 frame=027 slot=09 J_F=   581.50 meanZ=84.60 SoC=0.9979
+ep=7000000 frame=028 slot=09 J_F=   793.00 meanZ=84.72 SoC=0.9977
+ep=7000000 frame=029 slot=09 J_F=   506.50 meanZ=84.30 SoC=0.9974
+{
+  "valid": true,
+  "physics_checks_passed": 244250,
+  "physics_checks_failed": {},
+  "errors": []
+}
+sweep: proposed_V50 offset=-10 seed=2026 1/30 stall=0.3822 coverage=0.9600
+ep=7000001 frame=000 slot=09 J_F=  -540.50 meanZ=94.96 SoC=1.0000
+ep=7000001 frame=001 slot=09 J_F=   127.50 meanZ=92.80 SoC=0.9984
+ep=7000001 frame=002 slot=09 J_F=   965.00 meanZ=92.12 SoC=0.9973
+ep=7000001 frame=003 slot=09 J_F=   105.00 meanZ=90.58 SoC=0.9965
+ep=7000001 frame=004 slot=09 J_F=  -348.00 meanZ=87.82 SoC=0.9967
+ep=7000001 frame=005 slot=09 J_F=   469.00 meanZ=86.46 SoC=0.9980
+ep=7000001 frame=006 slot=09 J_F=   690.50 meanZ=86.66 SoC=0.9991
+ep=7000001 frame=007 slot=09 J_F=     7.00 meanZ=86.58 SoC=0.9991
+ep=7000001 frame=008 slot=09 J_F=   260.50 meanZ=85.98 SoC=0.9992
+ep=7000001 frame=009 slot=09 J_F=  1036.50 meanZ=85.48 SoC=0.9989
+ep=7000001 frame=010 slot=09 J_F=   984.00 meanZ=85.42 SoC=0.9976
+ep=7000001 frame=011 slot=09 J_F=   873.50 meanZ=84.68 SoC=0.9968
+ep=7000001 frame=012 slot=09 J_F=   383.00 meanZ=83.84 SoC=0.9973
+ep=7000001 frame=013 slot=09 J_F=   772.00 meanZ=83.40 SoC=0.9970
+ep=7000001 frame=014 slot=09 J_F=   412.50 meanZ=83.74 SoC=0.9967
+ep=7000001 frame=015 slot=09 J_F=  1112.00 meanZ=84.74 SoC=0.9980
+ep=7000001 frame=016 slot=09 J_F=    66.00 meanZ=85.72 SoC=0.9993
+ep=7000001 frame=017 slot=09 J_F=  1111.50 meanZ=84.28 SoC=0.9984
+ep=7000001 frame=018 slot=09 J_F=   964.50 meanZ=85.68 SoC=0.9976
+ep=7000001 frame=019 slot=09 J_F=   733.50 meanZ=86.50 SoC=0.9986
+ep=7000001 frame=020 slot=09 J_F=   810.50 meanZ=85.28 SoC=0.9997
+ep=7000001 frame=021 slot=09 J_F=   610.00 meanZ=84.06 SoC=0.9984
+ep=7000001 frame=022 slot=09 J_F=   667.00 meanZ=83.52 SoC=0.9968
+ep=7000001 frame=023 slot=09 J_F=   251.50 meanZ=83.40 SoC=0.9973
+ep=7000001 frame=024 slot=09 J_F=   900.00 meanZ=83.98 SoC=0.9961
+ep=7000001 frame=025 slot=09 J_F=   526.00 meanZ=84.42 SoC=0.9948
+ep=7000001 frame=026 slot=09 J_F=   586.50 meanZ=84.34 SoC=0.9950
+ep=7000001 frame=027 slot=09 J_F=   566.00 meanZ=83.78 SoC=0.9944
+ep=7000001 frame=028 slot=09 J_F=   432.50 meanZ=83.80 SoC=0.9955
+ep=7000001 frame=029 slot=09 J_F=   996.50 meanZ=84.32 SoC=0.9954
+sweep: proposed_V50 offset=-10 seed=2026 2/30 stall=0.3690 coverage=0.9600
+ep=7000002 frame=000 slot=09 J_F=  -299.00 meanZ=95.12 SoC=1.0000
+ep=7000002 frame=001 slot=09 J_F=  -238.50 meanZ=91.56 SoC=0.9989
+ep=7000002 frame=002 slot=09 J_F=  1334.50 meanZ=91.14 SoC=0.9976
+ep=7000002 frame=003 slot=09 J_F=   207.50 meanZ=91.16 SoC=0.9961
+ep=7000002 frame=004 slot=09 J_F=  -365.00 meanZ=88.14 SoC=0.9950
+ep=7000002 frame=005 slot=09 J_F=   906.00 meanZ=88.18 SoC=0.9944
+ep=7000002 frame=006 slot=09 J_F=   608.00 meanZ=87.74 SoC=0.9953
+ep=7000002 frame=007 slot=09 J_F=  1080.00 meanZ=86.92 SoC=0.9953
+ep=7000002 frame=008 slot=09 J_F=  -488.50 meanZ=86.24 SoC=0.9960
+ep=7000002 frame=009 slot=09 J_F=  1062.50 meanZ=84.74 SoC=0.9964
+ep=7000002 frame=010 slot=09 J_F=   327.00 meanZ=84.88 SoC=0.9965
+ep=7000002 frame=011 slot=09 J_F=  1148.00 meanZ=84.26 SoC=0.9967
+ep=7000002 frame=012 slot=09 J_F=  1218.50 meanZ=86.36 SoC=0.9966
+ep=7000002 frame=013 slot=09 J_F=   770.00 meanZ=86.48 SoC=0.9974
+ep=7000002 frame=014 slot=09 J_F=  1062.50 meanZ=85.56 SoC=0.9969
+ep=7000002 frame=015 slot=09 J_F=   924.50 meanZ=84.86 SoC=0.9954
+ep=7000002 frame=016 slot=09 J_F=  1285.00 meanZ=86.40 SoC=0.9941
+ep=7000002 frame=017 slot=09 J_F=  1180.00 meanZ=86.76 SoC=0.9936
+ep=7000002 frame=018 slot=09 J_F=   566.00 meanZ=87.80 SoC=0.9932
+ep=7000002 frame=019 slot=09 J_F=   431.50 meanZ=85.92 SoC=0.9944
+ep=7000002 frame=020 slot=09 J_F=   903.00 meanZ=85.72 SoC=0.9962
+ep=7000002 frame=021 slot=09 J_F=   383.00 meanZ=85.52 SoC=0.9971
+ep=7000002 frame=022 slot=09 J_F=    14.50 meanZ=84.30 SoC=0.9974
+ep=7000002 frame=023 slot=09 J_F=   414.50 meanZ=85.52 SoC=0.9949
+ep=7000002 frame=024 slot=09 J_F=  1186.00 meanZ=86.46 SoC=0.9946
+ep=7000002 frame=025 slot=09 J_F=   490.50 meanZ=86.74 SoC=0.9927
+ep=7000002 frame=026 slot=09 J_F=   117.00 meanZ=86.32 SoC=0.9929
+ep=7000002 frame=027 slot=09 J_F=  1088.00 meanZ=86.06 SoC=0.9929
+ep=7000002 frame=028 slot=09 J_F=  -165.50 meanZ=86.70 SoC=0.9938
+ep=7000002 frame=029 slot=09 J_F=  -110.00 meanZ=84.18 SoC=0.9942
+sweep: proposed_V50 offset=-10 seed=2026 3/30 stall=0.3531 coverage=0.9800
+ep=7000003 frame=000 slot=09 J_F=  -551.50 meanZ=94.06 SoC=1.0000
+ep=7000003 frame=001 slot=09 J_F=   318.50 meanZ=93.32 SoC=0.9989
+ep=7000003 frame=002 slot=09 J_F=    84.00 meanZ=91.30 SoC=0.9951
+ep=7000003 frame=003 slot=09 J_F=  -197.00 meanZ=90.54 SoC=0.9943
+ep=7000003 frame=004 slot=09 J_F=   945.00 meanZ=88.36 SoC=0.9947
+ep=7000003 frame=005 slot=09 J_F=  1361.00 meanZ=89.12 SoC=0.9950
+ep=7000003 frame=006 slot=09 J_F=  1183.50 meanZ=88.72 SoC=0.9941
+ep=7000003 frame=007 slot=09 J_F=   913.50 meanZ=88.78 SoC=0.9946
+ep=7000003 frame=008 slot=09 J_F=   335.50 meanZ=87.48 SoC=0.9946
+ep=7000003 frame=009 slot=09 J_F=   827.00 meanZ=87.50 SoC=0.9931
+ep=7000003 frame=010 slot=09 J_F=   556.50 meanZ=87.04 SoC=0.9941
+ep=7000003 frame=011 slot=09 J_F=   739.50 meanZ=86.02 SoC=0.9963
+ep=7000003 frame=012 slot=09 J_F=   579.00 meanZ=87.16 SoC=0.9976
+ep=7000003 frame=013 slot=09 J_F=   724.50 meanZ=87.34 SoC=0.9983
+ep=7000003 frame=014 slot=09 J_F=   -28.00 meanZ=85.88 SoC=0.9985
+ep=7000003 frame=015 slot=09 J_F=   258.00 meanZ=85.00 SoC=0.9959
+ep=7000003 frame=016 slot=09 J_F=   309.50 meanZ=84.88 SoC=0.9951
+ep=7000003 frame=017 slot=09 J_F=   526.50 meanZ=84.00 SoC=0.9958
+ep=7000003 frame=018 slot=09 J_F=  1188.00 meanZ=84.34 SoC=0.9943
+ep=7000003 frame=019 slot=09 J_F=   100.00 meanZ=85.74 SoC=0.9935
+ep=7000003 frame=020 slot=09 J_F=   759.50 meanZ=84.26 SoC=0.9921
+ep=7000003 frame=021 slot=09 J_F=  1424.00 meanZ=84.68 SoC=0.9920
+ep=7000003 frame=022 slot=09 J_F=   645.50 meanZ=83.48 SoC=0.9912
+ep=7000003 frame=023 slot=09 J_F=  1408.50 meanZ=84.52 SoC=0.9898
+ep=7000003 frame=024 slot=09 J_F=  1446.00 meanZ=87.40 SoC=0.9900
+ep=7000003 frame=025 slot=09 J_F=   791.50 meanZ=87.18 SoC=0.9910
+ep=7000003 frame=026 slot=09 J_F=   592.00 meanZ=85.56 SoC=0.9910
+ep=7000003 frame=027 slot=09 J_F=   533.00 meanZ=85.46 SoC=0.9922
+ep=7000003 frame=028 slot=09 J_F=   507.50 meanZ=84.92 SoC=0.9924
+ep=7000003 frame=029 slot=09 J_F=   946.50 meanZ=85.78 SoC=0.9927
+sweep: proposed_V50 offset=-10 seed=2026 4/30 stall=0.3493 coverage=0.9800
+ep=7000004 frame=000 slot=09 J_F= -1119.00 meanZ=94.84 SoC=0.9992
+ep=7000004 frame=001 slot=09 J_F=    42.50 meanZ=93.38 SoC=0.9984
+ep=7000004 frame=002 slot=09 J_F=  -785.00 meanZ=90.30 SoC=0.9981
+ep=7000004 frame=003 slot=09 J_F=   529.50 meanZ=89.14 SoC=0.9989
+ep=7000004 frame=004 slot=09 J_F=   236.00 meanZ=88.64 SoC=0.9984
+ep=7000004 frame=005 slot=09 J_F=   319.50 meanZ=87.04 SoC=0.9968
+ep=7000004 frame=006 slot=09 J_F=   800.50 meanZ=86.52 SoC=0.9945
+ep=7000004 frame=007 slot=09 J_F=   189.50 meanZ=83.24 SoC=0.9950
+ep=7000004 frame=008 slot=09 J_F=  1650.50 meanZ=85.00 SoC=0.9941
+ep=7000004 frame=009 slot=09 J_F=   416.00 meanZ=86.54 SoC=0.9957
+ep=7000004 frame=010 slot=09 J_F=  -296.00 meanZ=84.18 SoC=0.9964
+ep=7000004 frame=011 slot=09 J_F=  1004.50 meanZ=83.58 SoC=0.9971
+ep=7000004 frame=012 slot=09 J_F=  1254.00 meanZ=82.54 SoC=0.9963
+ep=7000004 frame=013 slot=09 J_F=   332.50 meanZ=82.50 SoC=0.9961
+ep=7000004 frame=014 slot=09 J_F=   898.00 meanZ=81.72 SoC=0.9975
+ep=7000004 frame=015 slot=09 J_F=  1354.00 meanZ=82.86 SoC=0.9964
+ep=7000004 frame=016 slot=09 J_F=   -61.50 meanZ=81.16 SoC=0.9942
+ep=7000004 frame=017 slot=09 J_F=   826.00 meanZ=81.48 SoC=0.9941
+ep=7000004 frame=018 slot=09 J_F=   493.00 meanZ=81.90 SoC=0.9940
+ep=7000004 frame=019 slot=09 J_F=   639.50 meanZ=82.40 SoC=0.9920
+ep=7000004 frame=020 slot=09 J_F=   634.50 meanZ=82.30 SoC=0.9918
+ep=7000004 frame=021 slot=09 J_F=   651.50 meanZ=81.74 SoC=0.9922
+ep=7000004 frame=022 slot=09 J_F=  1087.00 meanZ=84.58 SoC=0.9940
+ep=7000004 frame=023 slot=09 J_F=   595.50 meanZ=85.60 SoC=0.9955
+ep=7000004 frame=024 slot=09 J_F=  -462.00 meanZ=85.72 SoC=0.9932
+ep=7000004 frame=025 slot=09 J_F=   302.50 meanZ=84.72 SoC=0.9942
+ep=7000004 frame=026 slot=09 J_F=   711.50 meanZ=84.26 SoC=0.9944
+ep=7000004 frame=027 slot=09 J_F=  1007.00 meanZ=85.76 SoC=0.9938
+ep=7000004 frame=028 slot=09 J_F=  1341.00 meanZ=86.50 SoC=0.9954
+ep=7000004 frame=029 slot=09 J_F=   607.00 meanZ=87.54 SoC=0.9978
+sweep: proposed_V50 offset=-10 seed=2026 5/30 stall=0.3624 coverage=0.9800
+ep=7000005 frame=000 slot=09 J_F=  -718.50 meanZ=95.14 SoC=1.0000
+ep=7000005 frame=001 slot=09 J_F= -1163.50 meanZ=92.64 SoC=0.9994
+ep=7000005 frame=002 slot=09 J_F=  -196.00 meanZ=89.12 SoC=0.9973
+ep=7000005 frame=003 slot=09 J_F=  1315.50 meanZ=89.14 SoC=0.9948
+ep=7000005 frame=004 slot=09 J_F=  -335.50 meanZ=87.14 SoC=0.9926
+ep=7000005 frame=005 slot=09 J_F=  1008.50 meanZ=87.14 SoC=0.9915
+ep=7000005 frame=006 slot=09 J_F=   761.50 meanZ=88.26 SoC=0.9918
+ep=7000005 frame=007 slot=09 J_F=   347.00 meanZ=86.18 SoC=0.9928
+ep=7000005 frame=008 slot=09 J_F=   940.00 meanZ=86.34 SoC=0.9930
+ep=7000005 frame=009 slot=09 J_F=   210.50 meanZ=84.92 SoC=0.9935
+ep=7000005 frame=010 slot=09 J_F=  1301.50 meanZ=85.68 SoC=0.9934
+ep=7000005 frame=011 slot=09 J_F=    74.50 meanZ=86.10 SoC=0.9933
+ep=7000005 frame=012 slot=09 J_F=   251.50 meanZ=85.20 SoC=0.9905
+ep=7000005 frame=013 slot=09 J_F=   519.50 meanZ=84.62 SoC=0.9920
+ep=7000005 frame=014 slot=09 J_F=   654.00 meanZ=84.62 SoC=0.9934
+ep=7000005 frame=015 slot=09 J_F=   -94.00 meanZ=82.64 SoC=0.9912
+ep=7000005 frame=016 slot=09 J_F=   923.50 meanZ=83.10 SoC=0.9914
+ep=7000005 frame=017 slot=09 J_F=   238.00 meanZ=83.82 SoC=0.9901
+ep=7000005 frame=018 slot=09 J_F=   712.50 meanZ=83.26 SoC=0.9900
+ep=7000005 frame=019 slot=09 J_F=  1771.50 meanZ=84.76 SoC=0.9886
+ep=7000005 frame=020 slot=09 J_F=   -15.50 meanZ=85.26 SoC=0.9898
+ep=7000005 frame=021 slot=09 J_F=   510.50 meanZ=82.94 SoC=0.9905
+ep=7000005 frame=022 slot=09 J_F=   571.00 meanZ=83.46 SoC=0.9905
+ep=7000005 frame=023 slot=09 J_F=   424.00 meanZ=82.50 SoC=0.9917
+ep=7000005 frame=024 slot=09 J_F=   455.00 meanZ=82.52 SoC=0.9943
+ep=7000005 frame=025 slot=09 J_F=  1072.50 meanZ=82.84 SoC=0.9967
+ep=7000005 frame=026 slot=09 J_F=  1746.50 meanZ=85.52 SoC=0.9971
+ep=7000005 frame=027 slot=09 J_F=  1224.00 meanZ=86.56 SoC=0.9983
+ep=7000005 frame=028 slot=09 J_F=   293.50 meanZ=85.74 SoC=0.9973
+ep=7000005 frame=029 slot=09 J_F=   830.00 meanZ=85.28 SoC=0.9976
+sweep: proposed_V50 offset=-10 seed=2026 6/30 stall=0.3679 coverage=0.9800
+ep=7000006 frame=000 slot=09 J_F=  -340.50 meanZ=94.48 SoC=1.0000
+ep=7000006 frame=001 slot=09 J_F=  -998.50 meanZ=91.16 SoC=0.9984
+ep=7000006 frame=002 slot=09 J_F=  -263.50 meanZ=88.70 SoC=0.9976
+ep=7000006 frame=003 slot=09 J_F=   907.50 meanZ=87.76 SoC=0.9965
+ep=7000006 frame=004 slot=09 J_F=   442.50 meanZ=86.74 SoC=0.9970
+ep=7000006 frame=005 slot=09 J_F=   578.50 meanZ=87.96 SoC=0.9986
+ep=7000006 frame=006 slot=09 J_F=   846.00 meanZ=86.62 SoC=0.9991
+ep=7000006 frame=007 slot=09 J_F=   704.50 meanZ=85.86 SoC=0.9983
+ep=7000006 frame=008 slot=09 J_F=   286.00 meanZ=86.10 SoC=0.9976
+ep=7000006 frame=009 slot=09 J_F=    59.00 meanZ=84.80 SoC=0.9986
+ep=7000006 frame=010 slot=09 J_F=  -121.00 meanZ=83.48 SoC=0.9986
+ep=7000006 frame=011 slot=09 J_F=  1342.00 meanZ=83.16 SoC=0.9991
+ep=7000006 frame=012 slot=09 J_F=   851.00 meanZ=83.52 SoC=0.9989
+ep=7000006 frame=013 slot=09 J_F=   783.50 meanZ=83.60 SoC=0.9976
+ep=7000006 frame=014 slot=09 J_F=     9.00 meanZ=82.42 SoC=0.9959
+ep=7000006 frame=015 slot=09 J_F=   896.00 meanZ=82.46 SoC=0.9956
+ep=7000006 frame=016 slot=09 J_F=   428.50 meanZ=82.92 SoC=0.9948
+ep=7000006 frame=017 slot=09 J_F=   441.00 meanZ=82.72 SoC=0.9956
+ep=7000006 frame=018 slot=09 J_F=   520.00 meanZ=82.68 SoC=0.9955
+ep=7000006 frame=019 slot=09 J_F=   482.50 meanZ=83.08 SoC=0.9944
+ep=7000006 frame=020 slot=09 J_F=   492.00 meanZ=82.30 SoC=0.9930
+ep=7000006 frame=021 slot=09 J_F=   712.00 meanZ=82.14 SoC=0.9946
+ep=7000006 frame=022 slot=09 J_F=   604.50 meanZ=81.70 SoC=0.9962
+ep=7000006 frame=023 slot=09 J_F=  1037.50 meanZ=83.76 SoC=0.9971
+ep=7000006 frame=024 slot=09 J_F=  1228.00 meanZ=85.02 SoC=0.9963
+ep=7000006 frame=025 slot=09 J_F=   598.00 meanZ=85.04 SoC=0.9963
+ep=7000006 frame=026 slot=09 J_F=   702.00 meanZ=85.18 SoC=0.9956
+ep=7000006 frame=027 slot=09 J_F=   270.50 meanZ=85.64 SoC=0.9959
+ep=7000006 frame=028 slot=09 J_F=   515.50 meanZ=85.80 SoC=0.9947
+ep=7000006 frame=029 slot=09 J_F=   235.00 meanZ=86.04 SoC=0.9936
+sweep: proposed_V50 offset=-10 seed=2026 7/30 stall=0.3478 coverage=0.9800
+ep=7000007 frame=000 slot=09 J_F=  -535.50 meanZ=96.52 SoC=1.0000
+ep=7000007 frame=001 slot=09 J_F=  -735.50 meanZ=93.66 SoC=1.0000
+ep=7000007 frame=002 slot=09 J_F=   258.00 meanZ=90.64 SoC=0.9992
+ep=7000007 frame=003 slot=09 J_F=   207.00 meanZ=89.08 SoC=0.9968
+ep=7000007 frame=004 slot=09 J_F=   749.00 meanZ=89.00 SoC=0.9948
+ep=7000007 frame=005 slot=09 J_F=    11.00 meanZ=86.96 SoC=0.9942
+ep=7000007 frame=006 slot=09 J_F=   915.50 meanZ=86.42 SoC=0.9937
+ep=7000007 frame=007 slot=09 J_F=   430.50 meanZ=85.90 SoC=0.9928
+ep=7000007 frame=008 slot=09 J_F=   411.00 meanZ=85.66 SoC=0.9941
+ep=7000007 frame=009 slot=09 J_F=   256.00 meanZ=84.78 SoC=0.9943
+ep=7000007 frame=010 slot=09 J_F=  1494.50 meanZ=84.56 SoC=0.9945
+ep=7000007 frame=011 slot=09 J_F=   720.50 meanZ=84.74 SoC=0.9949
+ep=7000007 frame=012 slot=09 J_F=   181.00 meanZ=83.34 SoC=0.9966
+ep=7000007 frame=013 slot=09 J_F=  1517.00 meanZ=83.78 SoC=0.9948
+ep=7000007 frame=014 slot=09 J_F=   925.00 meanZ=84.60 SoC=0.9947
+ep=7000007 frame=015 slot=09 J_F=   204.50 meanZ=82.70 SoC=0.9931
+ep=7000007 frame=016 slot=09 J_F=   865.50 meanZ=82.60 SoC=0.9933
+ep=7000007 frame=017 slot=09 J_F=  1046.50 meanZ=83.52 SoC=0.9945
+ep=7000007 frame=018 slot=09 J_F=   618.50 meanZ=82.70 SoC=0.9952
+ep=7000007 frame=019 slot=09 J_F=   531.00 meanZ=83.26 SoC=0.9960
+ep=7000007 frame=020 slot=09 J_F=   441.50 meanZ=82.16 SoC=0.9947
+ep=7000007 frame=021 slot=09 J_F=   361.50 meanZ=82.78 SoC=0.9949
+ep=7000007 frame=022 slot=09 J_F=    53.00 meanZ=81.86 SoC=0.9947
+ep=7000007 frame=023 slot=09 J_F=  1085.50 meanZ=83.04 SoC=0.9948
+ep=7000007 frame=024 slot=09 J_F=  -396.00 meanZ=81.64 SoC=0.9955
+ep=7000007 frame=025 slot=09 J_F=  1413.50 meanZ=82.22 SoC=0.9964
+ep=7000007 frame=026 slot=09 J_F=  1068.00 meanZ=82.84 SoC=0.9969
+ep=7000007 frame=027 slot=09 J_F=   423.50 meanZ=81.62 SoC=0.9946
+ep=7000007 frame=028 slot=09 J_F=  1325.50 meanZ=83.46 SoC=0.9943
+ep=7000007 frame=029 slot=09 J_F=   784.50 meanZ=81.94 SoC=0.9943
+sweep: proposed_V50 offset=-10 seed=2026 8/30 stall=0.3760 coverage=0.9800
+ep=7000008 frame=000 slot=09 J_F= -1138.50 meanZ=94.96 SoC=0.9992
+ep=7000008 frame=001 slot=09 J_F=   -46.00 meanZ=91.64 SoC=0.9992
+ep=7000008 frame=002 slot=09 J_F=   516.00 meanZ=90.64 SoC=0.9973
+ep=7000008 frame=003 slot=09 J_F=   296.00 meanZ=89.72 SoC=0.9965
+ep=7000008 frame=004 slot=09 J_F=   893.50 meanZ=89.52 SoC=0.9970
+ep=7000008 frame=005 slot=09 J_F=  -107.00 meanZ=87.80 SoC=0.9950
+ep=7000008 frame=006 slot=09 J_F=   624.00 meanZ=85.36 SoC=0.9934
+ep=7000008 frame=007 slot=09 J_F=   375.00 meanZ=84.58 SoC=0.9920
+ep=7000008 frame=008 slot=09 J_F=  1085.00 meanZ=84.74 SoC=0.9906
+ep=7000008 frame=009 slot=09 J_F=   193.00 meanZ=84.96 SoC=0.9916
+ep=7000008 frame=010 slot=09 J_F=   537.50 meanZ=83.34 SoC=0.9935
+ep=7000008 frame=011 slot=09 J_F=   807.00 meanZ=85.12 SoC=0.9942
+ep=7000008 frame=012 slot=09 J_F=    86.50 meanZ=83.88 SoC=0.9915
+ep=7000008 frame=013 slot=09 J_F=   273.00 meanZ=84.22 SoC=0.9904
+ep=7000008 frame=014 slot=09 J_F=   753.50 meanZ=84.08 SoC=0.9918
+ep=7000008 frame=015 slot=09 J_F=  1425.50 meanZ=84.38 SoC=0.9922
+ep=7000008 frame=016 slot=09 J_F=   809.00 meanZ=86.24 SoC=0.9943
+ep=7000008 frame=017 slot=09 J_F=   312.50 meanZ=85.76 SoC=0.9957
+ep=7000008 frame=018 slot=09 J_F=  1416.50 meanZ=86.96 SoC=0.9959
+ep=7000008 frame=019 slot=09 J_F=    30.00 meanZ=86.98 SoC=0.9966
+ep=7000008 frame=020 slot=09 J_F=   926.50 meanZ=85.56 SoC=0.9977
+ep=7000008 frame=021 slot=09 J_F=  1009.50 meanZ=86.80 SoC=0.9975
+ep=7000008 frame=022 slot=09 J_F=   293.00 meanZ=84.54 SoC=0.9964
+ep=7000008 frame=023 slot=09 J_F=   687.50 meanZ=84.08 SoC=0.9973
+ep=7000008 frame=024 slot=09 J_F=  1004.50 meanZ=83.94 SoC=0.9962
+ep=7000008 frame=025 slot=09 J_F=   908.00 meanZ=85.82 SoC=0.9958
+ep=7000008 frame=026 slot=09 J_F=   -45.50 meanZ=85.10 SoC=0.9961
+ep=7000008 frame=027 slot=09 J_F=  -204.00 meanZ=83.32 SoC=0.9974
+ep=7000008 frame=028 slot=09 J_F=  1212.50 meanZ=83.42 SoC=0.9973
+ep=7000008 frame=029 slot=09 J_F=   296.50 meanZ=85.16 SoC=0.9963
+sweep: proposed_V50 offset=-10 seed=2026 9/30 stall=0.3633 coverage=0.9800
+ep=7000009 frame=000 slot=09 J_F=    98.50 meanZ=94.62 SoC=1.0000
+ep=7000009 frame=001 slot=09 J_F=    27.50 meanZ=94.34 SoC=0.9997
+ep=7000009 frame=002 slot=09 J_F=  -772.00 meanZ=90.86 SoC=0.9970
+ep=7000009 frame=003 slot=09 J_F=   592.50 meanZ=89.62 SoC=0.9961
+ep=7000009 frame=004 slot=09 J_F=  -255.50 meanZ=86.58 SoC=0.9944
+ep=7000009 frame=005 slot=09 J_F=   887.50 meanZ=86.46 SoC=0.9926
+ep=7000009 frame=006 slot=09 J_F=   879.00 meanZ=87.10 SoC=0.9933
+ep=7000009 frame=007 slot=09 J_F=   -94.50 meanZ=87.16 SoC=0.9946
+ep=7000009 frame=008 slot=09 J_F=   561.00 meanZ=86.62 SoC=0.9953
+ep=7000009 frame=009 slot=09 J_F=   735.00 meanZ=84.76 SoC=0.9948
+ep=7000009 frame=010 slot=09 J_F=   601.00 meanZ=84.00 SoC=0.9964
+ep=7000009 frame=011 slot=09 J_F=  -248.00 meanZ=83.46 SoC=0.9971
+ep=7000009 frame=012 slot=09 J_F=   794.00 meanZ=83.30 SoC=0.9964
+ep=7000009 frame=013 slot=09 J_F=  1083.00 meanZ=84.32 SoC=0.9968
+ep=7000009 frame=014 slot=09 J_F=   647.00 meanZ=84.80 SoC=0.9976
+ep=7000009 frame=015 slot=09 J_F=   903.00 meanZ=85.62 SoC=0.9968
+ep=7000009 frame=016 slot=09 J_F=   799.50 meanZ=85.18 SoC=0.9948
+ep=7000009 frame=017 slot=09 J_F=  1252.00 meanZ=85.92 SoC=0.9958
+ep=7000009 frame=018 slot=09 J_F=   397.00 meanZ=86.82 SoC=0.9963
+ep=7000009 frame=019 slot=09 J_F=   689.50 meanZ=86.40 SoC=0.9964
+ep=7000009 frame=020 slot=09 J_F=   578.00 meanZ=86.74 SoC=0.9974
+ep=7000009 frame=021 slot=09 J_F=   764.00 meanZ=87.92 SoC=0.9982
+ep=7000009 frame=022 slot=09 J_F=   586.00 meanZ=88.80 SoC=0.9979
+ep=7000009 frame=023 slot=09 J_F=   389.50 meanZ=88.74 SoC=0.9976
+ep=7000009 frame=024 slot=09 J_F=   720.50 meanZ=88.46 SoC=0.9978
+ep=7000009 frame=025 slot=09 J_F=   693.50 meanZ=88.72 SoC=0.9981
+ep=7000009 frame=026 slot=09 J_F=  -387.00 meanZ=86.56 SoC=0.9981
+ep=7000009 frame=027 slot=09 J_F=  1375.50 meanZ=87.40 SoC=0.9983
+ep=7000009 frame=028 slot=09 J_F=   871.50 meanZ=88.60 SoC=0.9996
+ep=7000009 frame=029 slot=09 J_F=   877.50 meanZ=88.78 SoC=1.0000
+sweep: proposed_V50 offset=-10 seed=2026 10/30 stall=0.4019 coverage=0.9600
+ep=7000010 frame=000 slot=09 J_F=  -383.00 meanZ=93.26 SoC=1.0000
+ep=7000010 frame=001 slot=09 J_F=   332.00 meanZ=92.00 SoC=0.9984
+ep=7000010 frame=002 slot=09 J_F=  -821.50 meanZ=88.52 SoC=0.9965
+ep=7000010 frame=003 slot=09 J_F=   856.50 meanZ=87.58 SoC=0.9970
+ep=7000010 frame=004 slot=09 J_F=   922.50 meanZ=89.32 SoC=0.9972
+ep=7000010 frame=005 slot=09 J_F=  -190.00 meanZ=88.28 SoC=0.9969
+ep=7000010 frame=006 slot=09 J_F=   692.00 meanZ=85.64 SoC=0.9945
+ep=7000010 frame=007 slot=09 J_F=   107.50 meanZ=84.48 SoC=0.9934
+ep=7000010 frame=008 slot=09 J_F=   843.00 meanZ=83.98 SoC=0.9933
+ep=7000010 frame=009 slot=09 J_F=   445.50 meanZ=84.22 SoC=0.9958
+ep=7000010 frame=010 slot=09 J_F=   814.00 meanZ=83.16 SoC=0.9979
+ep=7000010 frame=011 slot=09 J_F=   746.50 meanZ=85.04 SoC=0.9983
+ep=7000010 frame=012 slot=09 J_F=   111.50 meanZ=83.00 SoC=0.9980
+ep=7000010 frame=013 slot=09 J_F=  1202.00 meanZ=85.34 SoC=0.9977
+ep=7000010 frame=014 slot=09 J_F=  -121.50 meanZ=83.28 SoC=0.9984
+ep=7000010 frame=015 slot=09 J_F=  1252.50 meanZ=83.98 SoC=0.9997
+ep=7000010 frame=016 slot=09 J_F=    34.50 meanZ=84.76 SoC=1.0000
+ep=7000010 frame=017 slot=09 J_F=   972.00 meanZ=83.74 SoC=1.0000
+ep=7000010 frame=018 slot=09 J_F=   635.50 meanZ=83.34 SoC=1.0000
+ep=7000010 frame=019 slot=09 J_F=  1015.00 meanZ=84.90 SoC=0.9989
+ep=7000010 frame=020 slot=09 J_F=  -118.00 meanZ=82.64 SoC=0.9984
+ep=7000010 frame=021 slot=09 J_F=   848.50 meanZ=81.78 SoC=0.9989
+ep=7000010 frame=022 slot=09 J_F=   856.50 meanZ=83.02 SoC=0.9989
+ep=7000010 frame=023 slot=09 J_F=  1560.00 meanZ=84.28 SoC=0.9992
+ep=7000010 frame=024 slot=09 J_F=   249.00 meanZ=83.98 SoC=0.9973
+ep=7000010 frame=025 slot=09 J_F=  1153.50 meanZ=82.66 SoC=0.9976
+ep=7000010 frame=026 slot=09 J_F=  1188.50 meanZ=84.92 SoC=0.9991
+ep=7000010 frame=027 slot=09 J_F=   -32.50 meanZ=83.42 SoC=0.9992
+ep=7000010 frame=028 slot=09 J_F=   657.00 meanZ=82.78 SoC=0.9992
+ep=7000010 frame=029 slot=09 J_F=   607.50 meanZ=81.34 SoC=0.9981
+sweep: proposed_V50 offset=-10 seed=2026 11/30 stall=0.3793 coverage=0.9800
+ep=7000011 frame=000 slot=09 J_F= -1421.00 meanZ=93.72 SoC=0.9984
+ep=7000011 frame=001 slot=09 J_F=    87.50 meanZ=90.02 SoC=0.9976
+ep=7000011 frame=002 slot=09 J_F=  -235.50 meanZ=88.78 SoC=0.9986
+ep=7000011 frame=003 slot=09 J_F=   614.50 meanZ=87.60 SoC=0.9986
+ep=7000011 frame=004 slot=09 J_F=   522.00 meanZ=86.20 SoC=0.9967
+ep=7000011 frame=005 slot=09 J_F=   663.00 meanZ=87.02 SoC=0.9958
+ep=7000011 frame=006 slot=09 J_F=   843.50 meanZ=88.52 SoC=0.9966
+ep=7000011 frame=007 slot=09 J_F=   701.50 meanZ=85.92 SoC=0.9969
+ep=7000011 frame=008 slot=09 J_F=   804.00 meanZ=84.94 SoC=0.9953
+ep=7000011 frame=009 slot=09 J_F=   529.00 meanZ=84.06 SoC=0.9967
+ep=7000011 frame=010 slot=09 J_F=   629.00 meanZ=82.28 SoC=0.9974
+ep=7000011 frame=011 slot=09 J_F=   697.00 meanZ=83.34 SoC=0.9972
+ep=7000011 frame=012 slot=09 J_F=   551.50 meanZ=82.96 SoC=0.9974
+ep=7000011 frame=013 slot=09 J_F=  1323.00 meanZ=83.08 SoC=0.9965
+ep=7000011 frame=014 slot=09 J_F=  1213.00 meanZ=83.82 SoC=0.9975
+ep=7000011 frame=015 slot=09 J_F=   252.00 meanZ=84.22 SoC=0.9977
+ep=7000011 frame=016 slot=09 J_F=  -206.50 meanZ=82.64 SoC=0.9974
+ep=7000011 frame=017 slot=09 J_F=   829.50 meanZ=82.18 SoC=0.9975
+ep=7000011 frame=018 slot=09 J_F=   761.50 meanZ=81.24 SoC=0.9975
+ep=7000011 frame=019 slot=09 J_F=  1374.00 meanZ=81.70 SoC=0.9972
+ep=7000011 frame=020 slot=09 J_F=   845.00 meanZ=84.38 SoC=0.9970
+ep=7000011 frame=021 slot=09 J_F=   -65.50 meanZ=83.48 SoC=0.9969
+ep=7000011 frame=022 slot=09 J_F=   387.50 meanZ=83.72 SoC=0.9944
+ep=7000011 frame=023 slot=09 J_F=   886.00 meanZ=83.46 SoC=0.9942
+ep=7000011 frame=024 slot=09 J_F=   545.50 meanZ=84.72 SoC=0.9954
+ep=7000011 frame=025 slot=09 J_F=   954.50 meanZ=83.66 SoC=0.9958
+ep=7000011 frame=026 slot=09 J_F=  1372.00 meanZ=85.26 SoC=0.9965
+ep=7000011 frame=027 slot=09 J_F=    79.00 meanZ=84.66 SoC=0.9967
+ep=7000011 frame=028 slot=09 J_F=   955.50 meanZ=85.48 SoC=0.9961
+ep=7000011 frame=029 slot=09 J_F=   -63.50 meanZ=85.30 SoC=0.9951
+sweep: proposed_V50 offset=-10 seed=2026 12/30 stall=0.3657 coverage=0.9600
+ep=7000012 frame=000 slot=09 J_F=  -452.00 meanZ=95.70 SoC=0.9992
+ep=7000012 frame=001 slot=09 J_F=    68.00 meanZ=92.66 SoC=0.9984
+ep=7000012 frame=002 slot=09 J_F=   242.50 meanZ=90.00 SoC=0.9953
+ep=7000012 frame=003 slot=09 J_F=   724.50 meanZ=89.86 SoC=0.9961
+ep=7000012 frame=004 slot=09 J_F=   418.00 meanZ=88.62 SoC=0.9987
+ep=7000012 frame=005 slot=09 J_F=   206.00 meanZ=86.46 SoC=0.9992
+ep=7000012 frame=006 slot=09 J_F=   667.50 meanZ=85.66 SoC=0.9948
+ep=7000012 frame=007 slot=09 J_F=   113.50 meanZ=85.14 SoC=0.9937
+ep=7000012 frame=008 slot=09 J_F=  1162.00 meanZ=84.06 SoC=0.9941
+ep=7000012 frame=009 slot=09 J_F=  1062.50 meanZ=85.52 SoC=0.9946
+ep=7000012 frame=010 slot=09 J_F=  -186.00 meanZ=83.98 SoC=0.9956
