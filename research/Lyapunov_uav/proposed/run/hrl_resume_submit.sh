@@ -16,7 +16,7 @@ squeue -u "${USER:-$(id -un)}"
 mkdir -p "$HPPO_PROJECT_ROOT/slurm_logs"
 # 24h allocation, advance notice 30 minutes before its end.
 # exec in the batch script makes Python the batch-shell PID receiving B:USR1.
-sbatch --job-name=hrl_resume --partition="$HPPO_PARTITION" \
+sbatch --job-name=hrl_v50_ep700_resume --partition="$HPPO_PARTITION" \
     --nodes=1 --ntasks=1 --gres=gpu:1 \
     --cpus-per-gpu="${HPPO_CPUS:-16}" --mem-per-gpu="${HPPO_MEM:-29G}" \
     --time=1-00:00:00 --signal=B:USR1@1800 --no-requeue \

@@ -1,0 +1,83 @@
+{
+  "base_attachment": "ndtvs_modular_update.zip",
+  "format": 2,
+  "modular_evaluators": {
+    "analysis/__init__.py": "e60056115ed5fdc00ea9741777bbf5c84205315d183e6d2035586c7b8b671925",
+    "analysis/__main__.py": "307299fda7b77d22c64cb51430ec75e5f59d78e9c948786afb3b2544fe45e4b7",
+    "analysis/audit.py": "706c520e1140697c2bdc7791cf8f66485daf995cf01fa7d8217655bf842766b3",
+    "analysis/cli.py": "ba9ffcbfc040c14fbc81bc1643811cab1c905b48537dfbd917c9630138ed75f7",
+    "analysis/compare.py": "d7ed76eba8873c0f9ea635e353a43c6641cf3b834a681c04c24df865819b94e6",
+    "evaluation/__init__.py": "30a3ff9f2413d744915a2b0369be3ac770210c212e4ea7fc1721c5d0e83cbe9c",
+    "evaluation/__main__.py": "307299fda7b77d22c64cb51430ec75e5f59d78e9c948786afb3b2544fe45e4b7",
+    "evaluation/checks.py": "c96a7d5ded0db1b5bb39068e257bc78fc50474598a0b4ffaea26813f837c947f",
+    "evaluation/cli.py": "336a30d55cac459b6b40588b53e8c3fdf057fb31ce7dd5d4b55c0f6232a10873",
+    "evaluation/policies.py": "ffb674b9b3f818fa6d74f190e72ac8d38bfb04b62e8e70a8bd19fe94dfbee7c2",
+    "evaluation/scenario.py": "854d245e351105051f4682ff5289cfe7c791bdc87a91a855ab80746e58733c81",
+    "evaluation/sweep.py": "52e0c5a8df845ed8c1fe704468cdb9f0f86119652ca2a32bab784092bb707359",
+    "ndtvs_analysis.py": "281389dd0c71927a3a020272e9bfbf25f154683e795b689889bd45b6187bff41",
+    "plot/__init__.py": "5c598d823147511c286734a20710fa41fe1048dd0be2a3248d9e3203fc0d0f39",
+    "plot/learning_diagnostics.py": "ac3620b1eb4aaccfd825bcd7a3a6404cdd88bd49d87e3f029757fef607eec787",
+    "snr_sweep_eval.py": "35ee119be5039449966dc1bfdd433fdb43c7888e40749e6765d3bce6d214d7f6"
+  },
+  "modular_sources": {
+    "baseline/NDTVS/__init__.py": "16093bea960804570221d960a21f278a4141761531afec4b060c206ff014d8ad",
+    "baseline/NDTVS/__main__.py": "307299fda7b77d22c64cb51430ec75e5f59d78e9c948786afb3b2544fe45e4b7",
+    "baseline/NDTVS/api.py": "147c30047b07bb8235298e0bf6a9b8fc2b0c9cba7ca9da0f1c9816a6ae2d8a99",
+    "baseline/NDTVS/cli.py": "8d93f97810912198e8b7720dc54fcf61d64ccc8d2cd83e4140b430889e2eab2f",
+    "baseline/NDTVS/common/__init__.py": "4f3b523b6a7ab3e64a13c04758158ded632b1ae910f14d7e98a6b4a7331be21e",
+    "baseline/NDTVS/common/checkpoint.py": "bc6e611ae18166e6dd0fce68da2ce0a9d91aeade5df99e011ede1209aa3775e0",
+    "baseline/NDTVS/common/config.py": "fbf0661c359e64fc6e1dd35bc6b20fd644a69c658d73b2771ae2f33af5dfafd4",
+    "baseline/NDTVS/common/io.py": "2ae87005337bf410999dad7453cc81f1175a6aa34efc9c09cb0f6e4696c1505f",
+    "baseline/NDTVS/common/paths.py": "db483b6e3a57ccc57def87ef2aa922ef40287453395885d0a5190520aa57072c",
+    "baseline/NDTVS/common/runtime.py": "aa620083150cd78784c9ed2c14813589af766d8681b666843b130fd7d748d93e",
+    "baseline/NDTVS/environment/__init__.py": "b5083d49716565a1026eea5a434667643647ef08b2c62860a35cf1388a128424",
+    "baseline/NDTVS/environment/rsu.py": "807ee8a813d3d396aac20c8cd0f1b274b180cd22990b7762279ea0dcb84b5644",
+    "baseline/NDTVS/evaluation/__init__.py": "30a3ff9f2413d744915a2b0369be3ac770210c212e4ea7fc1721c5d0e83cbe9c",
+    "baseline/NDTVS/evaluation/single.py": "82d2372c4ce5e2c6c0f4e7ce63b172fb6155496059a64082dba99edf14f80fc6",
+    "baseline/NDTVS/metrics/__init__.py": "fecf84eb019b44c7c460fbc6583ffa76d3aa65ec0e821f3e3d18a0635150a2cd",
+    "baseline/NDTVS/metrics/observer.py": "c3b4d228361901be05cd939c6cf489f854a6da87442a49040e96f32ecd1ade77",
+    "baseline/NDTVS/models/__init__.py": "999148177d686f367899a10e0eee66118acdc09ba0a7c3283dc57eb82fcfdb29",
+    "baseline/NDTVS/models/policy.py": "6b6f49d56123249ceed9a36606f7fc98aefc45a9c27f3de89b9860065bea24a3",
+    "baseline/NDTVS/ndtvs_common.py": "bc905a07b8fd51bcb6a77c01576e53ad3b02aa071615979568c33a4a6d94fcce",
+    "baseline/NDTVS/rewards/__init__.py": "2b383ac9182a1fe3b93c2daf95aa069be372ddbfc4cfed0a36a99eb178aeef79",
+    "baseline/NDTVS/rewards/qoe.py": "aa3d7148fc862763f8cfa84b5828850bba96ceebc4c8002e3b37a4bb251e689b",
+    "baseline/NDTVS/training/__init__.py": "5325746351b418cd0a7ae9a32c5d1c541afdfa09834d6f51d0ed7eb2a5ae1708",
+    "baseline/NDTVS/training/rollout.py": "2af1240494a8c1a1a6518362b4b3d2de6acb4665946292266d65b04e21fa7472",
+    "baseline/NDTVS/training/train.py": "f0a9588d20c90bb67c91bbfa74f09f771e0095a5d16f53c8351ba1bdef8984eb"
+  },
+  "previous_evaluators": {
+    "ndtvs_analysis.py": "d505a19653cc31659c81edac02ff17288ee181808605f4a52efdb1740d7a8fa4",
+    "snr_sweep_eval.py": "01b662c9a68e0ea4c1c22d33df80edf02c96e62aa774ea8336a6d20538ac2e79"
+  },
+  "previous_flat_evaluators": {
+    "ndtvs_analysis.py": "891942938f7439b24c20deeab5b6f87788c53339fd253680a8f5475de66fe3f9",
+    "ndtvs_audit.py": "e6d676fb12c01955314dd81831fc3410f6fa810dd3c486667756dcd2cb895adb",
+    "ndtvs_compare.py": "3007e6daece195577d6d44d3cbeb1923d1afaeb30d137fe99583c26b763e158a",
+    "ndtvs_eval_checks.py": "b83cbdd7dbb3212ab602f62788399ef903aa50a601f503b09187d0e60128a274",
+    "ndtvs_eval_policies.py": "aa6e19b59621814b8319ef2acd53a5579cdbcb33804457701b646be55508ed19",
+    "ndtvs_scenario.py": "0c8dba7f4fdcecba4c3d451801b351feab6d678e87c8b0f1ab4de4e8225ec5f1",
+    "ndtvs_sweep.py": "8aa22960938ba2c45657b8d24a9505928e806512cb7ef32f4daa8985f2f6997a",
+    "snr_sweep_eval.py": "1b556eee1da3a3b2c98e7d3fc69f16df71f3e22cf0be259b893fedf5ecfd1c38"
+  },
+  "previous_flat_sources": {
+    "baseline/NDTVS/ndtvs_checkpoint.py": "0a56a742502a641fa82669f6cff74b47ebe80cb42624f14570ef2603e2c151eb",
+    "baseline/NDTVS/ndtvs_cli.py": "3bdd178c79db99b4e40e9f12b1e2d7ab1501a7ef4ffbba6c77760e3d5e4af20e",
+    "baseline/NDTVS/ndtvs_common.py": "537a187049281f0ef129b7e5bc504cb94fd5b0b2d4a1a570dffd7c4d86cf8bff",
+    "baseline/NDTVS/ndtvs_config.py": "4600b137dcc1d5076bead42495103e42a585017969471b9a266427a78dc7419b",
+    "baseline/NDTVS/ndtvs_env.py": "2bedea043418e4e53c8df893876a77da37253f18cc5914a39826a6567e189ac4",
+    "baseline/NDTVS/ndtvs_eval.py": "0a3d41043b6b9ceaf7707b81d1f992194a8e49a2cf8df91a471dd2c3757f3f1d",
+    "baseline/NDTVS/ndtvs_io.py": "9b6c34ef29718fe99416927a496072b2635db0710e4839e55e82fa097c5ad0ef",
+    "baseline/NDTVS/ndtvs_logger.py": "b27a87e1d014992ce94efd3b4728f454b59dacce528363dfc9f744572830d6bf",
+    "baseline/NDTVS/ndtvs_model.py": "a4688ff58ccbe853d0bed017a36cbf3fb471896954d8ad76576f2fb5dd905eed",
+    "baseline/NDTVS/ndtvs_paths.py": "ae5008b269103bb21b53d786ef519de58b17695f5c3d341a89661056b302004e",
+    "baseline/NDTVS/ndtvs_qoe.py": "aa3d7148fc862763f8cfa84b5828850bba96ceebc4c8002e3b37a4bb251e689b",
+    "baseline/NDTVS/ndtvs_rollout.py": "fd907f027d810d153f42d0562bdde277af2e5e968c6e598c2604b27ccbd1b145",
+    "baseline/NDTVS/ndtvs_runtime.py": "aa620083150cd78784c9ed2c14813589af766d8681b666843b130fd7d748d93e",
+    "baseline/NDTVS/ndtvs_source_compat.json": "516b8472b5246c5e6a512b087035aeb59f4fefd293781924a69ac3bb658f7118",
+    "baseline/NDTVS/ndtvs_train.py": "9743711e749261f63e3ce182f2fb9ec08baa9a44016330681c99a3d3e050aff4"
+  },
+  "previous_v2_sources": {
+    "baseline/NDTVS/ndtvs_common.py": "6cd26642bd6003c1089ca2f23710cf1155b9ecb2bf4fe1957c0eeaf6da70bed9",
+    "baseline/NDTVS/ndtvs_qoe.py": "aa3d7148fc862763f8cfa84b5828850bba96ceebc4c8002e3b37a4bb251e689b"
+  }
+}

@@ -1,0 +1,58 @@
+Unit tests
+==========
+test_explicit_budget_extension (test_ndtvs_common.BaselineTests.test_explicit_budget_extension) ... /workspace/scratch/a7737c87ad47/ndtvs_folder_repo/research/Lyapunov_uav/proposed/hppo/ppo.py:341: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:820.)
+  stats["loss"].append(float(loss)); stats["policy_loss"].append(float(policy_loss))
+ok
+test_hidden_csi_and_conditional_log_probability (test_ndtvs_common.BaselineTests.test_hidden_csi_and_conditional_log_probability) ... ok
+test_hppo_legacy_migration_requires_identical_physics (test_ndtvs_common.BaselineTests.test_hppo_legacy_migration_requires_identical_physics) ... ok
+test_hppo_resume_pending_frame_buffer (test_ndtvs_common.BaselineTests.test_hppo_resume_pending_frame_buffer) ... ok
+test_ndtvs_exact_resume (test_ndtvs_common.BaselineTests.test_ndtvs_exact_resume) ... ok
+test_observer_updates_once_and_retains_user_history_across_regions (test_ndtvs_common.BaselineTests.test_observer_updates_once_and_retains_user_history_across_regions) ... ok
+test_paired_smoke_eval_sweep_report_and_resume (test_ndtvs_common.BaselineTests.test_paired_smoke_eval_sweep_report_and_resume) ... ok
+test_paper_reward_sequence_boundaries_and_cumulative_stall (test_ndtvs_common.BaselineTests.test_paper_reward_sequence_boundaries_and_cumulative_stall) ... ok
+test_pooled_quality_ratio_not_mean_of_ratios (test_ndtvs_common.BaselineTests.test_pooled_quality_ratio_not_mean_of_ratios) ... ok
+test_queue_support_and_no_uav (test_ndtvs_common.BaselineTests.test_queue_support_and_no_uav) ... ok
+test_refuse_old_ndtvs_checkpoint (test_ndtvs_common.BaselineTests.test_refuse_old_ndtvs_checkpoint) ... ok
+test_reject_different_physical_evaluations (test_ndtvs_common.BaselineTests.test_reject_different_physical_evaluations) ... ok
+test_reviewed_config_defaults_require_complete_saved_config (test_ndtvs_common.BaselineTests.test_reviewed_config_defaults_require_complete_saved_config) ... ok
+test_same_initial_state_fading_and_rsu_transition (test_ndtvs_common.BaselineTests.test_same_initial_state_fading_and_rsu_transition) ... ok
+test_signed_quality_gap_and_multisegment_first_batch (test_ndtvs_common.BaselineTests.test_signed_quality_gap_and_multisegment_first_batch) ... ok
+test_known_previous_v2_checkpoint_is_accepted (test_ndtvs_modular.ModularCompatibilityTests.test_known_previous_v2_checkpoint_is_accepted) ... ok
+test_later_modular_implementation_edits_are_not_whitelisted (test_ndtvs_modular.ModularCompatibilityTests.test_later_modular_implementation_edits_are_not_whitelisted) ... ok
+test_legacy_entry_point_and_package_share_policy_class_identity (test_ndtvs_modular.ModularCompatibilityTests.test_legacy_entry_point_and_package_share_policy_class_identity) ... ok
+test_paired_resume_preserves_checkpoint_and_scenario_guard (test_ndtvs_modular.ModularCompatibilityTests.test_paired_resume_preserves_checkpoint_and_scenario_guard) ... ok
+test_previous_flat_checkpoint_keeps_same_reward_and_learning_spec (test_ndtvs_modular.ModularCompatibilityTests.test_previous_flat_checkpoint_keeps_same_reward_and_learning_spec) ... ok
+test_previous_flat_paired_evaluator_resume_keeps_scenario_identity (test_ndtvs_modular.ModularCompatibilityTests.test_previous_flat_paired_evaluator_resume_keeps_scenario_identity) ... ok
+test_resume_normalizes_source_only_without_mutating_checkpoint (test_ndtvs_modular.ModularCompatibilityTests.test_resume_normalizes_source_only_without_mutating_checkpoint) ... ok
+test_single_eval_checkpoint_identity_is_not_changed_by_migration (test_ndtvs_modular.ModularCompatibilityTests.test_single_eval_checkpoint_identity_is_not_changed_by_migration) ... ok
+test_unknown_previous_source_and_changed_physics_are_rejected (test_ndtvs_modular.ModularCompatibilityTests.test_unknown_previous_source_and_changed_physics_are_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 6.886s
+
+OK
+
+CLI
+===
+PASS: 7 legacy help outputs identical; 6 folder/package commands run
+
+Numeric equality
+================
+15 rollout/training/resume/eval cases: exact equality.
+Previous flat partial evaluation/sweep resume: 3 cases passed.
+Plot summary/CI/paired differences and PNG: byte-identical. PDF generated in both layouts.
+
+Structural and application checks
+=================================
+PASS: Python compile and Python 3.10 syntax
+PASS: 3 sbatch wrappers unchanged and shell syntax valid
+PASS: all README bash command blocks
+PASS: reward file byte-identical
+PASS: all shared proposed Python sources unchanged
+PASS: applicability checks for branch baseline and both previous attachments; new layout is idempotent
+PASS: full apply + 23 obsolete paths removed + repeated apply
+PASS: unknown local edit blocks all writes and removals
+PASS: patch apply --check against previous flat attachment
+
+Small CPU/Python 3.12/PyTorch 2.14.1+cpu fixtures. Full CUDA experiment was not run.
