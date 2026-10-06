@@ -1,71 +1,73 @@
-"""All experiment and submission settings. Edit this file, not shell variables."""
+"""All experiment and submission settings live here."""
 from pathlib import Path
 
+
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-OUT = PROJECT_ROOT / "baseline/NDTVS/runs/evaluation/snr_v_service"
+OUT = PROJECT_ROOT / "baseline/NDTVS/runs/evaluation/snr_v_service_resume"
+
 DEVICE = "cuda"
-SEEDS = (2026, 2027, 2028)  # Evaluation scenarios, not independent training seeds.
+SEEDS = (2026, 2027, 2028)
 EPISODES_PER_SEED = 30
 TEST_EPISODE_OFFSET = 7_000_000
 SMOKE_EPISODE_OFFSET = 8_000_000
 
-# Confirmed: adapt the SNR sweep to our trained scenario, using relative offsets.
-# Keep the axis as an offset; do not relabel these values as absolute 25..45 dB.
-# 'transmit': Gamma = RSU per-user transmit power / (N0 * per-user BW).
-# 'received': RSU reference-link SNR, at REFERENCE_DISTANCE_M and fading=1.
-# 'offset': exact -10..+10 dB relative to the trained noise PSD; axis says offset.
+# Relative SNR offsets from the trained channel.
 SNR_MODE = "offset"
-SNR_DB = (25, 30, 35, 40, 45)  # Inactive in the selected offset mode.
+SNR_DB = (25, 30, 35, 40, 45)  # Inactive in offset mode.
 SNR_OFFSETS_DB = (-10, -5, 0, 5, 10)
-REFERENCE_DISTANCE_M = None  # Required only for 'received'; not chosen silently.
+REFERENCE_DISTANCE_M = None
 
-# Each proposed model has its OWN config/runtime and compatible checkpoint pair.
-# Add as many V models as needed. No automatic choice by test-set performance.
 V50_RUN = PROJECT_ROOT / "proposed/outputs/hppo/hrl_resume_job145847"
-NDTVS_RUN = PROJECT_ROOT / "baseline/NDTVS/runs/common_gpu/ndtvs_paper_261006_seed2026_ep1000"
-MODELS = [
-    dict(name="proposed_V50", algorithm="proposed", expected_v=50,
-         config=V50_RUN / "resolved_config.json", runtime=V50_RUN / "runtime.json",
-         frame_checkpoint=V50_RUN / "checkpoints/frame_latest.pt",
-         slot_checkpoint=V50_RUN / "checkpoints/slot_latest.pt",
-         selection="user-selected converged checkpoint"),
-    dict(name="ndtvs", algorithm="ndtvs", checkpoint=NDTVS_RUN / "best.pt",
-         completion_status=NDTVS_RUN / "status.json",
-         selection="fixed-validation mean-QoE selected best.pt"),
-]
-# Example additional model (replace RUN and expected_v with your actual run):
-# RUN = PROJECT_ROOT / "proposed/outputs/hppo/<your_V_run>"
-# MODELS.append(dict(name="proposed_V20", algorithm="proposed", expected_v=20,
-#     config=RUN/"resolved_config.json", runtime=RUN/"runtime.json",
-#     frame_checkpoint=RUN/"checkpoints/frame_latest.pt",
-#     slot_checkpoint=RUN/"checkpoints/slot_latest.pt", selection="user-selected"))
-# NDTVS is the only baseline in this experiment; proposed V models remain.
+NDTVS_RUN = (
+    PROJECT_ROOT
+    / "baseline/NDTVS/runs/common_gpu/ndtvs_paper_261006_seed2026_ep1000"
+)
 
-# Common reporting utility is received PSNR / 41.64. Training utility is retained.
-# Common QoE uses the existing NDTVS observer, not the proposed DPP reward.
-# Confirmed: no proposed hiring-cost experiment or cost-augmented QoE.
-# Existing hiring parameters in each trained scenario are retained unchanged.
+MODELS = [
+    dict(
+        name="proposed_V50",
+        algorithm="proposed",
+        expected_v=50,
+        config=V50_RUN / "resolved_config.json",
+        runtime=V50_RUN / "runtime.json",
+        resume_checkpoint=V50_RUN / "checkpoints/resume_latest.pt",
+        selection=(
+            "user-selected longest-trained run; "
+            "last committed resume checkpoint"
+        ),
+    ),
+    dict(
+        name="ndtvs",
+        algorithm="ndtvs",
+        checkpoint=NDTVS_RUN / "best.pt",
+        completion_status=NDTVS_RUN / "status.json",
+        selection="fixed-validation mean-QoE selected best.pt",
+    ),
+]
+
+# Additional proposed V models can use either checkpoint format.
+# Specify each model's own config/runtime and expected_v.
+
 COST_MODE = None
 HIRING_COSTS = None
 QOE_COST_WEIGHT = None
 COST_SNR_DB = None
 
-# Trace/audit the first scenario of EVERY method/SNR/seed/cost cell.
 TRACE_ALL = False
 EXPORT_ANIMATIONS = True
-VISUAL_SEEDS = (2026,)  # Render representative traced episodes for these seeds.
-VISUAL_SNR_DB = None  # None=all SNR levels; tuple restricts visualization only.
-VISUAL_SLOT_STRIDE = 10  # One slot image per frame by default; set 1 for every slot.
+VISUAL_SEEDS = (2026,)
+VISUAL_SNR_DB = None
+VISUAL_SLOT_STRIDE = 10
 VISUAL_MAX_IMAGES = 30
 GIF_FPS = 2
+
 BOOTSTRAP_SAMPLES = 5000
 BOOTSTRAP_SEED = 572913
 WALLTIME_SECONDS = 82800
 RESERVE_SECONDS = 900
-MAX_NEW_EPISODES = 0  # 0=unlimited; supports short, resumable checks.
-RESUME = True  # New output also works. Exact spec must match to resume.
+MAX_NEW_EPISODES = 0
+RESUME = True
 
-# Submission settings; no terminal exports or echo are needed.
 PYTHON = Path("/data/surt321/anaconda3/envs/lab/bin/python")
 PARTITION = "batch_eebme_ugrad"
 GPUS = 1

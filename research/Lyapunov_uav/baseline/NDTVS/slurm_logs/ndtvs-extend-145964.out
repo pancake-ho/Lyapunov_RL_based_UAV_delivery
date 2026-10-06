@@ -305,3 +305,447 @@ ndtvs 804/1000 QoE=-357.73251 stall=0.3427 12.04s
 ndtvs 805/1000 QoE=-352.71524 stall=0.3463 12.02s
 ndtvs 806/1000 QoE=-363.13952 stall=0.3482 11.99s
 ndtvs 807/1000 QoE=-357.01307 stall=0.3331 11.95s
+ndtvs 808/1000 QoE=-358.62887 stall=0.3418 11.93s
+ndtvs 809/1000 QoE=-309.58413 stall=0.3032 11.94s
+ndtvs 810/1000 QoE=-370.52304 stall=0.3486 11.96s
+ndtvs 811/1000 QoE=-345.44987 stall=0.3331 11.95s
+ndtvs 812/1000 QoE=-362.70040 stall=0.3364 11.96s
+ndtvs 813/1000 QoE=-351.73781 stall=0.3327 11.95s
+ndtvs 814/1000 QoE=-367.89458 stall=0.3351 11.94s
+ndtvs 815/1000 QoE=-345.10707 stall=0.3395 12.07s
+ndtvs 816/1000 QoE=-366.35130 stall=0.3367 11.93s
+ndtvs 817/1000 QoE=-352.62322 stall=0.3320 11.97s
+ndtvs 818/1000 QoE=-346.26561 stall=0.3316 11.93s
+ndtvs 819/1000 QoE=-365.31440 stall=0.3550 11.93s
+ndtvs 820/1000 QoE=-362.63726 stall=0.3331 11.95s
+ndtvs 821/1000 QoE=-392.03455 stall=0.3507 11.95s
+ndtvs 822/1000 QoE=-366.30231 stall=0.3345 11.98s
+ndtvs 823/1000 QoE=-336.96303 stall=0.3271 11.96s
+ndtvs 824/1000 QoE=-355.06362 stall=0.3413 11.95s
+ndtvs 825/1000 QoE=-364.22124 stall=0.3483 15.22s
+ndtvs 826/1000 QoE=-331.96973 stall=0.3171 11.98s
+ndtvs 827/1000 QoE=-382.14535 stall=0.3610 11.94s
+ndtvs 828/1000 QoE=-332.96147 stall=0.3236 11.96s
+ndtvs 829/1000 QoE=-330.41854 stall=0.3089 11.96s
+ndtvs 830/1000 QoE=-355.55313 stall=0.3338 11.97s
+ndtvs 831/1000 QoE=-308.50996 stall=0.3044 11.97s
+ndtvs 832/1000 QoE=-330.55537 stall=0.3129 11.98s
+ndtvs 833/1000 QoE=-349.89377 stall=0.3354 11.97s
+ndtvs 834/1000 QoE=-322.20673 stall=0.3139 12.07s
+ndtvs 835/1000 QoE=-368.57910 stall=0.3486 11.95s
+ndtvs 836/1000 QoE=-322.73452 stall=0.3073 11.96s
+ndtvs 837/1000 QoE=-343.40996 stall=0.3213 11.97s
+ndtvs 838/1000 QoE=-339.93695 stall=0.3146 11.96s
+ndtvs 839/1000 QoE=-355.19682 stall=0.3386 11.96s
+ndtvs 840/1000 QoE=-350.71583 stall=0.3225 11.98s
+ndtvs 841/1000 QoE=-341.20901 stall=0.3151 12.00s
+ndtvs 842/1000 QoE=-369.76010 stall=0.3417 11.96s
+ndtvs 843/1000 QoE=-347.49303 stall=0.3323 12.00s
+ndtvs 844/1000 QoE=-321.01932 stall=0.3038 11.95s
+ndtvs 845/1000 QoE=-339.25942 stall=0.3162 11.97s
+ndtvs 846/1000 QoE=-375.57712 stall=0.3390 11.95s
+ndtvs 847/1000 QoE=-365.57513 stall=0.3351 11.95s
+ndtvs 848/1000 QoE=-314.64077 stall=0.3007 11.99s
+ndtvs 849/1000 QoE=-339.47548 stall=0.3171 11.99s
+ndtvs 850/1000 QoE=-381.49338 stall=0.3509 15.26s
+ndtvs 851/1000 QoE=-344.24134 stall=0.3291 11.98s
+ndtvs 852/1000 QoE=-360.50494 stall=0.3311 11.98s
+ndtvs 853/1000 QoE=-317.97232 stall=0.2979 11.98s
+ndtvs 854/1000 QoE=-348.91978 stall=0.3205 11.97s
+ndtvs 855/1000 QoE=-369.49505 stall=0.3414 11.98s
+ndtvs 856/1000 QoE=-357.61380 stall=0.3233 12.08s
+ndtvs 857/1000 QoE=-344.91132 stall=0.3255 11.98s
+ndtvs 858/1000 QoE=-343.77772 stall=0.3203 11.96s
+ndtvs 859/1000 QoE=-357.22085 stall=0.3395 11.95s
+ndtvs 860/1000 QoE=-350.15940 stall=0.3233 11.97s
+ndtvs 861/1000 QoE=-351.41001 stall=0.3281 11.96s
+ndtvs 862/1000 QoE=-324.48008 stall=0.3043 11.98s
+ndtvs 863/1000 QoE=-355.40051 stall=0.3404 11.97s
+ndtvs 864/1000 QoE=-348.79044 stall=0.3302 11.95s
+ndtvs 865/1000 QoE=-322.03064 stall=0.3124 11.96s
+ndtvs 866/1000 QoE=-315.35287 stall=0.3065 11.98s
+ndtvs 867/1000 QoE=-360.36221 stall=0.3262 11.94s
+ndtvs 868/1000 QoE=-330.42208 stall=0.3287 11.96s
+ndtvs 869/1000 QoE=-361.46857 stall=0.3417 11.96s
+ndtvs 870/1000 QoE=-344.54836 stall=0.3208 11.97s
+ndtvs 871/1000 QoE=-332.57878 stall=0.3081 11.97s
+ndtvs 872/1000 QoE=-344.48310 stall=0.3212 11.98s
+ndtvs 873/1000 QoE=-375.82554 stall=0.3465 11.96s
+ndtvs 874/1000 QoE=-349.52887 stall=0.3299 11.97s
+ndtvs 875/1000 QoE=-355.84321 stall=0.3377 15.36s
+ndtvs 876/1000 QoE=-370.84565 stall=0.3510 11.95s
+ndtvs 877/1000 QoE=-359.71107 stall=0.3413 11.97s
+ndtvs 878/1000 QoE=-344.61918 stall=0.3209 11.97s
+ndtvs 879/1000 QoE=-326.38497 stall=0.3097 11.98s
+ndtvs 880/1000 QoE=-360.93039 stall=0.3457 11.99s
+ndtvs 881/1000 QoE=-351.91816 stall=0.3402 11.97s
+ndtvs 882/1000 QoE=-358.79673 stall=0.3369 11.97s
+ndtvs 883/1000 QoE=-356.16887 stall=0.3301 11.98s
+ndtvs 884/1000 QoE=-351.68545 stall=0.3354 12.01s
+ndtvs 885/1000 QoE=-348.86182 stall=0.3301 11.96s
+ndtvs 886/1000 QoE=-338.85267 stall=0.3187 11.97s
+ndtvs 887/1000 QoE=-365.70668 stall=0.3418 11.96s
+ndtvs 888/1000 QoE=-371.57664 stall=0.3418 11.97s
+ndtvs 889/1000 QoE=-345.55025 stall=0.3170 12.00s
+ndtvs 890/1000 QoE=-343.05449 stall=0.3166 12.00s
+ndtvs 891/1000 QoE=-344.79164 stall=0.3194 11.97s
+ndtvs 892/1000 QoE=-361.12839 stall=0.3251 11.98s
+ndtvs 893/1000 QoE=-352.10753 stall=0.3391 11.96s
+ndtvs 894/1000 QoE=-341.37949 stall=0.3103 11.96s
+ndtvs 895/1000 QoE=-364.75794 stall=0.3370 12.04s
+ndtvs 896/1000 QoE=-327.25368 stall=0.3076 11.97s
+ndtvs 897/1000 QoE=-365.20206 stall=0.3363 11.95s
+ndtvs 898/1000 QoE=-375.59299 stall=0.3501 11.97s
+ndtvs 899/1000 QoE=-348.88898 stall=0.3167 11.98s
+ndtvs 900/1000 QoE=-354.09204 stall=0.3374 15.23s
+ndtvs 901/1000 QoE=-348.45223 stall=0.3304 11.98s
+ndtvs 902/1000 QoE=-368.73652 stall=0.3488 11.97s
+ndtvs 903/1000 QoE=-347.88914 stall=0.3215 12.01s
+ndtvs 904/1000 QoE=-335.50058 stall=0.3169 11.97s
+ndtvs 905/1000 QoE=-312.45477 stall=0.3025 11.97s
+ndtvs 906/1000 QoE=-361.30855 stall=0.3293 11.98s
+ndtvs 907/1000 QoE=-392.82195 stall=0.3645 11.96s
+ndtvs 908/1000 QoE=-332.07785 stall=0.3208 11.98s
+ndtvs 909/1000 QoE=-329.92917 stall=0.3241 11.95s
+ndtvs 910/1000 QoE=-340.95324 stall=0.3267 11.98s
+ndtvs 911/1000 QoE=-369.63136 stall=0.3437 11.98s
+ndtvs 912/1000 QoE=-335.21736 stall=0.3157 11.96s
+ndtvs 913/1000 QoE=-357.62409 stall=0.3424 11.96s
+ndtvs 914/1000 QoE=-327.16288 stall=0.3053 11.98s
+ndtvs 915/1000 QoE=-356.00276 stall=0.3245 11.96s
+ndtvs 916/1000 QoE=-362.91781 stall=0.3376 12.07s
+ndtvs 917/1000 QoE=-379.63860 stall=0.3501 11.94s
+ndtvs 918/1000 QoE=-361.82628 stall=0.3382 11.96s
+ndtvs 919/1000 QoE=-372.04784 stall=0.3463 11.96s
+ndtvs 920/1000 QoE=-306.47033 stall=0.2919 11.95s
+ndtvs 921/1000 QoE=-336.83261 stall=0.3171 11.96s
+ndtvs 922/1000 QoE=-393.14583 stall=0.3579 11.96s
+ndtvs 923/1000 QoE=-364.68938 stall=0.3319 12.05s
+ndtvs 924/1000 QoE=-329.76372 stall=0.3119 11.96s
+ndtvs 925/1000 QoE=-328.71016 stall=0.3165 15.24s
+ndtvs 926/1000 QoE=-366.67433 stall=0.3473 11.96s
+ndtvs 927/1000 QoE=-349.64891 stall=0.3282 11.96s
+ndtvs 928/1000 QoE=-364.84777 stall=0.3415 11.95s
+ndtvs 929/1000 QoE=-364.65526 stall=0.3513 11.98s
+ndtvs 930/1000 QoE=-362.95001 stall=0.3360 11.96s
+ndtvs 931/1000 QoE=-360.44572 stall=0.3527 11.97s
+ndtvs 932/1000 QoE=-340.22618 stall=0.3243 11.98s
+ndtvs 933/1000 QoE=-354.95264 stall=0.3259 11.99s
+ndtvs 934/1000 QoE=-350.65596 stall=0.3405 11.96s
+ndtvs 935/1000 QoE=-358.25943 stall=0.3345 11.96s
+ndtvs 936/1000 QoE=-349.86366 stall=0.3211 12.09s
+ndtvs 937/1000 QoE=-356.78060 stall=0.3404 11.99s
+ndtvs 938/1000 QoE=-363.45284 stall=0.3538 11.99s
+ndtvs 939/1000 QoE=-356.40398 stall=0.3382 11.96s
+ndtvs 940/1000 QoE=-348.71365 stall=0.3243 11.98s
+ndtvs 941/1000 QoE=-358.38899 stall=0.3348 11.97s
+ndtvs 942/1000 QoE=-352.83604 stall=0.3359 11.97s
+ndtvs 943/1000 QoE=-366.73377 stall=0.3364 11.96s
+ndtvs 944/1000 QoE=-374.41758 stall=0.3423 11.98s
+ndtvs 945/1000 QoE=-389.58315 stall=0.3602 11.99s
+ndtvs 946/1000 QoE=-359.29346 stall=0.3336 11.99s
+ndtvs 947/1000 QoE=-356.04105 stall=0.3333 11.97s
+ndtvs 948/1000 QoE=-375.21438 stall=0.3636 11.93s
+ndtvs 949/1000 QoE=-368.05106 stall=0.3544 11.99s
+ndtvs 950/1000 QoE=-369.76154 stall=0.3559 15.28s
+ndtvs 951/1000 QoE=-376.62496 stall=0.3379 11.98s
+ndtvs 952/1000 QoE=-338.13449 stall=0.3298 11.98s
+ndtvs 953/1000 QoE=-358.21734 stall=0.3441 11.95s
+ndtvs 954/1000 QoE=-351.69781 stall=0.3315 11.96s
+ndtvs 955/1000 QoE=-367.38888 stall=0.3467 12.11s
+ndtvs 956/1000 QoE=-358.79600 stall=0.3375 11.98s
+ndtvs 957/1000 QoE=-349.36660 stall=0.3235 12.01s
+ndtvs 958/1000 QoE=-365.75708 stall=0.3417 11.95s
+ndtvs 959/1000 QoE=-355.01826 stall=0.3428 11.97s
+ndtvs 960/1000 QoE=-380.41137 stall=0.3570 11.97s
+ndtvs 961/1000 QoE=-359.94546 stall=0.3364 11.97s
+ndtvs 962/1000 QoE=-356.73158 stall=0.3340 11.96s
+ndtvs 963/1000 QoE=-320.77272 stall=0.3130 11.99s
+ndtvs 964/1000 QoE=-319.60629 stall=0.3065 11.96s
+ndtvs 965/1000 QoE=-342.52096 stall=0.3200 11.96s
+ndtvs 966/1000 QoE=-375.55749 stall=0.3413 11.94s
+ndtvs 967/1000 QoE=-331.53524 stall=0.3068 11.95s
+ndtvs 968/1000 QoE=-346.93662 stall=0.3399 11.97s
+ndtvs 969/1000 QoE=-401.75065 stall=0.3721 11.96s
+ndtvs 970/1000 QoE=-348.77312 stall=0.3192 11.96s
+ndtvs 971/1000 QoE=-338.20999 stall=0.3214 11.97s
+ndtvs 972/1000 QoE=-342.49835 stall=0.3249 11.98s
+ndtvs 973/1000 QoE=-323.25167 stall=0.3079 11.95s
+ndtvs 974/1000 QoE=-388.86156 stall=0.3571 11.94s
+ndtvs 975/1000 QoE=-342.57179 stall=0.3234 15.35s
+ndtvs 976/1000 QoE=-372.97100 stall=0.3475 11.97s
+ndtvs 977/1000 QoE=-372.94834 stall=0.3433 11.96s
+ndtvs 978/1000 QoE=-325.13190 stall=0.3205 11.97s
+ndtvs 979/1000 QoE=-361.04564 stall=0.3424 11.96s
+ndtvs 980/1000 QoE=-342.85062 stall=0.3233 11.99s
+ndtvs 981/1000 QoE=-345.58240 stall=0.3250 12.02s
+ndtvs 982/1000 QoE=-345.63781 stall=0.3208 11.96s
+ndtvs 983/1000 QoE=-355.24359 stall=0.3479 11.95s
+ndtvs 984/1000 QoE=-338.16138 stall=0.3085 11.95s
+ndtvs 985/1000 QoE=-354.51170 stall=0.3401 11.99s
+ndtvs 986/1000 QoE=-332.91275 stall=0.3099 11.98s
+ndtvs 987/1000 QoE=-350.06312 stall=0.3305 11.96s
+ndtvs 988/1000 QoE=-326.54836 stall=0.3050 11.98s
+ndtvs 989/1000 QoE=-314.77893 stall=0.3057 12.14s
+ndtvs 990/1000 QoE=-359.07438 stall=0.3281 11.98s
+ndtvs 991/1000 QoE=-344.15084 stall=0.3247 11.96s
+ndtvs 992/1000 QoE=-347.06904 stall=0.3247 11.94s
+ndtvs 993/1000 QoE=-348.65723 stall=0.3304 11.97s
+ndtvs 994/1000 QoE=-348.34540 stall=0.3329 11.98s
+ndtvs 995/1000 QoE=-368.35359 stall=0.3355 11.95s
+ndtvs 996/1000 QoE=-349.36113 stall=0.3275 11.97s
+ndtvs 997/1000 QoE=-378.48565 stall=0.3490 11.96s
+ndtvs 998/1000 QoE=-371.67106 stall=0.3459 11.99s
+ndtvs 999/1000 QoE=-359.31077 stall=0.3375 12.06s
+ndtvs 1000/1000 QoE=-369.30351 stall=0.3470 15.25s
+{
+  "valid": true,
+  "physics_checks_passed": 234930,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 234456,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 234470,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 234785,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 234399,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 235625,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 235786,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237610,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 236966,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 236224,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237170,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237330,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237210,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 238594,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237666,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237909,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239073,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 238239,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 238109,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237471,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 238493,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237503,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237585,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 237640,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 238903,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239141,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239070,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239452,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239255,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239536,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239318,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 238845,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239442,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239206,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239317,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239341,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239321,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239731,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 238929,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239459,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "physics_checks_passed": 239425,
+  "physics_checks_failed": {},
+  "errors": []
+}
+{
+  "valid": true,
+  "checkpoint_completed_episodes": 1000,
+  "traced_episodes_checked": 41
+}
