@@ -8,8 +8,8 @@
 #SBATCH --mem=29G
 #SBATCH --time=1-00:00:00
 #SBATCH --signal=B:USR1@1800
-#SBATCH --output=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/slurm_logs/%x-%j.out
-#SBATCH --error==/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/slurm_logs/%x-%j.err
+#SBATCH --output=slurm_logs/%x-%j.out
+#SBATCH --error=slurm_logs/%x-%j.err
 
 set -Eeuo pipefail
 cd -- "${SLURM_SUBMIT_DIR:?Submit from research/Lyapunov_uav}"
