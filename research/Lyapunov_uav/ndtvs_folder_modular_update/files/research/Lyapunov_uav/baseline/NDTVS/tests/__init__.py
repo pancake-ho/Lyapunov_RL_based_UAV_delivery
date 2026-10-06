@@ -1,1 +1,0 @@
-"""NDTVS tests components."""

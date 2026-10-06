@@ -1,1 +1,0 @@
-"""NDTVS evaluation components."""

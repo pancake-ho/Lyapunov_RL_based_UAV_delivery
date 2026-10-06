@@ -1,0 +1,15 @@
+usage: ndtvs_common.py [-h] --algorithm {ndtvs,hppo_rsu,proposed}
+                       [--config CONFIG] --out OUT [--device {cpu,cuda}]
+                       [--episodes EPISODES] [--seed SEED] [--resume]
+                       [--val-every VAL_EVERY] [--val-episodes VAL_EPISODES]
+                       [--trace-every TRACE_EVERY]
+                       [--walltime-seconds WALLTIME_SECONDS]
+                       [--reserve-seconds RESERVE_SECONDS]
+                       [--max-new-episodes MAX_NEW_EPISODES]
+                       [--checkpoint CHECKPOINT]
+                       [--frame-checkpoint FRAME_CHECKPOINT]
+                       [--slot-checkpoint SLOT_CHECKPOINT]
+                       [--scenario-seed SCENARIO_SEED] [--offset OFFSET]
+                       [--trace]
+                       {train,eval}
+ndtvs_common.py: error: unrecognized arguments: _seed2026_ep500
