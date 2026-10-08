@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/ndtvs_common.py", line 10, in <module>
+    raise SystemExit(main())
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/cli.py", line 49, in main
+    return run_train(a) if a.mode == "train" else run_eval(a)
+  File "/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/training/train.py", line 27, in run_train
+    raise ValueError("Training uses episode IDs starting at zero; use a source config with episode_offset=0")
+ValueError: Training uses episode IDs starting at zero; use a source config with episode_offset=0

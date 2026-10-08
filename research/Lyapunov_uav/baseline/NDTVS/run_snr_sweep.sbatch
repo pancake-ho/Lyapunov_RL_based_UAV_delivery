@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Submit from research/Lyapunov_uav; one sequential GPU process.
 #SBATCH --job-name=paper-snr-eval
-#SBATCH --partition=batch_eebme_ugrad
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -9,8 +8,8 @@
 #SBATCH --mem=29G
 #SBATCH --time=1-00:00:00
 #SBATCH --signal=B:USR1@1800
-#SBATCH --output=slurm_logs/%x-%j.out
-#SBATCH --error=slurm_logs/%x-%j.err
+#SBATCH --output=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/slurm_logs/%x-%j.out
+#SBATCH --error=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/slurm_logs/%x-%j.err
 
 set -Eeuo pipefail
 cd -- "${SLURM_SUBMIT_DIR:?Submit from research/Lyapunov_uav}"

@@ -1,98 +1,172 @@
-# SAC Baseline (Wu et al., IEEE IoT-J 2024) in the RSU + UAV Vehicular Video-Delivery Scenario
+# UAVRTV: common-environment SAC baseline
 
-Reference 논문 *"UAV-Assisted Real-Time Video Transmission for Vehicles: A Soft Actor–Critic DRL Approach"*의
-결정 구조(UAV trajectory + bandwidth allocation + SVC layer selection, SAC, reward = QoE − ςE)를
-**연구 시나리오(Lyapunov guide)에 고정된 환경** 위에 baseline으로 구현한 코드입니다.
+기준 브랜치: `exp/v-sweep`, `2cb80f90e900f71c31f10c0e5b5e54a9bbe670ac`.
+참고 논문: Dan Wu et al., *UAV-Assisted Real-Time Video Transmission for Vehicles:
+A Soft Actor–Critic DRL Approach*, IEEE IoT Journal 11(8), 2024.
 
-```
-sac_uav_baseline/
-├── args.py      # 모든 파라미터 (argparse)
-├── env.py       # 시나리오 환경 (RSU+UAV, frame/slot, playback queue, battery, hiring cost)
-├── sac.py       # SAC (Gaussian actor, twin soft-Q, auto temperature) — torch
-├── logger.py    # per-slot debug log (txt + jsonl), episodes.csv
-├── main.py      # train / eval loop
-└── requirements.txt
-```
+이 구현은 공통 RSU/UAV/buffer 시나리오에 맞춘 UAVRTV adaptation이다.
+원 논문의 SUMO 도로, 연속 UAV trajectory, bandwidth 최적화를 그대로 재현한
+실험이 아니다. SAC와 논문 형태의 QoE/energy 보상을 유지하며 사용자 요청으로
+hiring decision/cost를 추가했다. 기존 UAVRTV 모델은 환경/보상/action 차원이 달라
+새 코드에서 resume할 수 없다. 새 run에서 다시 학습해야 한다.
 
-## 1. 실행
+## 확정한 설계
+
+| 항목 | 구현 |
+|---|---|
+| 물리 환경 | `proposed/hppo/env.py`의 `P3HierarchicalEnv` 상속. transition 재구현 없음 |
+| 설정 | `proposed/outputs/hppo/hrl_resume_job145847/resolved_config.json`에서 공통 설정 읽기 |
+| mobility/channel | 같은 seed/episode/frame의 초기 위치, ring-road mobility, 전체 fading trace |
+| scheduling | 프레임 시작 현재 region 사용자 중 `(buffer, user ID)` 순서; RSU 우선, 다음 UAV |
+| RSU 전송 | 거리/평균 fading=1로 highest-feasible-quality, 그 품질에서 최대 admissible chunk 요청 |
+| 실제 전송 | 공통 actual fading에서 all-or-nothing 성공/실패. RSU가 실제 fading을 미리 읽지 않음 |
+| SAC 제어 | 프레임 hiring/feasible hovering point; 슬롯 UAV chunk/quality/discrete-power |
+| 자원 | 공통 fixed per-user bandwidth, 공통 total-power/battery projection |
+| UAV 이동 | 공통 이산 hovering point 및 control-preparation interval reachability |
+| 배터리 | 공통 relocation/hover/communication/자동 charging/reserve 제약 |
+| 평가 지표 | NDTVS의 공통 `ServiceLogger`: stall-time/count, PSNR quality, 서비스 범위, per-user 통계 |
+
+SAC는 한 actor와 twin online Q critics를 모든 region에 공유한다.
+원 코드의 `(256,256)`, lr=0.001, gamma=0.99, tau=0.005, alpha=0.2를 기본 유지한다.
+State에서 이미 비활성인 action 차원은 0으로 고정하며 그 차원은 entropy에서 제외한다.
+프레임 boundary의 잠재 UAV 사용자 차원은 실제 hiring 결정 전에 열려 있다.
+Gaussian latent action을 허용된 이산 품질/chunk/power/point로 대응시키는 adaptation이며
+정확한 categorical/discrete SAC 구현으로 주장하지 않는다.
+프레임 이후 hiring/point가 바뀌지 않는다. Proposed PPO나 DPP completion을 사용하지 않는다.
+
+## 보상
+
+각 region의 현재 slot 보상:
+
+`r = beta * sum_success(PSNR_k / 41.64)
+     - delta * sum_success(abs(bitrate_k - last_successful_bitrate))
+     - phi * sum_all_users(rebuffer_seconds)
+     - varsigma * actual_UAV_consumed_energy_J
+     - frame_first_slot * lambda_h * hiring_cost_per_frame * hired`
+
+- 논문 VI-A의 계수: beta=1, delta=1e-6 [/bps], phi=10 [/s], varsigma=0.01 [/J].
+- 공통 PSNR ladder: `(34.0,36.64,39.11,41.64)`.
+  품질 gain은 성공한 user-slot당 한 번이며 받은 chunk 수를 곱하지 않는다.
+  이는 원 논문의 PSNR normalization 형태를 공통 quality ladder에 적용한 것이다.
+- Bitrate는 `chunk_size_bits / chunk_playback_seconds`.
+  첫 성공 수신의 switch penalty는 0. 실패/무수신은 품질 gain/switch penalty가 0.
+- Rebuffer 초는 `(playback_chunks_per_slot - Q_before)^+ * chunk_playback_seconds`.
+  부분적인 부족도 실제 초로 계산한다. 원 논문의 download-delay 식을 그대로 재현한
+  것이 아니라 **adapted rebuffer-second penalty**이다.
+- Stall count는 공통 평가 지표로 별도 기록하며 학습 보상에는 들어가지 않는다.
+- 고용 비용은 공통 lambda_h/c_h, 프레임 첫 슬롯에서 한 번. V를 곱하지 않는다.
+- 에너지는 공통 실제 relocation+hover+communication의 합. relocation도 한 번만
+  포함하며 미고용 후 depot 복귀 에너지도 실제 소비된 만큼 포함한다.
+  charging으로 배터리에 추가된 에너지는 소비 에너지 penalty에 넣지 않는다.
+- Unscheduled user의 rebuffer도 포함한다.
+
+`paper_qoe_*`는 비교용 **공통 NDTVS QoE observer 지표**이다.
+UAVRTV 학습 보상은 `uavrtv_reward_*`, 고유 QoE 합은 `uavrtv_qoe_total`.
+공통 환경의 DPP 관련 열은 공통 진단값이며 SAC가 그 값을 학습하지 않는다.
+
+## 기능별 파일
+
+| 경로 | 담당 기능 |
+|---|---|
+| `config.py` | 실험·보상·학습·Slurm 설정 |
+| `common/settings.py` | 설정 검증, 저장된 공통 환경/source 검증 |
+| `common/checkpoint.py` | atomic checkpoint, source hash, policy digest |
+| `environment/shared.py` | 관측/action adapter, low-buffer scheduling, 평균 채널 RSU 규칙 |
+| `models/sac.py` | actor/twin Q/target/temperature, replay buffer |
+| `rewards/paper.py` | UAVRTV 보상 정의·항별 계산 |
+| `training/rollout.py` | 공통 transition 순서, 데이터 수집, shared metrics |
+| `training/engine.py` | 학습, validation, pause/resume, best 선택 |
+| `evaluation/preflight.py` | 학습 전 reward magnitude 비교 |
+| `evaluation/audit.py` | 보상 독립 재계산, 공통 physics verifier |
+| `evaluation/sweep.py` | frozen best, 동일 SNR offset/seed의 독립 평가 |
+| `plot/learning.py` | reward/validation/stall/quality/service/resource/component 그림 |
+| `submit.py`, `job.sbatch` | config 기반 Slurm 실행 |
+| `main.py` | 호환 entry point |
+| `args.py`, `env.py`, `sac.py`, `logger.py` | 옛 별도 구현을 제거한 얇은 import 경로 |
+
+## 적용 및 실행
+
+ZIP의 `baseline/UAVRTV/`를 `research/Lyapunov_uav/baseline/UAVRTV/`에 덮어쓴다.
+기존 run을 삭제할 필요는 없다. Proposed/NDTVS 파일은 교체하지 않는다.
+이후 `research/Lyapunov_uav`에서 실행한다. 기존 lab 환경을 사용한다.
 
 ```bash
-pip install -r requirements.txt
-
-# 환경/로그 sanity check (torch 불필요)
-python main.py --agent random --episodes 2 --frames_per_episode 5 --log_dir runs/rand
-
-# reference 설정으로 SAC 학습 (lr=1e-3, SAC가 UAV bandwidth 배분)
-python main.py --agent sac --episodes 300 --log_dir runs/sac --slot_log_every_ep 10
-
-# 시나리오 기본 radio 모델(fixed reserved RB) + 규칙 기반 hiring
-python main.py --bw_mode fixed --hire_mode threshold --log_dir runs/sac_fixedrb
-
-# 체크포인트 deterministic 평가
-python main.py --eval_only true --load_path runs/sac/sac.pt --episodes 5 --log_dir runs/eval
-
-python main.py -h   # 전체 파라미터 목록
+/data/surt321/anaconda3/envs/lab/bin/python baseline/UAVRTV/main.py inspect
+python baseline/UAVRTV/submit.py --mode preflight
 ```
 
-## 2. Reference 논문 → 연구 시나리오 mapping
+Preflight 결과는 `config.OUT/preflight/report.json`, 상세 항은 각 profile의
+`reward_components.csv`, trace와 독립 `audit.json`에 생긴다.
+profile은 `nohire`, `hired_max`, `random`이다. 모든 profile은 같은 시나리오를 사용한다.
+mean/p95/nonzero-p95/max와 dominance flag를 출력한다. flag는 진단이며 계수를
+자동 보정하거나 학습 결과로 간주하지 않는다. 현재 실제 환경의 항별 magnitude를
+이 로그로 먼저 확인한다. 1회 테스트가 모든 상태/학습 정책을 대표하지는 않는다.
+`analytic`은 실제 공통 설정에서 hover/move/hire/full-stall 항의 크기를 출력한다.
 
-| Reference (Wu et al.) | 이 코드 (연구 시나리오) |
-|---|---|
-| 단일 UAV, 다수 GMV | region(RSU)당 persistent UAV 1대. 모든 region이 **하나의 SAC policy를 공유**(parameter sharing), replay buffer 공유 |
-| state: UAV/GMV 위치·속도, bandwidth, 현재 layer | obs = UAV(위치, 속도, SoC, hired, slot-in-frame, 사용자 수) + N_max 개 user slot × [present, by_uav, by_rsu, 상대위치, 속도, Q/Qe, last_k, gain, last_stall] |
-| action: UAV velocity, bandwidth b_m, layer l_m | action = `[v_x, v_y, hire, bw_1..bw_Nmax, k_1..k_Nmax, l_1..l_Nmax]` ∈ [−1,1]. `hire`는 frame 첫 slot에서만 사용, bw는 UAV-scheduled user들 간 softmax, k → quality level, l → chunk 수(0..L_max) |
-| 매 slot 하나의 GOP 전송 | chunk 단위 전송. 실제 전송 chunk = min(l_req, ⌊CΔ/S_k⌋, buffer room). playback queue Q(t+1)=[Q−b]⁺+d |
-| time delay penalty φ·D | stall penalty φ·1{Q_n(t)<b} (rate 제약을 항상 만족시키므로 transmission delay = 0) |
-| bitrate switching δ·\|R_k−R_k'\| | 동일 (전송이 있는 slot에서 quality 변경 시) |
-| video quality β·PSNR/PSNR_max | β·Σ l·U_k (`--quality_reward per_chunk`) 또는 β·U_k·1{l>0} (`per_user`) |
-| ς·E_total (rotary-wing 모델 식 (3)) | 동일 propulsion 모델 + RF 에너지 Δ/η_PA·Σp, **physical battery E_u(t)** 추적 |
-| 없음 | hiring cost λ_H·c_H/T (hired slot마다), RSU(J_R명, fixed RB, rule 기반), 배터리 threshold/automatic return/charging |
-
-### 시나리오 고정 요소 (guide 문서 기준)
-* Frame r = T slots. Frame 시작: N_m(r) 고정, hiring 결정, association(RSU가 Q 낮은 순 J_R명, UAV가 다음 J_U명).
-  Frame 중 도착한 차량은 다음 frame까지 unserved.
-* RSU: `W_R/J_R`, `P_R/J_R` fixed reserved RB, 규칙 기반 (l,k) 결정 (`--rsu_rule maxq|maxchunks`). RSU 결정은 agent 외부.
-* UAV radio: `--bw_mode sac`(reference처럼 SAC가 bandwidth/power share 결정) 또는 `fixed`(W_U/J_U, P_U_max/J_U).
-* Battery: frame 시작 hiring feasibility `E ≥ E_th + T·P_prop,max·Δ`, 매 slot reserve 검사(위반 시 FORCED_RETURN),
-  미고용 시 depot(RSU 위치)에서 charging, depot 복귀 시 e_rel 차감.
-* Z_n = Qe − Q_n 은 로그/지표용으로 기록됩니다 (baseline reward에는 사용되지 않음).
-
-### Reference 대비 의도된 단순화 (필요 시 수정)
-* UAV trajectory는 reference처럼 **연속 velocity 제어** (discrete hovering point 아님). 비행 영역은 region ± `--flight_x_margin`.
-* 미고용→고용 시 depot에서 이륙, 고용→미고용 시 즉시 depot 복귀(e_rel 차감). Control-preparation interval τ^c는 명시적으로 모델링하지 않음.
-* 도로는 직선 corridor(양방향 2차로), `--hotspot_region`에서 속도 저하로 정체를 만듦. SUMO trace 연동은 `_spawn`/mobility 부분을 교체하면 됨.
-
-## 3. Debug log (매 time slot, 매 region)
-
-`--slot_log true`(기본)이면 `<log_dir>/slot_log.txt`, `slot_log.jsonl`에 기록됩니다.
-한 slot·region 블록 구조:
-
-```
-[ep 0 train | t=12 | region 0] UAV before: hired=1 pos=(194,-19) vel=(..) E=..J soc=.. | members=[..] rsu=[..] uav=[..] overflow=[..] (hired)
-  STATE  : veh21: x=.. y=.. v=.. Q=5 Z=45 lastk=0 by=uav slot=3 r_now=0 | ...        ← 이번 slot 시작 상태
-  ACTION : raw=[...]                                                                   ← SAC 원시 action
-  UAV    : vel_cmd=(..) -> vel=(..) |v|=.. pos=(..) P_prop=..W e_com=..J e_slot=..J    ← trajectory/energy 결정
-  UAV-TX : veh21 bw=0.84 W=4.21MHz p=1.69W d=202m snr=38dB C=53.7Mbps k=2 l_req=2 l_max=53 room=46 -> l=2 | ...
-  RSU-TX : veh6 d=169m C=26.2Mbps lmax/k=[52,26,13,6] room=50 -> k=4 l=4 | ...
-  NEXT   : veh0 Q 35->35 Z=15 d=1 k=2 stall=0 sw=3.0Mbps | ...                          ← queue/stall/switch 갱신
-  MOVED  : veh0@256(r0), ...                                                           ← mobility 후 위치/region
-  UAV after: hired=1 pos=(..) E=..J soc=..   [FORCED_RETURN]
-  EVENTS : ARRIVE vid=16 (unserved until next frame); DEPART vid=3; FORCED_RETURN: ...
-  REWARD : total=+x = quality a - switch b - stall c - energy d - hire e
+```bash
+python baseline/UAVRTV/submit.py --mode smoke
+python baseline/UAVRTV/submit.py --mode train --dry-run
+python baseline/UAVRTV/submit.py --mode train
 ```
 
-`slot_log.jsonl`은 같은 내용을 JSON 한 줄/레코드로 담고 있어 pandas로 바로 분석할 수 있습니다:
+smoke와 preflight가 끝난 뒤 train을 제출한다. smoke는 공통 물리 환경을 그대로
+유지하고 작은 네트워크로 2회 학습하는 소프트웨어 점검이다. 연구 결과로 쓰지 않는다.
+smoke 출력은 `OUT`과 같은 부모 폴더의 `<OUT 이름>_smoke/`에 저장한다.
+예: `runs/shared_sac_seed2026_smoke/`. 본 학습의 새 출력 폴더와 분리한다.
+train은 기본 500회, 고정 validation 20회마다 5개 scenario, 마지막 episode에서도 validation.
+설정은 `config.py`에서 바꾼다. export/echo는 필요 없다.
+로그: `baseline/UAVRTV/slurm_logs/uavrtv-shared-sac-<mode>-<jobid>.out/.err`.
 
-```python
-import pandas as pd, json
-rows = [json.loads(l) for l in open("runs/sac/slot_log.jsonl")]
-df = pd.json_normalize(rows)          # reward.total, uav_after.soc, ... 컬럼
+## 출력과 추가 학습
+
+`config.OUT` 아래:
+
+- `latest.pt`: 마지막 완료 에피소드의 모델/target/optimizer/temperature/replay/RNG/회차.
+- `best.pt`: 고정 validation의 mean UAVRTV reward가 가장 높은 모델. test로 선택하지 않는다.
+- `training.csv`, `validation.csv`, `status.json`, `runtime.json`, `model_size.json`.
+- `episodes/`, `validation/`: summary/per-user/reward-component, trace 선택 저장.
+- `plots/learning.png`, `plots/learning.pdf`: 정상 학습 종료 후 자동 생성.
+
+PAUSED(exit 75), 시간 예산, SIGTERM/SIGUSR1/SIGINT는 에피소드 경계에서 멈춘다.
+SIGKILL/scancel 강제 종료는 진행 중인 에피소드/validation을 잃을 수 있으나 마지막
+atomic episode commit에서 재개한다. 중단된 scheduled validation은 다음 학습 전에
+재수행한다. 실패 중 부분 적용된 SAC update를 새 checkpoint로 저장하지 않는다.
+기존 replay/optimizer를 버린 채 weights만 로드하는 재학습은 exact resume가 아니다.
+
+추가 학습은 `TRAIN_EPISODES`를 늘리고 같은 OUT/RESUME=True로 같은 train 명령을
+제출한다. 학습 계수/physics/SAC learning/validation/source를 바꾸면 새 OUT이 필요하다.
+`MAX_NEW_EPISODES`는 짧은 중단 점검용이다. 완료 또는 중단된 결과의 그림은:
+
+```bash
+/data/surt321/anaconda3/envs/lab/bin/python baseline/UAVRTV/main.py plot
 ```
 
-`episodes.csv`: episode별 return, stall_ratio, avg_chunk_utility, hire_rate, uav_energy_Wh, switch_events, SAC loss/alpha.
+smoke/장기 작업은 login node가 아니라 sbatch에서 실행한다. train 실행 중에는
+다른 train을 같은 OUT에 중복 제출하지 않는다.
 
-## 4. Calibration 메모
-* 기본 radio 값에서 RSU/UAV rate가 quality ladder 대비 여유가 큽니다(guide §10.5 지적). `--P_R --alpha_R --W_U --P_U_max --alpha_U --beta_*_dB`로 rate를,
-  `--J_R --J_U`로 동시 서비스 수(시나리오의 실제 bottleneck)를 조정하세요.
-* `--E_max_Wh`를 작게(예 2–5) 두면 episode 안에서 battery/charging cycle이 나타납니다.
-* reward 스케일: `--phi`(stall), `--varsigma`(에너지 $/J), `--c_H --lambda_H`(hiring)를 함께 조정.
+## Evaluation
+
+```bash
+python baseline/UAVRTV/submit.py --mode eval
+```
+
+`best.pt`를 `config.EVAL_OUT/inputs/`에 한 번 freeze한 뒤 SNR offset
+`(-10,-5,0,5,10)` × scenario seed `(2026,2027,2028)` × 30개 episode를 평가한다.
+조건/가중치는 학습 checkpoint에서 읽고, 비교 지표는 동일 ServiceLogger를 사용한다.
+각 SNR/seed 첫 episode는 full trace audit한다. `state.json`, `episodes.csv`,
+`means.csv`, `verification.json`, `episodes/*/per_user.csv`가 생긴다.
+pause 후 같은 명령으로 누락된 scenario만 진행한다. zero-delivery quality는
+undefined flag와 함께 기록하며 평균 quality에서 제외한다.
+validation quality 평균과 학습 그래프에서도 zero-delivery quality는 제외한다.
+UAVRTV는 기존 Proposed/NDTVS benchmark MODELS에 아직 등록하지 않는다.
+현재 실행 중인 그 evaluator는 수정하지 않는다. UAVRTV 학습 완료 후 공통 세 방법
+benchmark 연결과 그래프 합치는 작업을 진행할 수 있는 동일 seed/ID/fingerprint다.
+
+## 로컬 소프트웨어 검증
+
+```bash
+/data/surt321/anaconda3/envs/lab/bin/python -m unittest baseline.UAVRTV.tests.test_shared -v
+```
+
+이 테스트는 CPU에서 작은 별도 설정으로 실제 공통 environment를 실행한다.
+형식/물리 검증 목적이며 실제 145847 시나리오의 수렴/성능이나 GPU 검증을 대체하지 않는다.
