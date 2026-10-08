@@ -86,9 +86,9 @@ UAVRTV 학습 보상은 `uavrtv_reward_*`, 고유 QoE 합은 `uavrtv_qoe_total`.
 
 ## 적용 및 실행
 
-ZIP의 `baseline/UAVRTV/`를 `research/Lyapunov_uav/baseline/UAVRTV/`에 덮어쓴다.
+ZIP의 `baseline/UAVRTV/`를 `baseline/UAVRTV/`에 덮어쓴다.
 기존 run을 삭제할 필요는 없다. Proposed/NDTVS 파일은 교체하지 않는다.
-이후 `research/Lyapunov_uav`에서 실행한다. 기존 lab 환경을 사용한다.
+이후 `repository root`에서 실행한다. 기존 lab 환경을 사용한다.
 
 ```bash
 /data/surt321/anaconda3/envs/lab/bin/python baseline/UAVRTV/main.py inspect

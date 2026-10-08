@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 set -Eeuo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-/data/$USER/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed}"
+PROJECT_DIR="${PROJECT_DIR:-/data/$USER/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/proposed}"
 cd "$PROJECT_DIR"
 
 export P3_RUN_DIR="${P3_RUN_DIR:-$PWD/outputs/p3_ppo_seed2026_f400_e100_139723}"

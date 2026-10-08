@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-readonly PROJECT_DIR="${PROJECT_DIR:-/data/$USER/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed}"
+readonly PROJECT_DIR="${PROJECT_DIR:-/data/$USER/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/proposed}"
 readonly CONDA_SH="${CONDA_SH:-/data/$USER/anaconda3/etc/profile.d/conda.sh}"
 readonly CONDA_ENV="${CONDA_ENV:-lab}"
 readonly P3_RUN_DIR="${P3_RUN_DIR:-$PROJECT_DIR/outputs/p3_ppo_seed2026_f400_e100_139723}"

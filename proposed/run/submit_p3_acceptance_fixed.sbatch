@@ -12,7 +12,7 @@
 
 set -Eeuo pipefail
 
-PROJECT_DIR="/data/$USER/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/proposed"
+PROJECT_DIR="/data/$USER/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/proposed"
 CONDA_SH="/data/$USER/anaconda3/etc/profile.d/conda.sh"
 CONDA_ENV="lab"
 

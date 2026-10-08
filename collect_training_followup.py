@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect original/resumed run metadata without loading or changing checkpoints.
 
-Python standard library only. --root is research/Lyapunov_uav.
+Python standard library only. --root is the repository root.
 --extra may name a Proposed candidate-validation JSON/CSV or its directory.
 """
 import argparse

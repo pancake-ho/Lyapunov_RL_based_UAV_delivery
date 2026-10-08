@@ -56,7 +56,7 @@ trap on_exit EXIT
 
 if [[ ! -f "$PROJECT_DIR/config_p3.py" || ! -f "$PROJECT_DIR/run/p3_train_ppo.py" ]]; then
     echo "Invalid PROJECT_DIR: $PROJECT_DIR" >&2
-    echo "Submit this script from research/Lyapunov_uav/proposed or set PROJECT_DIR explicitly." >&2
+    echo "Submit this script from proposed or set PROJECT_DIR explicitly." >&2
     exit 2
 fi
 if [[ ! -f "$CONDA_SH" ]]; then
