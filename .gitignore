@@ -16,3 +16,7 @@ logs/
 Hier_RL/
 Paper/
 research/Based_Code/
+/baseline/NDTVS/runs/
+/baseline/UAVRTV/runs/
+/slurm_logs/
+/proposed_validation_124_200/

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Submit from research/Lyapunov_uav; one sequential GPU process.
-#SBATCH --job-name=compare-eval-v2
+# Submit from repository root; one sequential GPU process.
+#SBATCH --job-name=paper-snr-eval
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -8,12 +8,12 @@
 #SBATCH --mem=29G
 #SBATCH --time=1-00:00:00
 #SBATCH --signal=B:USR1@1800
-#SBATCH --output=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/slurm_logs/%x-%j.out
-#SBATCH --error=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/research/Lyapunov_uav/baseline/NDTVS/slurm_logs/%x-%j.err
+#SBATCH --output=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/baseline/NDTVS/slurm_logs/%x-%j.out
+#SBATCH --error=/data/surt321/repos/lab/uav_rsu/env/Lyapunov_RL_based_UAV_delivery/baseline/NDTVS/slurm_logs/%x-%j.err
 
 set -Eeuo pipefail
-cd -- "${SLURM_SUBMIT_DIR:?Submit from research/Lyapunov_uav}"
-test -f baseline/NDTVS/compare_eval_v2.py
+cd -- "${SLURM_SUBMIT_DIR:?Submit from repository root}"
+test -f baseline/NDTVS/snr_sweep_eval.py
 set +u
 source "${NDT_CONDA_SH:-/data/$USER/anaconda3/etc/profile.d/conda.sh}"
 conda activate "${NDT_CONDA_ENV:-lab}"
@@ -36,7 +36,7 @@ forward_stop() {
     if [[ -n "$child" ]]; then kill -USR1 "$child" 2>/dev/null || true; fi
 }
 trap forward_stop USR1 TERM INT
-python -u baseline/NDTVS/compare_eval_v2.py "$@" &
+python -u baseline/NDTVS/snr_sweep_eval.py "$@" &
 child=$!
 if [[ "$pending" -eq 1 ]]; then kill -USR1 "$child" 2>/dev/null || true; fi
 set +e
